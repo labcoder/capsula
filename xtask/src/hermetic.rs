@@ -49,6 +49,8 @@ const END_LIMIT: Duration = Duration::from_secs(10);
 /// What the shell and the brain each log at start, so an image names its role.
 pub(crate) const SHELL_ROLE: &str = "shell started";
 pub(crate) const BRAIN_ROLE: &str = "brain started";
+/// What only a brain built with `kumochi-brain/gate-fixture` logs at start.
+pub(crate) const GATE_FIXTURE: &str = "gate fixture engine active";
 
 /// Refuses the image `exe` unless it carries the Gate edition, which only a Gate-identity build
 /// logs, `role` and both folder override names, and not the release identity. An image from before the override would follow

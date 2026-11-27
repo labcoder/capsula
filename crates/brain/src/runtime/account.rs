@@ -534,7 +534,7 @@ impl Accounts {
                     return Availability::Ready(Ready {
                         connection: ConnectionTag(connection),
                         models: self.models().unwrap_or_default().to_vec(),
-                        #[cfg(any(test, debug_assertions))]
+                        #[cfg(any(test, debug_assertions, feature = "gate-fixture"))]
                         trusted_draw: false,
                         images: self
                             .catalog

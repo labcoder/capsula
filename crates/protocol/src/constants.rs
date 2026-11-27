@@ -149,6 +149,10 @@ pub const EDITION: &str = if cfg!(feature = "gate-identity") {
     "kumochi-edition-other"
 };
 
+/// Whether this is a Gate-identity build. A gate-only feature of another crate asserts it at
+/// compile time, so it never builds into a Dev or release product.
+pub const GATE_IDENTITY: bool = cfg!(feature = "gate-identity");
+
 /// The log folder, in the [`DATA_DIR`] folder in the local application data root.
 pub const LOGS_DIR: &str = "logs";
 
