@@ -16,25 +16,39 @@ fn set_anchor(anchor: Option<PathBuf>) {
     ANCHOR.with(|held| *held.borrow_mut() = anchor);
 }
 
-/// A fresh anchor folder under the commissioned fixture parent, removed through the adapter.
-struct Anchor(PathBuf);
+/// A fresh anchor folder under the commissioned fixture parent, removed through the adapter once it
+/// still is the folder this made.
+struct Anchor(PathBuf, (u64, u64));
+
+fn identity(metadata: &fs::Metadata) -> (u64, u64) {
+    (metadata.dev(), metadata.ino())
+}
 
 impl Anchor {
     fn new() -> Self {
-        let parent = std::env::var_os("STORAGE_ADMISSION_FIXTURE_PARENT")
-            .expect("an explicitly commissioned fixture parent");
+        let parent = PathBuf::from(
+            std::env::var_os("STORAGE_ADMISSION_FIXTURE_PARENT")
+                .expect("an explicitly commissioned fixture parent"),
+        );
+        let held = kumochi_storage::hold_chain(&parent).expect("admit the fixture parent's chain");
+        let held = held.last().expect("the held fixture parent");
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("a clock after 1970")
             .as_nanos();
-        let path =
-            PathBuf::from(parent).join(format!("brain-models-{}-{nanos}", std::process::id()));
+        let path = parent.join(format!("brain-models-{}-{nanos}", std::process::id()));
+        assert_eq!(
+            identity(&fs::symlink_metadata(&parent).expect("the fixture parent")),
+            identity(&held.metadata().expect("the held parent")),
+            "the parent's name still gives the admitted folder"
+        );
         fs::DirBuilder::new()
             .mode(0o700)
             .create(&path)
             .expect("an exclusive anchor; never adopt a collision");
+        let made = identity(&fs::symlink_metadata(&path).expect("the new anchor"));
         set_anchor(Some(path.clone()));
-        Self(path)
+        Self(path, made)
     }
 
     fn part(&self) -> PathBuf {
@@ -42,6 +56,11 @@ impl Anchor {
     }
 
     fn finish(self) {
+        assert_eq!(
+            identity(&fs::symlink_metadata(&self.0).expect("the anchor")),
+            self.1,
+            "still the anchor this made"
+        );
         assert_eq!(remove_model_tree(&self.0.join("models")), Ok(()));
         fs::remove_dir(&self.0).expect("the emptied anchor");
         set_anchor(None);
@@ -84,6 +103,31 @@ fn chmod(arguments: &[&str], path: &Path) {
         .status()
         .expect("chmod runs");
     assert!(status.success(), "chmod {arguments:?}");
+}
+
+/// A DENY entry on `folder`, cleared again on drop, so a failing test leaves a removable fixture.
+struct Acl(PathBuf);
+
+impl Acl {
+    fn deny(folder: &Path) -> Self {
+        chmod(&["+a", "everyone deny delete"], folder);
+        Self(folder.to_owned())
+    }
+}
+
+impl Drop for Acl {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "this test runs chmod as an owned child under the shared spawn lock"
+    )]
+    fn drop(&mut self) {
+        let _spawning = crate::platform::spawn_lock();
+        let _cleared = Command::new("/bin/chmod")
+            .arg("-N")
+            .arg(&self.0)
+            .env_clear()
+            .status();
+    }
 }
 
 #[test]
@@ -133,7 +177,15 @@ fn native_the_read_side_hashes_the_bytes_its_admitted_chain_holds() {
     assert_eq!(keep_model_final(&held, &target), Ok(()));
 
     let other = install(&part, "other.onnx", b"replacement");
+    let spare = part.join("spare.onnx");
+    fs::rename(&target, &spare).expect("the held final moves to a spare name");
     fs::rename(&other, &target).expect("a same-user swap of the final's name");
+    for name in [&spare, &target] {
+        assert_eq!(
+            fs::symlink_metadata(name).expect("one name each").nlink(),
+            1
+        );
+    }
     assert_eq!(
         digest(&held),
         expected(b"weights"),
@@ -149,6 +201,7 @@ fn native_the_read_side_hashes_the_bytes_its_admitted_chain_holds() {
     );
     drop((held, swapped));
 
+    fs::remove_file(&spare).expect("drop the spare");
     fs::remove_file(&target).expect("drop the final");
     fs::write(&target, b"unsealed").expect("a writable final");
     fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).expect("0600");
@@ -178,7 +231,7 @@ fn native_an_acl_on_a_model_folder_refuses_the_chain_and_its_files() {
     let part = anchor.part();
     let target = install(&part, "model.onnx", b"weights");
     for folder in [part.clone(), anchor.0.join("models")] {
-        chmod(&["+a", "everyone deny delete"], &folder);
+        let acl = Acl::deny(&folder);
         assert_eq!(
             hold_model_chain(&part).err(),
             Some(Untrusted::Unsafe),
@@ -195,7 +248,7 @@ fn native_an_acl_on_a_model_folder_refuses_the_chain_and_its_files() {
             "removal refuses without deleting: {folder:?}"
         );
         assert_eq!(fs::read(&target).expect("kept"), b"weights");
-        chmod(&["-N"], &folder);
+        drop(acl);
     }
     assert_eq!(
         model_file(&target).map(|file| digest(&file)),

@@ -532,11 +532,14 @@ somewhere else:
   saw, and flushes the folder above. A part already gone counts as removed.
 
 Three shared calls exist for this contract. `hold_model_chain` holds the folders the model calls
-work in: `hold_chain` on Windows, and the anchored private chain on the Mac. `keep_model_final`
-keeps a final that hashed valid: it does nothing on Windows, where the held handle guards the name;
-on the Mac it re-checks the seal and the name and redoes the folder and file flush. `discard_model`
-takes the held part folder and the entry's path, so the Mac can delete by name only after checking
-identity. On the Mac a hard-linked final refuses, and `free_space` reads `statfs`.
+work in: `hold_chain` on Windows, and once the Mac forwards are activated, the anchored private
+chain there. `keep_model_final` keeps a final that hashed valid: it does nothing on Windows, where
+the held handle guards the name; the Mac forward re-checks the seal and the name and redoes the
+folder and file flush. `discard_model` takes the held part folder and the entry's path, so the Mac
+can delete by name only after checking identity. `model_free_space` measures the held models
+folder: by path on Windows, through the descriptor (`fstatfs`) on the Mac. Once activated, the
+Mac refuses a hard-linked final. Resuming there unseals a sealed `.part` left by a stopped
+publish during the installer's preflight, before later files are checked; its bytes don't change.
 
 This assumes one cooperating writer. A rename by this user between two calls isn't detected,
 and neither is a replacement made between a removal's last look and its unlink.

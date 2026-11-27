@@ -293,7 +293,7 @@ impl Downloader {
             missing += model.bytes - if length <= model.bytes { length } else { 0 };
             pending.push((model, path, partial, final_file, existing));
         }
-        self.check_space(missing)?;
+        self.check_space(missing, &root_creation)?;
         let mut ready = Vec::new();
         for (model, path, partial, final_file, existing) in pending {
             check_cancel(cancel)?;
@@ -332,17 +332,19 @@ impl Downloader {
         Ok(())
     }
 
-    fn check_space(&self, missing: u64) -> Result<(), DownloadError> {
+    fn check_space(&self, missing: u64, held: &File) -> Result<(), DownloadError> {
         let needed = missing + missing.div_ceil(10);
+        let measure =
+            || crate::platform::model_free_space(&self.models, held).map_err(|_| DownloadError::Io);
         let available = {
             #[cfg(test)]
             if let Some(space) = self.space {
                 space
             } else {
-                crate::platform::free_space(&self.models).map_err(|_| DownloadError::Io)?
+                measure()?
             }
             #[cfg(not(test))]
-            crate::platform::free_space(&self.models).map_err(|_| DownloadError::Io)?
+            measure()?
         };
         if available < needed {
             return Err(DownloadError::NoSpace { needed });

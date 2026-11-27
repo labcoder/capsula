@@ -313,7 +313,7 @@ pub(crate) const DATA_ROOT_ERROR: &str = "macOS Application Support folder is un
 #[cfg(not(any(windows, target_os = "macos")))]
 pub use fs::{config_dir, data_dir};
 #[cfg(not(windows))]
-pub use fs::{free_space, links_unsupported, replace_file};
+pub use fs::{free_space, links_unsupported, model_free_space, replace_file};
 #[cfg(unix)]
 pub use unix::product_folder;
 #[cfg(target_os = "macos")]
@@ -438,8 +438,9 @@ pub(crate) use windows::{
 #[cfg(windows)]
 pub use windows::{
     PipeServer, client_image, client_process, config_dir, create_owner_only, data_dir,
-    detached_command, free_space, has_exited, links_unsupported, process_image, product_folder,
-    quiet_failures, replace_file, server_image, session_id, session_lock_path, trust_roots,
+    detached_command, free_space, has_exited, links_unsupported, model_free_space, process_image,
+    product_folder, quiet_failures, replace_file, server_image, session_id, session_lock_path,
+    trust_roots,
 };
 #[cfg(all(test, windows))]
 pub(crate) use windows::{SpawnEdge, observe_next_spawn};
