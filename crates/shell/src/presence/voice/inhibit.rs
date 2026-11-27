@@ -552,7 +552,6 @@ impl Presence {
                 }
             }
         }
-        self.hear_deferred_talk_back(cx);
         self.refresh_speech(cx);
     }
 

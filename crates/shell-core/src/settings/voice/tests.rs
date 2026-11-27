@@ -689,15 +689,14 @@ fn only_the_current_pair_shows_deferred_saved_talk_back_without_settling_prefere
 }
 
 #[test]
-fn a_deferred_default_offers_on_until_one_send_is_accepted() {
+fn a_deferred_default_saves_on_unless_the_pair_is_busy() {
     use crate::link::output::Denied;
-    use kumochi_protocol::message::ControlToBrain;
 
     let mut state = connected();
-    let mut sent = Vec::new();
+    let mut sends = 0;
     let mut offer = |state: &mut Settings, result: Result<(), Denied>| {
         state.send_deferred_talk_back(|| {
-            sent.push(ControlToBrain::Settings(SettingsOp::SetTalkBack(true)));
+            sends += 1;
             result
         })
     };
@@ -705,48 +704,20 @@ fn a_deferred_default_offers_on_until_one_send_is_accepted() {
     let mut on = saved(SttUnload::Kept);
     on.talk_back = true;
     assert!(state.receive(Some(7), 7, on, Update::SpokenRepliesDefaulted));
-    assert!(
-        !offer(&mut state, Ok(())),
-        "spoken replies aren't ready yet"
-    );
-    assert!(state.receive_voice(
-        Some(7),
-        7,
-        VoiceView {
-            speech_input: PartState::Ready,
-            spoken_replies: PartState::Ready,
-        }
-    ));
     assert!(!offer(&mut state, Err(Denied::Busy)));
-    assert!(
-        state.talk_back_restart_needed(),
-        "a busy pair is offered again"
-    );
+    assert!(!state.talk_back_pending(), "a busy pair saves nothing");
     assert_eq!(
         state.talk_back_send_error(),
         None,
-        "a busy offer shows nothing"
+        "a busy pair shows no error"
     );
     assert!(offer(&mut state, Ok(())));
     assert!(state.talk_back_pending());
     assert!(
-        state.talk_back_restart_needed(),
-        "the note stays until the replacement pair opens"
-    );
-    assert!(!offer(&mut state, Ok(())), "one accepted offer per pair");
-    let mut kept = saved(SttUnload::Kept);
-    kept.talk_back = true;
-    assert!(state.receive(Some(7), 7, kept, Update::Answer));
-    assert!(!state.talk_back_pending());
-    assert!(
         !offer(&mut state, Ok(())),
-        "an answer that kept this pair doesn't offer again"
+        "a save in flight isn't sent twice"
     );
-    assert_eq!(
-        sent.len(),
-        2,
-        "the refused offer and the accepted one were each sent once"
-    );
+    assert_eq!(sends, 2, "the refused save and the accepted one");
 }
 
 #[test]

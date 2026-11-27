@@ -59,7 +59,6 @@ pub(in crate::link) struct Queued {
     talk_back: Option<bool>,
     default_notice: DefaultNotice,
     switching: Option<TalkBackSwitch>,
-    switch_by: Option<Instant>,
     show_screen: Option<bool>,
     wake: Arc<OnceLock<Thread>>,
     stopped: RunId,
@@ -121,7 +120,6 @@ impl Queued {
             talk_back: None,
             default_notice: DefaultNotice::Unseen,
             switching: None,
-            switch_by: None,
             show_screen: None,
             wake,
             stopped: RunId(0),
@@ -429,7 +427,6 @@ impl OutputOwner {
             return Err(Denied::Lost);
         }
         owner.switching = Some(TalkBackSwitch::Pending(on));
-        owner.switch_by = Some(Instant::now() + HANDSHAKE_TIMEOUT);
         Ok(())
     }
 
@@ -505,7 +502,6 @@ impl OutputOwner {
         }
         if answer {
             owner.switching = None;
-            owner.switch_by = None;
         }
         owner.show_screen = Some(settings.show_screen);
         if owner.talk_back.is_some() {
@@ -545,7 +541,6 @@ impl OutputOwner {
             return false;
         }
         owner.ack = None;
-        self.wake();
         true
     }
 
@@ -862,14 +857,6 @@ impl OutputOwner {
                 .run_end_by
                 .get_or_insert(Instant::now() + HANDSHAKE_TIMEOUT);
         }
-    }
-
-    /// A Talk-back save whose answer never came, so admission stays closed; the caller tears the
-    /// pair down.
-    pub(in crate::link) fn switch_overdue(&self, session: u64, now: Instant) -> bool {
-        self.lock().queue(session).is_some_and(|(_, owner)| {
-            owner.switching.is_some() && owner.switch_by.is_some_and(|by| now >= by)
-        })
     }
 
     /// A fenced narrated run whose `RunEnd` never came; the caller tears the pair down.

@@ -179,8 +179,6 @@ pub struct Settings {
     stt_send_failed: bool,
     talk_back_send_error: Option<Text>,
     talk_back_deferred: bool,
-    /// This pair already took the On save its deferred default needs.
-    talk_back_offered: bool,
     /// Each catalog on offer, in picker order.
     models: Vec<(ConnectionKind, Vec<ModelInfo>)>,
     /// The newest default model sent and not yet answered.
@@ -695,7 +693,6 @@ impl Settings {
         self.stt_send_failed = false;
         self.talk_back_send_error = None;
         self.talk_back_deferred = false;
-        self.talk_back_offered = false;
         self.pending.clear();
         self.models.clear();
         self.model_queued = None;

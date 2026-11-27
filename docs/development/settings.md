@@ -159,18 +159,15 @@ Hiding or removing the exact active reply's thread ends its control side, but th
 waits for the reply's data end and any speaking quiet receipt before allowing a change.
 When successful Spoken Replies setup supplies the default (On for an unset preference),
 a queued pair opened Off gets the tagged `SpokenRepliesDefaulted` snapshot instead of an
-ordinary Settings change. While the Voice tab shows the install note, presence offers that pair
-an explicit On save after every link batch and every output-owner change, so whichever edge
-frees the pair last (a terminal `RunState`, `RunEnd`, a thread deletion, a refused turn, a hold
-status, the microphone's retirement, its accepted stop or the audio registration's
-acknowledgement) is followed by another offer. A busy pair refuses it
-silently. The pair takes at most one accepted offer; its answer reconnects the pair in the
-saved mode, so the next reply speaks without a restart. Until then the pair speaks no new
-replies and the note stays, while the setting shows what was saved. The save closes turn and
-hold admission until its answer, as any Talk-back save does. A Talk-back save still unanswered
-5 s after it was offered ends the pair at the next `Ping`, so a stalled write can't keep input
-closed; the replacement reads the saved value. That snapshot doesn't answer any
-queued preference write. An explicit Off still saves normally and clears the difference without re-registering.
+ordinary Settings change. On that snapshot, which arrives as the user's Install finishes,
+presence saves On again through the link switch the **Speak answers aloud** checkbox uses,
+skipping only the checkbox's already-on check. An idle pair takes it, and its answer reconnects
+the pair in the saved mode, so the next reply speaks without a restart. A busy pair refuses it
+without an error and nothing retries: it speaks no new replies until its next ordinary
+connection, while the setting shows what was saved and the Voice tab asks for a restart. An
+accepted save closes turn and hold admission until its answer, as any Talk-back save does.
+That snapshot doesn't answer any queued preference write. An explicit Off still saves normally
+and clears the difference without re-registering.
 The registered mode still governs hold release. An explicit On racing the default only
 reconnects if its own write succeeds; an On snapshot after a refusal reflects the default.
 If the pair drops with an Off save pending, its replacement waits for that save before

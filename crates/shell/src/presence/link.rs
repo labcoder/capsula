@@ -112,6 +112,16 @@ impl Presence {
                 } => self.voice_status(generation, gesture, status, cx),
                 LinkEvent::SpokenRepliesDefaulted { generation, view } => {
                     self.settings_changed(generation, view, Update::SpokenRepliesDefaulted, cx);
+                    // The user's Install just finished: an idle pair takes the checkbox's switch.
+                    if let Some(session) = &self.session {
+                        let link = &self.link;
+                        self.settings.update(cx, |state, cx| {
+                            if state.send_deferred_talk_back(|| link.send_talk_back(session, true))
+                            {
+                                cx.notify();
+                            }
+                        });
+                    }
                 }
                 LinkEvent::Voice { generation, view } => {
                     let ready = matches!(view.speech_input, PartState::Ready);
@@ -324,7 +334,6 @@ impl Presence {
         }
         events.attribute(events.capacity() * size_of::<LinkEvent>());
         self.follow_voice_input(cx);
-        self.hear_deferred_talk_back(cx);
         if applied {
             self.screen_changed(cx);
             self.runs_changed(cx)
@@ -639,21 +648,6 @@ impl Presence {
         if let Err(error) = self.onboarding_changed(cx) {
             tracing::error!(%error, "can't show onboarding");
         }
-    }
-
-    /// Replaces a pair that opened Off before Spoken Replies set the default, once it's idle.
-    /// Every link batch and output change offers it again, so whichever edge frees the pair last
-    /// is enough.
-    pub(super) fn hear_deferred_talk_back(&mut self, cx: &mut Context<'_, Self>) {
-        let Some(session) = &self.session else {
-            return;
-        };
-        let link = &self.link;
-        self.settings.update(cx, |state, cx| {
-            if state.send_deferred_talk_back(|| link.send_talk_back(session, true)) {
-                cx.notify();
-            }
-        });
     }
 
     /// Shows the brain's error in both panels and on the connected dock.

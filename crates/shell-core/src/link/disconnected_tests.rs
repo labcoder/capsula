@@ -261,27 +261,3 @@ fn workerless_handle_cannot_send_or_end_another_sessions_control() {
         assert!(!session.open());
     }
 }
-
-#[test]
-fn an_accepted_microphone_stop_wakes_the_output_owner() {
-    use kumochi_protocol::message::GestureId;
-
-    let shared = super::Shared::default();
-    let changes = shared.output.changes();
-    while changes.try_recv().is_ok() {}
-    *shared.microphone_stop.lock().unwrap() = Some(super::microphone::Stop::Received {
-        gesture: GestureId(1),
-        sent_on: Some(7),
-    });
-    shared.accept_microphone_stop(7, GestureId(2));
-    assert!(
-        changes.try_recv().is_err(),
-        "another gesture's receipt changes nothing"
-    );
-    shared.accept_microphone_stop(7, GestureId(1));
-    assert!(shared.microphone_stop.lock().unwrap().is_none());
-    assert!(
-        changes.try_recv().is_ok(),
-        "the last receipt a no-run hold owes wakes whoever waits for an idle pair"
-    );
-}

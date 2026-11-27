@@ -480,7 +480,7 @@ fn an_idle_pair_opened_off_asks_to_speak_once_spoken_replies_set_the_default(
     apply(vec![ready()], cx);
     assert!(
         std::iter::from_fn(|| controls.try_recv().ok()).all(|sent| sent != talk_back),
-        "one offer per pair"
+        "only the default's snapshot asks"
     );
 }
 

@@ -174,17 +174,13 @@ impl Settings {
         true
     }
 
-    /// Saves On again, once, for a pair that opened Off before Spoken Replies set the default, so
-    /// its answer reconnects in the saved mode. A busy pair sends nothing and is offered again.
+    /// Saves On again, as the checkbox would, for a pair that opened Off before Spoken Replies set
+    /// the default, so its answer reconnects in the saved mode. A busy pair sends nothing and
+    /// shows no error; the restart note stays.
     pub fn send_deferred_talk_back(&mut self, send: impl FnOnce() -> Result<(), Denied>) -> bool {
-        if self.talk_back_offered
-            || !self.talk_back_restart_needed()
-            || self.talk_back_pending()
-            || send().is_err()
-        {
+        if !self.talk_back_deferred || self.talk_back_pending() || send().is_err() {
             return false;
         }
-        self.talk_back_offered = true;
         self.pending.push_back(Pending {
             slot: Slot::TalkBack(true),
             failed: false,
