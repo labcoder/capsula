@@ -8,7 +8,7 @@ use super::{Coordinator, Effect, StoreOp};
 use crate::store::TitleSource;
 
 impl Coordinator {
-    pub(super) fn thread_op(&self, op: ThreadOp, effects: &mut Vec<Effect>) {
+    pub(super) fn thread_op(&mut self, op: ThreadOp, effects: &mut Vec<Effect>) {
         let op = match op {
             ThreadOp::Rename { thread, .. } if thread == self.main_thread => {
                 tracing::warn!(thread = thread.0, "a rename of the main thread was refused");
@@ -33,7 +33,19 @@ impl Coordinator {
                 ));
                 return;
             }
-            ThreadOp::SetModel { thread, choice } => StoreOp::SetModel { thread, choice },
+            ThreadOp::SetModel { thread, choice } => {
+                let op = StoreOp::SetModel { thread, choice };
+                let held = self
+                    .ending
+                    .iter_mut()
+                    .chain(self.current.as_mut())
+                    .rfind(|run| run.thread == thread && run.begin.is_some());
+                if let Some(run) = held {
+                    run.after_begin.push(op);
+                    return;
+                }
+                op
+            }
         };
         effects.push(Effect::Store(op));
     }

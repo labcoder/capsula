@@ -64,40 +64,33 @@ async fn a_local_default_model_is_refused_and_nothing_is_written() {
     brain.close().await;
 }
 
-/// A saved local default marks each turn the runtime stores, so the store refuses a turn in a
-/// thread with no choice of its own.
+/// A saved local default, malformed or not, sets the coordinator's intake flag from the start,
+/// and a committed cloud default clears it.
 #[tokio::test]
-async fn a_saved_local_default_marks_each_turn_for_the_store() {
-    use crate::coordinator::StoreOp;
-    use kumochi_protocol::message::{Effort, ModelChoice, ModelSlug, RunId, SettingsOp, ThreadId};
-    let scratch = Scratch::new("dormant-local-seed");
+async fn the_coordinator_hears_the_saved_local_intent_at_start_and_after_each_commit() {
+    use crate::runtime::settings::{Change, Queued};
+    use kumochi_protocol::message::{Effort, ModelChoice, ModelSlug, SettingsOp};
+    let scratch = Scratch::new("dormant-local-intent");
+    std::fs::create_dir_all(scratch.dir()).expect("folder");
+    std::fs::write(
+        scratch.dir().join(kumochi_protocol::constants::CONFIG_FILE),
+        "[default_model]\nconnection = \"LocalChat\"\n",
+    )
+    .expect("written");
     let mut brain = test_support::brain(&scratch, "");
-    let pending = brain
-        .config
-        .stage(SettingsOp::SetDefaultModel(ModelChoice {
-            connection: ConnectionKind::LocalChat,
+    assert!(brain.coordinator.local_default, "read at start");
+    brain.settings_ops.push_back(Queued {
+        change: Change::User(SettingsOp::SetDefaultModel(ModelChoice {
+            connection: ConnectionKind::ChatGpt,
             model: ModelSlug::new("gpt-6-luna").expect("model"),
             effort: Effort::Low,
-        }))
-        .expect("staged");
-    pending.write().expect("written");
-    brain.config.commit(pending);
-    let mut op = StoreOp::BeginTurn {
-        thread: ThreadId(2),
-        title: None,
-        run: RunId(1),
-        text: "words".into(),
-        screen: None,
-        local_default: false,
-    };
-    brain.seed_op(&mut op);
-    assert!(matches!(
-        op,
-        StoreOp::BeginTurn {
-            local_default: true,
-            ..
-        }
-    ));
+        })),
+        epoch: brain.epoch + 1,
+    });
+    brain.pump_settings(None).expect("pumped");
+    let written = crate::runtime::settings::written(&mut brain.config_write).await;
+    brain.settings_done(written, None).expect("committed");
+    assert!(!brain.coordinator.local_default, "cleared by the commit");
     brain.close().await;
 }
 

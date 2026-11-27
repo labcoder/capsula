@@ -646,6 +646,9 @@ struct Run {
     turn_stored: bool,
     /// The turn's write, held until every older run's outcome is queued.
     begin: Option<StoreOp>,
+    /// Its thread's model writes that came while `begin` was held, sent right after it, so the
+    /// store judges the turn by the route it had when typed.
+    after_begin: Vec<StoreOp>,
     answering: bool,
     /// Streamed text not yet stored; it's stored with the next step or the outcome.
     unstored: ReplyText,
@@ -810,6 +813,8 @@ pub struct Coordinator {
     drawing_held: Vec<(ThreadId, DataToShell, Option<RunId>)>,
     /// Whether `draw` may mark the user's screen: [`crate::drawing::SCREEN_MARKS`].
     screen_marks: crate::drawing::ScreenMarks,
+    /// Whether the saved default names the local server; each turn keeps what it was at intake.
+    pub(crate) local_default: bool,
     /// `[tuning.runs]`, set once at start.
     pub(crate) tuning: crate::config::tuning::RunTuning,
     /// Never deleted or renamed.
@@ -908,6 +913,7 @@ impl Coordinator {
             drawing_held: Vec::new(),
             drawing_reply: None,
             screen_marks: crate::drawing::SCREEN_MARKS,
+            local_default: false,
             tuning: crate::config::tuning::RunTuning::default(),
             main_thread,
             last_thread,
@@ -1399,6 +1405,10 @@ impl Coordinator {
         )
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one literal holds a run's whole starting state"
+    )]
     fn start_turn(
         &mut self,
         origin: kumochi_protocol::message::RunOrigin,
@@ -1427,7 +1437,7 @@ impl Coordinator {
             run,
             text,
             screen: screen.as_ref().map(crate::context::Screen::held),
-            local_default: false,
+            local_default: self.local_default,
         };
         if let Some(hold) = &mut hold {
             hold.defaults.origin = admission::origin(thread, self.main_thread);
@@ -1451,6 +1461,7 @@ impl Coordinator {
             thread,
             turn_stored: false,
             begin: Some(begin),
+            after_begin: Vec::new(),
             answering: false,
             unstored: ReplyText::default(),
             progress: TurnProgress::default(),
@@ -1525,6 +1536,7 @@ impl Coordinator {
                 && let Some(begin) = run.begin.take()
             {
                 effects.push(Effect::Store(begin));
+                effects.extend(run.after_begin.drain(..).map(Effect::Store));
             }
         }
     }

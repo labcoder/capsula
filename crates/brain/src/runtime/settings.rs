@@ -540,6 +540,7 @@ impl Brain {
                     })
                 ) && self.config.implicit_talk_back();
                 self.config.commit(pending);
+                self.coordinator.local_default = self.config.local_intent();
                 defaulted = first_spoken_install
                     && self.config.view().talk_back
                     && link

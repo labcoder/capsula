@@ -463,6 +463,7 @@ impl Brain {
         let drawing_scenes = store.drawing_scenes();
         let mut coordinator = Coordinator::new(main_thread, last_thread, last_run, scenes);
         coordinator.tuning = config.run_tuning();
+        coordinator.local_default = config.local_intent();
         coordinator.configure_drawing(config.drawing_tuning());
         let recovery_clears = coordinator.restore_drawings(drawing_scenes);
         // The accounts go back with the error, so their owner can still close them.
@@ -1658,15 +1659,6 @@ impl Brain {
     fn seed_op(&self, op: &mut StoreOp) {
         match op {
             StoreOp::BuildContext(build) => self.seed(build),
-            StoreOp::BeginTurn { local_default, .. } => {
-                *local_default = matches!(
-                    self.config.default_choice(),
-                    crate::store::choice::StoredChoice::Valid {
-                        connection: ConnectionKind::LocalChat,
-                        ..
-                    }
-                );
-            }
             StoreOp::ReadJob(read) => {
                 read.snapshot = Some(self.snapshot(read.origin));
                 read.compact_at = self.compact_at;
