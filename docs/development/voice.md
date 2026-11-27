@@ -309,8 +309,9 @@ flowchart LR
 ### A spoken run
 
 Only a registered queued pair can play a reply. The brain admits speech when its voice is
-`Ready` and Talk-back is on. A Legacy session never registers output, so its text and steps
-run without audio.
+`Ready` and Talk-back is on. Kumochi's shell never announces output on a Legacy session, so
+its text and steps run without audio. The brain still installs a Legacy `AudioOutput` for wire
+compatibility ([ipc.md](ipc.md)).
 
 ```mermaid
 sequenceDiagram

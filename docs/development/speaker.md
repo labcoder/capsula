@@ -69,7 +69,8 @@ route whose tail never arrived counts as quiet once the backend confirms its str
 since that stream can't play anything more. A
 reroute replaces the stream instead of assuming that old endpoint timing still applies.
 An xrun rechecks refill readiness on every tick, even without new ingress.
-An authoritative RunState for a typed reply or a speaking Hold starts this worker on a queued pair.
+An authoritative RunState for a typed reply or a speaking Hold binds that run on a queued pair. With
+Talk-back on it also starts this worker; with Talk-back off it starts none.
 
 The offline tests that require a positive heard prefix open the fake route before the
 worker admits PCM: the first run for Plain, and each run in the two-reply Presence
@@ -158,8 +159,8 @@ launcher prepares `Plain`.
 
 Each link has one output owner. A Legacy connection gets a fresh no-output epoch before
 Connected, so an old capture claim cannot match a replacement session. A queued pair can
-lend the capture inhibit only after its exact logical output is registered, with Show
-Screen confirmed off and no pending setting change. With Talk-back on, the pair must be
+lend the capture inhibit only after its exact logical output is registered, with its Show
+Screen value known (on or off) and no pending setting change. With Talk-back on, the pair must be
 Plain, with no typed turn reserved, no draining predecessor, and the previous run's
 `SpeechStopped` accepted by the control queue. While the inhibit is held, no typed turn
 can reserve the pair. Registration cannot prove that an earlier route or microphone retired.

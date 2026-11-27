@@ -1025,9 +1025,9 @@ records only their operation and length.
 | Shell to brain | control | `SpeechProgress` | `run`, `segment`, `sample`, `t_qpc` |
 | Shell to brain | control | `SegmentPlayed` | `run`, `segment`, `samples` |
 | Shell to brain | control | `SpeechStopped` | `run`, optional `cursor` (`Cursor { segment, sample }`) |
-| Shell to brain | control | `SpeechRetired` (internal queued output) | `run`, logical `output`, `segment`, cumulative `retired`, `heard`, `final_segment` |
+| Shell to brain | control | `SpeechRetired` (queued output) | `run`, logical `output`, `segment`, cumulative `retired`, `heard`, `final_segment` |
 | Shell to brain | control | `AudioOutput` | `rate`, `generation` |
-| Shell to brain | control | `QueuedAudioOutput` (internal) | `rate`, `generation`, narration (`Plain` or `Conducted`); selects retirement receipts before a run is admitted |
+| Shell to brain | control | `QueuedAudioOutput` | `rate`, `generation`, narration (`Plain` or `Conducted`); selects retirement receipts before a run is admitted |
 | Shell to brain | control | `SpeechDecision` (dormant) | `run`, logical `output`, `segment`, Allow or Discard |
 | Brain to shell | control | `SpeechDecisionTaken` (dormant) | the same run, output and segment, after consumption or terminal |
 | Shell to brain | control | `AudioOutputUnavailable` | `generation` |
@@ -1052,8 +1052,8 @@ records only their operation and length.
 - **Progress.** `SpeechProgress` goes out at most every 250 ms. `SpeechStopped` confirms that
   output for the run is quiet; `cursor` is `None` when nothing of it played.
 - **Out of bounds.** A `MicPcm` or an `AudioOutput` rate out of bounds ends the connection as
-  broken. A Legacy connection announces no audio output; unexpected speech PCM is
-  wiped, credited and dropped. On a registered queued pair the worker handles PCM and revoke
+  broken. Kumochi's shell announces no audio output on a Legacy connection, and it wipes,
+  credits and drops unexpected speech PCM there. On a registered queued pair the worker handles PCM and revoke
   ([speaker.md](speaker.md)).
 
 ## GitHub and issue wire contract
