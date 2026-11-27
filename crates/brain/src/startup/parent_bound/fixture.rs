@@ -19,6 +19,7 @@ use super::{
 };
 #[cfg(test)]
 use crate::connections::error::VaultError;
+use crate::connections::model::budget::Budget;
 use crate::engines::fixture::Fixture;
 use crate::fixture_support::{Scratch, held_accounts_until};
 #[cfg(test)]
@@ -117,6 +118,11 @@ impl<'a> Scripted<'a> {
 }
 
 impl Prerequisites for Scripted<'_> {
+    /// The fixtures open a fake vault, so there's no Keychain to check.
+    fn preflight(&mut self, _: &mut dyn FnMut() -> bool) -> Result<(), ParentBoundError> {
+        Ok(())
+    }
+
     fn ready(&self) -> Result<(), NotReady> {
         self.lose_at(LoseAt::Ready);
         Ok(())
@@ -147,7 +153,7 @@ impl Prerequisites for Scripted<'_> {
         )));
         // A token custody has no lock to lend, so its profile is a lock on the scratch store.
         let opened = match custody.lend() {
-            Some(profile) => open_state_held(profile, replay, acquired),
+            Some(profile) => open_state_held(profile, replay, Budget::default(), acquired),
             None => OpenedState::load_marking(
                 &self.scratch.db(),
                 || Some(self.scratch.dir().to_owned()),

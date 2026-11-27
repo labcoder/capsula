@@ -93,6 +93,18 @@ fn direct_logging_refuses_before_creating_an_appender() {
 
 #[test]
 fn native_executable_modes_refuse_without_touching_app_data() {
+    use kumochi_protocol::constants::ProductIdentity;
+
+    // Only the macOS first-light Dev build is admitted, and it gets as far as its missing
+    // descriptors 3 and 4, and no further; Gate, Release and every other build are unsupported.
+    let bare = if std::env::consts::OS == "macos"
+        && cfg!(feature = "first-light")
+        && ProductIdentity::ACTIVE == ProductIdentity::DEV
+    {
+        76
+    } else {
+        69
+    };
     let dir = scratch::dir("unsupported-entry");
     for (args, code) in [
         (&[][..], 69),
@@ -104,7 +116,7 @@ fn native_executable_modes_refuse_without_touching_app_data() {
         (&[MARKS_CHECK_ARG], 69),
         (&[DRAW_CHECK_ARG], 69),
         (&[CATALOG_PROVENANCE_ARG], 69),
-        (&[PARENT_BOUND], 69),
+        (&[PARENT_BOUND], bare),
         (&[PARENT_BOUND, ""], 64),
         (&[PARENT_BOUND, SCREEN_WORKER], 64),
     ] {
