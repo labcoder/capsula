@@ -239,7 +239,7 @@ fn provider_body_bound_and_outermost_formatters_are_content_free() {
             crate::engines::Finish::Failed(crate::engines::EngineFailure::Anthropic(error))
         ),
     ] {
-        assert!(!formatted.contains(marker), "provider text is redacted");
+        crate::test_support::assert_no_preview(&formatted, marker);
         assert!(
             !formatted.contains(byte_marker.trim_matches(['[', ']'])),
             "provider bytes are redacted"

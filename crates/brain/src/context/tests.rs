@@ -343,8 +343,7 @@ fn the_drawing_line_is_the_supplied_digest_never_the_store_s_drawings() {
         .expect("request");
     assert_eq!(drawing_line(&built), line);
     let diagnostic = format!("{built:?} {:?}", built.request);
-    assert!(!diagnostic.contains("private_header_marker"));
-    assert!(!diagnostic.contains(&format!("{:?}", b"private_header_marker")));
+    crate::test_support::assert_no_preview(&diagnostic, "private_header_marker");
 }
 
 #[test]
@@ -411,8 +410,7 @@ fn the_drawing_line_counts_outer_escaping_before_the_request_bound() {
         "{room:?}"
     );
     let diagnostic = format!("{built:?} {:?}", built.request);
-    assert!(!diagnostic.contains("PRIVATE_HEADER_"));
-    assert!(!diagnostic.contains(&format!("{:?}", marker.as_bytes())));
+    crate::test_support::assert_no_preview(&diagnostic, &marker);
 }
 
 #[test]

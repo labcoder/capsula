@@ -257,6 +257,5 @@ fn lifecycle_replayed_content_is_redacted_at_the_outer_reply() {
     let request = &built.result.as_ref().unwrap().request;
     assert!(request.input.iter().any(|item| matches!(item, crate::context::InputItem::FunctionOutput { output, .. } if output.contains("private-replay-marker"))));
     let diagnostic = format!("{:?}", crate::coordinator::Input::ContextBuilt(built));
-    assert!(!diagnostic.contains("private-replay-marker"));
-    assert!(!diagnostic.contains(&format!("{:?}", b"private-replay-marker")));
+    crate::test_support::assert_no_preview(&diagnostic, "private-replay-marker");
 }

@@ -1238,7 +1238,7 @@ async fn outer_debug_errors_and_tap_omit_text_and_byte_sentinels() {
     let scratch = Scratch::new("hold-redaction");
     let mut brain = test_support::brain(&scratch, "");
     recording(&mut brain);
-    let marker = "held-content-sentinel";
+    let marker = "zqx-held-content";
     let samples = marker.bytes().map(i16::from).collect::<Vec<_>>();
     let message = DataToBrain::MicPcm(MicPcm {
         gesture: KEY.gesture,
@@ -1269,19 +1269,18 @@ async fn outer_debug_errors_and_tap_omit_text_and_byte_sentinels() {
         HoldFailure::InvalidAudio,
         crate::voice::stt::SttBusy
     );
-    assert!(!text.contains(marker));
-    assert!(!text.contains(&format!("{samples:?}")));
+    crate::test_support::assert_no_preview(&text, marker);
     let bytes = std::fs::read(path).unwrap();
     assert!(
         !bytes
-            .windows(marker.len())
-            .any(|window| window == marker.as_bytes())
+            .windows(3)
+            .any(|window| window == &marker.as_bytes()[..3])
     );
     let pcm = samples
         .iter()
         .flat_map(|sample| sample.to_le_bytes())
         .collect::<Vec<_>>();
-    assert!(!bytes.windows(pcm.len()).any(|window| window == pcm));
+    assert!(!bytes.windows(3).any(|window| window == &pcm[..3]));
     brain.holds.lost();
     brain.close().await;
 }
@@ -1954,9 +1953,10 @@ fn a_hold_dropped_with_a_live_screen_part_fails_in_tests() {
 
 #[test]
 fn a_screen_hold_prints_no_image_bytes() {
+    const MARKER: &str = "zqx-hold-screen-marker";
     let scratch = Scratch::new("hold-screen-debug");
     let mut brain = test_support::brain(&scratch, "");
-    let marker = b"KUMOCHI-HOLD-SCREEN-MARKER";
+    let marker = MARKER.as_bytes();
     let part = || ScreenPart::Ready(crate::screen::ScreenContext::fixture(marker));
     screen_hold(&mut brain, KEY, part());
     let screen = crate::context::Screen::Image(
@@ -1969,8 +1969,7 @@ fn a_screen_hold_prints_no_image_bytes() {
         format!("{screen:?}"),
     ];
     for text in texts {
-        assert!(!text.contains("KUMOCHI-HOLD-SCREEN-MARKER"), "{text}");
-        assert!(!text.contains(&format!("{marker:?}")[1..20]), "{text}");
+        crate::test_support::assert_no_preview(&text, MARKER);
     }
     brain.holds.lost();
 }

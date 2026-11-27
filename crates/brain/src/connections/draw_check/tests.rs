@@ -140,6 +140,6 @@ fn a_refused_or_truncated_call_prints_no_model_text() {
         let (text, drawn) = line(1, "water-cycle", 10, Ok(()), &reply, 5);
         assert!(!drawn, "{text}");
         assert!(text.contains(" draw=refused error="), "{text}");
-        assert!(!text.contains(marker), "{text}");
+        crate::test_support::assert_no_preview(&text, marker);
     }
 }

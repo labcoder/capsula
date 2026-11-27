@@ -3504,7 +3504,7 @@ fn debug_and_display_never_carry_drawing_content() {
         end.error.as_ref().expect("an error").to_string(),
     ];
     for text in printed {
-        assert!(!text.contains(SECRET), "leaked: {text}");
+        crate::test_support::assert_no_preview(&text, SECRET);
     }
     assert!(
         end.tool_text().contains(SECRET),

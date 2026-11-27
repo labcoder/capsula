@@ -65,7 +65,7 @@ fn issue_pages_expose_only_titles_and_reject_oversized_stored_metadata() {
     };
     assert_eq!(events[0].kind, PageEventKind::Issue { draft: draft.draft });
     assert_eq!(events[0].text, "visible title");
-    assert!(!format!("{events:?}").contains("private body marker"));
+    crate::test_support::assert_no_preview(&format!("{events:?}"), "private body marker");
     store.conn.execute("INSERT INTO events(thread,kind,text,body,created_ms) VALUES (?1,'action','title',?2,1)", params![bounded_id(owner.0), format!("{{\"draft\":1}}{}", " ".repeat(100_000))]).unwrap();
     assert!(matches!(
         store.pages().events_page(owner, None, 10),
@@ -904,7 +904,7 @@ fn oversized_unicode_event_is_cut_to_the_full_frame_budget_and_can_continue() {
     let mut reply = events(&store, thread, None);
     let debug = format!("{reply:?}");
     let marker_bytes = format!("{:?}", marker.as_bytes());
-    assert!(!debug.contains(marker));
+    crate::test_support::assert_no_preview(&debug, marker);
     assert!(!debug.contains(&marker_bytes[1..marker_bytes.len() - 1]));
     let DataToShell::Page {
         request,

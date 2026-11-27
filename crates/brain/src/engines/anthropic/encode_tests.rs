@@ -1131,7 +1131,7 @@ fn built_refused_and_replied_carriers_print_no_content() {
     );
     let debug = format!("{debug} {continued:?}");
     assert!(continued.is_ok());
-    assert!(!debug.contains(marker), "text leaked: {debug}");
+    crate::test_support::assert_no_preview(&debug, marker);
     assert!(
         !debug.contains(&format!("{:?}", marker.as_bytes())),
         "bytes leaked: {debug}"

@@ -2001,7 +2001,7 @@ fn a_snapshots_debug_shows_no_model_or_effort_text() {
         version: V,
     };
     let text = format!("{snapshot:?}");
-    assert!(!text.contains(marker), "{text}");
+    crate::test_support::assert_no_preview(&text, marker);
     let bytes = format!("{:?}", marker.as_bytes());
     assert!(!text.contains(bytes.trim_matches(['[', ']'])), "{text}");
     assert_eq!(

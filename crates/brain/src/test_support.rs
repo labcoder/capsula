@@ -231,6 +231,32 @@ impl Write for Captured {
 /// A label no log line, tap record or error may carry.
 pub(crate) const SENTINEL: &str = "zqxsentinellabel";
 
+#[track_caller]
+pub(crate) fn assert_no_preview(shown: &str, private: &str) {
+    let prefix = private
+        .as_bytes()
+        .get(..3)
+        .expect("private fixture has at least three bytes");
+    assert!(
+        !shown
+            .as_bytes()
+            .windows(3)
+            .any(|bytes| bytes.eq_ignore_ascii_case(prefix)),
+        "diagnostic contains a private text prefix"
+    );
+    for bytes in [
+        prefix,
+        &prefix.to_ascii_lowercase(),
+        &prefix.to_ascii_uppercase(),
+    ] {
+        let list = format!("{bytes:?}");
+        assert!(
+            !shown.contains(list.trim_matches(['[', ']'])),
+            "diagnostic contains a private byte-list prefix"
+        );
+    }
+}
+
 /// One folder entry as a test witness sees it, without following a link.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Entry {

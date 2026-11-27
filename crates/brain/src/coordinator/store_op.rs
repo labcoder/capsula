@@ -138,8 +138,7 @@ fn unspoken_chat_debug_redacts_text_and_bytes() {
             },
         ]
     );
-    assert!(!printed.contains(MARKER));
-    assert!(!printed.contains(&format!("{:?}", MARKER.as_bytes())));
+    crate::test_support::assert_no_preview(&printed, MARKER);
 }
 
 use super::Input;

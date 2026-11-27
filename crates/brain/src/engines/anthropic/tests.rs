@@ -686,7 +686,7 @@ fn opaque_limit_and_debug_redaction_cover_the_outer_carriers() {
             signature: marker
         }
     );
-    assert!(!debug.contains(marker), "text leaked: {debug}");
+    crate::test_support::assert_no_preview(&debug, marker);
     assert!(
         !debug.contains(&format!("{:?}", marker.as_bytes())),
         "bytes leaked: {debug}"

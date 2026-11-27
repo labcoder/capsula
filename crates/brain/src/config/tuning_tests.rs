@@ -104,7 +104,8 @@ fn logs_name_owned_keys_and_only_count_unknown_ones() {
     assert!(logs.contains("key=\"listing_s\""), "{logs}");
     assert!(logs.contains("key=\"filing_requests_count\""), "{logs}");
     assert!(logs.contains("unknown=1"), "{logs}");
-    assert!(!logs.contains("SENTINEL"), "{logs}");
+    crate::test_support::assert_no_preview(&logs, "ghp_");
+    crate::test_support::assert_no_preview(&logs, "SENTINEL");
 }
 
 #[test]

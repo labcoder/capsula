@@ -472,7 +472,7 @@ fn formatting_an_access_answer_or_ask_never_prints_the_bearer() {
     let access: Access = Ok(bearer());
     let shown = format!("{access:?}");
     let byte_list = format!("{:?}", BEARER.as_bytes());
-    assert!(!shown.contains(BEARER), "the bearer leaked");
+    crate::test_support::assert_no_preview(&shown, BEARER);
     assert!(
         !shown.contains(byte_list.trim_matches(['[', ']'])),
         "the bearer's bytes leaked"

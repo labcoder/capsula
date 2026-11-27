@@ -844,10 +844,7 @@ async fn cancelling_create_or_either_match_page_drops_its_request_future() {
 }
 
 fn assert_redacted(text: &str) {
-    assert!(!text.contains(SENTINEL));
-    let bytes = format!("{:?}", SENTINEL.as_bytes());
-    assert!(!text.contains(&bytes));
-    assert!(!text.contains(bytes.trim_start_matches('[').trim_end_matches(']')));
+    crate::test_support::assert_no_preview(text, SENTINEL);
 }
 
 #[tokio::test]

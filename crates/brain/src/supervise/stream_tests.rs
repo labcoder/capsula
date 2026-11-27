@@ -367,7 +367,7 @@ fn a_streams_debug_shows_no_reply() {
         .expect("room");
     let printed = format!("{stream:?}");
     let bytes = format!("{:?}", marker.as_bytes());
-    assert!(!printed.contains(marker));
+    crate::test_support::assert_no_preview(&printed, marker);
     assert!(!printed.contains(bytes.trim_matches(['[', ']'])));
     assert_eq!(
         printed,

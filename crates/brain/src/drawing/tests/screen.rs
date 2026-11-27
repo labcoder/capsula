@@ -877,7 +877,7 @@ fn a_mixed_or_forbidden_screen_call_is_stored_with_no_records() {
         let text = String::from_utf8(stored.bytes().to_vec()).expect("UTF-8");
         for marker in ["917.375", "2731"] {
             let listed = format!("{:?}", marker.as_bytes());
-            assert!(!text.contains(marker), "{text}");
+            crate::test_support::assert_no_preview(&text, marker);
             assert!(!text.contains(listed.trim_matches(['[', ']'])), "{text}");
         }
     }

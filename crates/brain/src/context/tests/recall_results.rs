@@ -90,7 +90,7 @@ fn native_results_dereference_live_sources_without_retaining_their_text() {
         serde_json::from_str::<Value>(output).unwrap()["quoted_history"][1],
         json!({"task":b.0,"note":REMOVED})
     );
-    assert!(!format!("{after:?}").contains("private-sentinel"));
+    crate::test_support::assert_no_preview(&format!("{after:?}"), "private-sentinel");
     let retained_output = output.clone();
     let mut reopened = Store::open(&world.scratch.db()).unwrap();
     reopened.recover().unwrap();

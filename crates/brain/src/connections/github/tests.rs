@@ -273,7 +273,7 @@ fn outermost_carriers_redact_credentials_content_form_names_and_request_id() {
             fields: vec![(SENTINEL, Secret::new(Zeroizing::new(SENTINEL.to_owned())))],
         };
         let text = format!("{request:?}");
-        assert!(!text.contains(SENTINEL));
+        crate::test_support::assert_no_preview(&text, SENTINEL);
         assert!(!text.contains(&byte_list));
         assert!(!text.contains(byte_list.trim_start_matches('[').trim_end_matches(']')));
     }
@@ -299,7 +299,7 @@ fn outermost_carriers_redact_credentials_content_form_names_and_request_id() {
             fields: vec![(SENTINEL, Secret::new(Zeroizing::new(SENTINEL.to_owned())))],
         };
         let text = format!("{request:?}");
-        assert!(!text.contains(SENTINEL));
+        crate::test_support::assert_no_preview(&text, SENTINEL);
         assert!(!text.contains(&byte_list));
     }
     let response = Response {
@@ -309,7 +309,7 @@ fn outermost_carriers_redact_credentials_content_form_names_and_request_id() {
         body: Secret::new(Zeroizing::new(SENTINEL.as_bytes().to_vec())),
     };
     let text = format!("{response:?}");
-    assert!(!text.contains(SENTINEL));
+    crate::test_support::assert_no_preview(&text, SENTINEL);
     assert!(!text.contains(&byte_list));
     assert!(!text.contains(byte_list.trim_start_matches('[').trim_end_matches(']')));
     for text in [
@@ -320,7 +320,7 @@ fn outermost_carriers_redact_credentials_content_form_names_and_request_id() {
             DeviceCodeValue::new(Zeroizing::new(SENTINEL.to_owned())).unwrap()
         ),
     ] {
-        assert!(!text.contains(SENTINEL));
+        crate::test_support::assert_no_preview(&text, SENTINEL);
         assert!(!text.contains(&byte_list));
     }
 }

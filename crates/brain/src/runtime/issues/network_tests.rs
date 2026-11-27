@@ -612,14 +612,7 @@ async fn prepared_and_failure_debug_never_expose_user_or_remote_content() {
     ])
     .unwrap();
     let debug = format!("{:?}", Ok::<_, Failure>(prepared));
-    let bytes = format!("{:?}", SENTINEL.as_bytes());
-    for marker in [
-        SENTINEL,
-        bytes.as_str(),
-        bytes.trim_start_matches('[').trim_end_matches(']'),
-    ] {
-        assert!(!debug.contains(marker));
-    }
+    crate::test_support::assert_no_preview(&debug, SENTINEL);
     assert_eq!(
         format!("{INCONCLUSIVE:?}"),
         "Failure { reason: PreflightFailed, unauthorized: false }"

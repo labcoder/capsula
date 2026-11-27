@@ -213,7 +213,7 @@ fn json_is_checked_then_sent_as_written_up_to_the_bound() {
             MessagesBody::from_json(Zeroizing::new(written.clone())).expect("supported envelope");
         assert_eq!(body.bytes(), written.as_slice());
         let formatted = format!("{body:?}");
-        assert!(!formatted.contains(marker), "request text is redacted");
+        crate::test_support::assert_no_preview(&formatted, marker);
         let bytes = format!("{:?}", marker.as_bytes());
         assert!(
             !formatted.contains(bytes.trim_matches(['[', ']'])),

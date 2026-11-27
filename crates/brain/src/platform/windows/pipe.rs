@@ -440,7 +440,7 @@ mod tests {
             let error = check_user_only(sddl, ME).unwrap_err();
             assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
             assert_eq!(error.to_string(), message);
-            assert!(!format!("{error:?}").contains(ME));
+            crate::test_support::assert_no_preview(&format!("{error:?}"), ME);
         }
     }
     #[tokio::test]

@@ -701,7 +701,7 @@ fn outer_commit_call_debug_redacts_draft_content_as_text_and_byte_lists() {
     call.output = ToolOutput::Text(SENTINEL.to_owned());
     let debug = format!("{:?}", Ok::<_, StoreError>(call));
     let byte_list = format!("{:?}", SENTINEL.as_bytes());
-    assert!(!debug.contains(SENTINEL));
+    crate::test_support::assert_no_preview(&debug, SENTINEL);
     assert!(!debug.contains(&byte_list));
     assert!(!debug.contains(byte_list.trim_start_matches('[').trim_end_matches(']')));
 }

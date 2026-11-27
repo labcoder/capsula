@@ -107,12 +107,10 @@ async fn a_tasks_rename_and_model_reach_the_list_and_kumos_rename_changes_nothin
         logs.contains("a rename of the main thread was refused"),
         "{logs}"
     );
-    assert!(!logs.contains(SENTINEL), "{logs}");
+    crate::test_support::assert_no_preview(&logs, SENTINEL);
     let recorded = std::fs::read(&recording).expect("tap read");
     assert!(
-        !recorded
-            .windows(SENTINEL.len())
-            .any(|w| w == SENTINEL.as_bytes()),
+        !recorded.windows(3).any(|w| w == &SENTINEL.as_bytes()[..3]),
         "the title was recorded"
     );
     let mut dumped = Vec::new();

@@ -268,7 +268,7 @@ async fn a_brains_debug_never_shows_its_profile_lock() {
     let brain = brain_under(&scratch, profile);
     let printed = format!("{brain:?}");
     let bytes = format!("{:?}", SENTINEL.as_bytes());
-    assert!(!printed.contains(SENTINEL), "the lock's path was printed");
+    crate::test_support::assert_no_preview(&printed, SENTINEL);
     assert!(
         !printed.contains(bytes.trim_matches(['[', ']'])),
         "the lock's path was printed as bytes"

@@ -18,7 +18,7 @@ fn an_unopened_vault_refuses_each_github_operation_without_exposing_the_cause() 
     for why in [
         VaultError::Busy,
         AuthorityError::NewerSchema.into(),
-        VaultError::Lock(std::io::Error::other("foreign-error-sentinel")),
+        VaultError::Lock(std::io::Error::other("zqx-error-sentinel")),
     ] {
         let mut why = Some(why);
         let mut worker: Worker<FakeStore> = Worker::new(
@@ -45,7 +45,7 @@ fn an_unopened_vault_refuses_each_github_operation_without_exposing_the_cause() 
                 "token":"ghu_fake_marker", "refresh":"ghr_fake_marker",
                 "expires_at_s":SystemClock.unix_seconds().unwrap() + 28_800,
                 "refresh_expires_at_s":SystemClock.unix_seconds().unwrap() + 15_897_600,
-                "refresh_sent":false, "login":"sentinel", "id":7
+                "refresh_sent":false, "login":"wzp-sentinel", "id":7
             }))
             .unwrap(),
         ));
@@ -60,11 +60,10 @@ fn an_unopened_vault_refuses_each_github_operation_without_exposing_the_cause() 
         for marker in [
             "ghu_fake_marker",
             "ghr_fake_marker",
-            "sentinel",
-            "foreign-error-sentinel",
+            "wzp-sentinel",
+            "zqx-error-sentinel",
         ] {
-            assert!(!debug.contains(marker));
-            assert!(!debug.contains(&format!("{:?}", marker.as_bytes())));
+            crate::test_support::assert_no_preview(&debug, marker);
         }
         let Work::GitHub { job, .. } = work else {
             unreachable!()
@@ -240,6 +239,10 @@ impl ObservedStore {
     }
 
     pub(crate) fn seed(&self, scratch: &Scratch) {
+        self.seed_account(scratch, checked_account());
+    }
+
+    fn seed_account(&self, scratch: &Scratch, account: Account) {
         let mut vault = Vault::with_service(
             self.store.clone(),
             "github-owner-test",
@@ -250,7 +253,7 @@ impl ObservedStore {
             vault.github(GitHubJob::Save {
                 stamp: Stamp { generation: 0 },
                 fence: Arc::new(AtomicU64::new(0)),
-                account: checked_account(),
+                account,
             }),
             Reply::Saved { saved: true, .. }
         ));
@@ -326,6 +329,14 @@ fn checked_account() -> Account {
         },
         refresh_sent: false,
     }
+}
+
+const PRIVATE_LOGIN: &str = "jkv-sentinel";
+
+fn private_account() -> Account {
+    let mut account = checked_account();
+    account.user.login = GitHubLogin::new(PRIVATE_LOGIN).unwrap();
+    account
 }
 
 pub(crate) fn drive(accounts: &mut Accounts, input: GitHubInput) -> Vec<ControlToShell> {
@@ -549,7 +560,7 @@ async fn empty_and_cleanup_loads_publish_exact_views_but_offline_errors_are_not_
 async fn a_real_saved_account_stops_at_owned_stamped_verification_without_http_or_authority() {
     let scratch = Scratch::new("github-suspended-user");
     let store = ObservedStore::default();
-    store.seed(&scratch);
+    store.seed_account(&scratch, private_account());
     let calls = Arc::new(AtomicUsize::new(0));
     let count = Arc::clone(&calls);
     let mut net = crate::test_support::net();
@@ -590,13 +601,12 @@ async fn a_real_saved_account_stops_at_owned_stamped_verification_without_http_o
         session: Some(1),
         reply: Reply::Loaded {
             stamp: Stamp { generation: 0 },
-            result: Ok(Some(checked_account())),
+            result: Ok(Some(private_account())),
         },
     };
     let debug = format!("{accounts:?} {:?} {event:?}", accounts.github.suspended());
-    for marker in ["ghu_owner_sentinel", "ghr_owner_sentinel", "owner-sentinel"] {
-        assert!(!debug.contains(marker));
-        assert!(!debug.contains(&format!("{:?}", marker.as_bytes())));
+    for marker in ["ghu_owner_sentinel", "ghr_owner_sentinel", PRIVATE_LOGIN] {
+        crate::test_support::assert_no_preview(&debug, marker);
     }
     accounts.github.enable_verification();
     assert!(!accounts.github.verifying());
@@ -851,7 +861,7 @@ impl Http for UserHttp {
         if let Some(held) = held {
             held.await.unwrap();
         }
-        assert!(!self.panic, "foreign-panic-sentinel");
+        assert!(!self.panic, "rvq-panic-sentinel");
         self.reply.lock().unwrap().take().expect("one user request")
     }
 }
@@ -877,13 +887,12 @@ fn assert_private_verification(event: &VerificationEvent, accounts: &Accounts) {
     for marker in [
         "ghu_owner_sentinel",
         "ghr_owner_sentinel",
-        "owner-sentinel",
-        "fresh-user-sentinel",
-        "private-provider-sentinel",
-        "foreign-panic-sentinel",
+        PRIVATE_LOGIN,
+        "mxj-user-sentinel",
+        "pqv-provider-sentinel",
+        "rvq-panic-sentinel",
     ] {
-        assert!(!debug.contains(marker));
-        assert!(!debug.contains(&format!("{:?}", marker.as_bytes())));
+        crate::test_support::assert_no_preview(&debug, marker);
     }
 }
 
@@ -892,8 +901,17 @@ pub(crate) fn verification_accounts(
     factory: HttpFactory,
     origin: Option<u64>,
 ) -> (Accounts, ObservedStore) {
+    verification_accounts_for(scratch, factory, origin, checked_account())
+}
+
+fn verification_accounts_for(
+    scratch: &Scratch,
+    factory: HttpFactory,
+    origin: Option<u64>,
+    account: Account,
+) -> (Accounts, ObservedStore) {
     let store = ObservedStore::default();
-    store.seed(scratch);
+    store.seed_account(scratch, account);
     let mut net = crate::test_support::net();
     net.http = factory;
     let mut accounts = owner_accounts(scratch, store.clone(), net);
@@ -981,37 +999,37 @@ async fn loaded_verification_preserves_actual_user_api_results_and_never_resaves
         (
             Ok(user_response(
                 200,
-                br#"{"id":7,"login":"fresh-user-sentinel"}"#,
+                br#"{"id":7,"login":"mxj-user-sentinel"}"#,
                 ResponseMeta::default(),
             )),
             Ok(GitHubUser {
                 id: 7,
-                login: GitHubLogin::new("fresh-user-sentinel").unwrap(),
+                login: GitHubLogin::new("mxj-user-sentinel").unwrap(),
             }),
             Some(7),
             None,
-            connected_view("fresh-user-sentinel"),
+            connected_view("mxj-user-sentinel"),
         ),
         (
             Ok(user_response(
                 200,
-                br#"{"id":11,"login":"fresh-user-sentinel"}"#,
+                br#"{"id":11,"login":"mxj-user-sentinel"}"#,
                 ResponseMeta::default(),
             )),
             Ok(GitHubUser {
                 id: 11,
-                login: GitHubLogin::new("fresh-user-sentinel").unwrap(),
+                login: GitHubLogin::new("mxj-user-sentinel").unwrap(),
             }),
             None,
             Some(ErrorKey::RequestRefused),
             GitHubView::NeedsSignIn {
-                login: GitHubLogin::new("owner-sentinel").unwrap(),
+                login: GitHubLogin::new(PRIVATE_LOGIN).unwrap(),
             },
         ),
         (
             Ok(user_response(
                 401,
-                b"private-provider-sentinel",
+                b"pqv-provider-sentinel",
                 ResponseMeta::default(),
             )),
             Err(crate::connections::github::api::ApiError::Refused {
@@ -1021,16 +1039,16 @@ async fn loaded_verification_preserves_actual_user_api_results_and_never_resaves
             None,
             Some(ErrorKey::ResponseUnreadable),
             GitHubView::NeedsSignIn {
-                login: GitHubLogin::new("owner-sentinel").unwrap(),
+                login: GitHubLogin::new(PRIVATE_LOGIN).unwrap(),
             },
         ),
         (
-            Ok(user_response(403, b"private-provider-sentinel", meta)),
+            Ok(user_response(403, b"pqv-provider-sentinel", meta)),
             Err(crate::connections::github::api::ApiError::Refused { status: 403, meta }),
             None,
             Some(ErrorKey::ResponseUnreadable),
             GitHubView::NotVerified {
-                login: GitHubLogin::new("owner-sentinel").unwrap(),
+                login: GitHubLogin::new(PRIVATE_LOGIN).unwrap(),
             },
         ),
         (
@@ -1041,7 +1059,7 @@ async fn loaded_verification_preserves_actual_user_api_results_and_never_resaves
             None,
             Some(ErrorKey::AccountOffline),
             GitHubView::NotVerified {
-                login: GitHubLogin::new("owner-sentinel").unwrap(),
+                login: GitHubLogin::new(PRIVATE_LOGIN).unwrap(),
             },
         ),
         (
@@ -1050,14 +1068,15 @@ async fn loaded_verification_preserves_actual_user_api_results_and_never_resaves
             None,
             Some(ErrorKey::ResponseUnreadable),
             GitHubView::NotVerified {
-                login: GitHubLogin::new("owner-sentinel").unwrap(),
+                login: GitHubLogin::new(PRIVATE_LOGIN).unwrap(),
             },
         ),
     ];
     for (response, expected, user, error, view) in cases {
         let scratch = Scratch::new("github-loaded-user-matrix");
         let http = UserHttp::new(response);
-        let (mut accounts, store) = verification_accounts(&scratch, http.factory(), Some(1));
+        let (mut accounts, store) =
+            verification_accounts_for(&scratch, http.factory(), Some(1), private_account());
         let authority = rusqlite::Connection::open(
             scratch
                 .db()
@@ -1121,17 +1140,18 @@ async fn genuine_factory_refusal_uses_api_semantics_but_factory_and_request_pani
         let scratch = Scratch::new("github-verification-lifecycle");
         let mut http = UserHttp::new(Ok(user_response(
             200,
-            br#"{"id":11,"login":"fresh-user-sentinel"}"#,
+            br#"{"id":11,"login":"mxj-user-sentinel"}"#,
             ResponseMeta::default(),
         )));
         http.panic = mode == 2;
         let client = http.factory();
         let factory: HttpFactory = Arc::new(move || match mode {
             0 => Err(HttpError::Configuration),
-            1 => panic!("foreign-panic-sentinel"),
+            1 => panic!("rvq-panic-sentinel"),
             _ => client(),
         });
-        let (mut accounts, store) = verification_accounts(&scratch, factory, Some(1));
+        let (mut accounts, store) =
+            verification_accounts_for(&scratch, factory, Some(1), private_account());
         settle_owner(&mut accounts).await;
         let built = verification_event(&mut accounts).await;
         let frames = if mode == 2 {
@@ -1158,7 +1178,7 @@ async fn genuine_factory_refusal_uses_api_semantics_but_factory_and_request_pani
                 vec![
                     ControlToShell::GitHubError(ErrorKey::AccountOffline.into()),
                     ControlToShell::GitHub(GitHubView::NotVerified {
-                        login: GitHubLogin::new("owner-sentinel").unwrap(),
+                        login: GitHubLogin::new(PRIVATE_LOGIN).unwrap(),
                     })
                 ]
             );
@@ -1169,14 +1189,14 @@ async fn genuine_factory_refusal_uses_api_semantics_but_factory_and_request_pani
                 vec![
                     ControlToShell::GitHubError(ErrorKey::RequestRefused.into()),
                     ControlToShell::GitHub(GitHubView::NeedsSignIn {
-                        login: GitHubLogin::new("owner-sentinel").unwrap(),
+                        login: GitHubLogin::new(PRIVATE_LOGIN).unwrap(),
                     }),
                 ]
             );
             assert_eq!(
                 accounts.github.machine().view(Instant::now()),
                 GitHubView::NeedsSignIn {
-                    login: GitHubLogin::new("owner-sentinel").unwrap(),
+                    login: GitHubLogin::new(PRIVATE_LOGIN).unwrap(),
                 }
             );
             assert!(accounts.github.machine().user().is_none());
@@ -1233,7 +1253,7 @@ async fn sign_out_aborts_and_joins_the_exact_user_request_without_reviving_its_s
     let scratch = Scratch::new("github-user-cancel");
     let http = UserHttp::new(Ok(user_response(
         200,
-        br#"{"id":11,"login":"fresh-user-sentinel"}"#,
+        br#"{"id":11,"login":"mxj-user-sentinel"}"#,
         ResponseMeta::default(),
     )));
     let release = http.hold();
@@ -1276,7 +1296,7 @@ async fn canceling_a_saved_check_preserves_credentials_but_requires_explicit_rev
     let scratch = Scratch::new("github-saved-check-cancel");
     let first = UserHttp::new(Ok(user_response(
         200,
-        br#"{"id":7,"login":"fresh-user-sentinel"}"#,
+        br#"{"id":7,"login":"mxj-user-sentinel"}"#,
         ResponseMeta::default(),
     )));
     let release = first.hold();
@@ -1337,7 +1357,7 @@ async fn canceling_a_saved_check_preserves_credentials_but_requires_explicit_rev
     assert_eq!(first.calls.load(Ordering::SeqCst), 1);
     let second = UserHttp::new(Ok(user_response(
         200,
-        br#"{"id":7,"login":"fresh-user-sentinel"}"#,
+        br#"{"id":7,"login":"mxj-user-sentinel"}"#,
         ResponseMeta::default(),
     )));
     accounts.net.http = second.factory();
@@ -1451,7 +1471,7 @@ async fn the_request_body_rechecks_the_real_fence_before_its_first_poll() {
     let fence = accounts.github.machine().fence();
     let http = UserHttp::new(Ok(user_response(
         200,
-        br#"{"id":11,"login":"fresh-user-sentinel"}"#,
+        br#"{"id":11,"login":"mxj-user-sentinel"}"#,
         ResponseMeta::default(),
     )));
     let future = super::github::read_user(
@@ -1472,7 +1492,7 @@ async fn an_actual_completed_old_event_cannot_clear_a_new_verification_operation
     let scratch = Scratch::new("github-user-operation-identity");
     let first = UserHttp::new(Ok(user_response(
         200,
-        br#"{"id":11,"login":"fresh-user-sentinel"}"#,
+        br#"{"id":11,"login":"mxj-user-sentinel"}"#,
         ResponseMeta::default(),
     )));
     let (mut accounts, _) = verification_accounts(&scratch, first.factory(), Some(1));

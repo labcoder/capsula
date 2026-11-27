@@ -305,8 +305,7 @@ fn counts(
 }
 
 fn assert_private(text: &str, sentinel: &str) {
-    assert!(!text.contains(sentinel));
-    assert!(!text.contains(&format!("{:?}", sentinel.as_bytes())));
+    crate::test_support::assert_no_preview(text, sentinel);
 }
 
 fn selected_window_walks(top: &TopWindow) -> Availability {
