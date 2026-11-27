@@ -109,6 +109,26 @@ must be fenced/cleared there; cancellation cannot erase someone else's copies.
 Debug implementations expose identifiers/counts only. Errors are fixed kinds,
 never driver strings, paths or audio. No audio is persisted or logged.
 
+## Shared capture sequence
+
+`platform::microphone::stream::run` is the part of a hold that every native
+adapter shares once it has tried to open its stream. The adapter supplies the
+open result, the stream's `format`, `stop` and `check` (the device is still
+present with the format it opened with) and its own pump, which collects until
+release or failure. The per-packet work (on Windows, WASAPI's borrow, copy and
+release) stays in the adapter. In order:
+
+1. A stream that failed to open because release revoked it is an empty release.
+   Any other open failure discards.
+2. A pump that ended `Cancelled` or `Stale` because release revoked it counts
+   as clean. Any other failure cancels the generation and scrubs the packetizer
+   before the device stops.
+3. `stop` runs next. `Unconfirmed` returns at once and never becomes a receipt.
+4. The packet boundary's verdict takes in the stop result and, only after a
+   clean stop, `check`. Any failure cancels and scrubs.
+5. The stream drops. Only a generation still in release then sends its last
+   packet; a queue too full for it discards and cancels.
+
 ## Windows boundary
 
 CPAL 0.18.2 was source-audited and rejected: its WASAPI xrun path calls a
