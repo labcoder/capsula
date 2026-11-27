@@ -125,7 +125,7 @@ release) stays in the adapter. In order:
    before the device stops.
 3. `stop` runs next. `Unconfirmed` returns at once and never becomes a receipt.
 4. The packet boundary's verdict takes in the stop result and, only after a
-   clean stop, `check`. Any failure cancels and scrubs.
+   clean pump and stop, `check`. Any failure cancels and scrubs.
 5. The stream drops. Only a generation still in release then sends its last
    packet; a queue too full for it discards and cancels.
 

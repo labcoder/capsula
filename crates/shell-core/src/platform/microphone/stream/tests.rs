@@ -13,6 +13,16 @@ const GESTURE: GestureId = GestureId(1);
 struct Fake {
     stopped: Result<(), MicError>,
     checked: Result<(), MicError>,
+    /// A gate the stream revokes as it is destroyed, as a native teardown racing a cancel would.
+    cancels_on_drop: Option<CollectionGate>,
+}
+
+impl Drop for Fake {
+    fn drop(&mut self) {
+        if let Some(gate) = &self.cancels_on_drop {
+            gate.cancel(GESTURE);
+        }
+    }
 }
 
 impl Stream for Fake {
@@ -36,6 +46,7 @@ impl Stream for Fake {
 const CLEAN: Fake = Fake {
     stopped: Ok(()),
     checked: Ok(()),
+    cancels_on_drop: None,
 };
 
 struct Hold {
@@ -132,8 +143,8 @@ fn a_pump_failing_before_release_discards_and_cancels() {
 #[test]
 fn a_device_check_failing_after_stop_discards_the_collected_audio() {
     let changed = Fake {
-        stopped: Ok(()),
         checked: Err(MicError::Format),
+        ..CLEAN
     };
     let hold = hold(changed, speak_and_release(Ok(())));
     assert_eq!(hold.result, Ok(Finalization::Discarded(MicError::Format)));
@@ -142,10 +153,11 @@ fn a_device_check_failing_after_stop_discards_the_collected_audio() {
 }
 
 #[test]
-fn a_failed_stop_discards_without_consulting_the_device_check() {
+fn a_failed_stop_outranks_a_failed_device_check() {
     let gone = Fake {
         stopped: Err(MicError::Unavailable),
         checked: Err(MicError::Format),
+        cancels_on_drop: None,
     };
     let hold = hold(gone, speak_and_release(Ok(())));
     assert_eq!(
@@ -157,16 +169,39 @@ fn a_failed_stop_discards_without_consulting_the_device_check() {
 }
 
 #[test]
-fn an_unconfirmed_stop_is_an_error_and_never_a_receipt() {
-    for checked in [Ok(()), Err(MicError::Format)] {
-        let unknown = Fake {
-            stopped: Err(MicError::Unconfirmed),
-            checked,
-        };
-        let hold = hold(unknown, speak_and_release(Ok(())));
+fn an_unconfirmed_stop_or_pump_is_an_error_and_never_a_receipt() {
+    for (pumped, stopped) in [
+        (Ok(()), Err(MicError::Unconfirmed)),
+        (Err(MicError::Unavailable), Err(MicError::Unconfirmed)),
+        (Err(MicError::Unconfirmed), Ok(())),
+    ] {
+        let unknown = Fake { stopped, ..CLEAN };
+        let hold = hold(unknown, speak_and_release(pumped));
         assert_eq!(hold.result, Err(MicError::Unconfirmed));
         assert_eq!(hold.sent, vec![]);
     }
+}
+
+#[test]
+fn a_cancel_while_the_stream_is_destroyed_discards_the_last_packet() {
+    let gate = CollectionGate::default();
+    let token = gate.arm(GESTURE).unwrap();
+    let session = AtomicBool::new(true);
+    let (output, queue) = async_channel::bounded(2);
+    let stream = Fake {
+        cancels_on_drop: Some(gate.clone()),
+        ..CLEAN
+    };
+    let result = run(
+        &token,
+        &session,
+        &output,
+        &mut PacketBoundary::default(),
+        Ok(stream),
+        |_, packets, boundary| speak_and_release(Ok(()))(&gate, packets, boundary, &output),
+    );
+    assert_eq!(result, Ok(Finalization::Discarded(MicError::Cancelled)));
+    assert!(queue.is_empty());
 }
 
 #[test]
