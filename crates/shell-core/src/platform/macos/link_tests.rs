@@ -51,6 +51,8 @@ struct Script {
     reached: Option<mpsc::Sender<()>>,
     /// Holds a brain that exits or is lost after commit until the test says so.
     after_commit: Option<Receiver<()>>,
+    /// The pair runs queued audio, not legacy.
+    queued: bool,
 }
 
 /// A fake child: running until it exits or is killed; a kill ends it with SIGKILL and tells
@@ -198,13 +200,7 @@ fn brain(child: &Child, then: Then) -> ShellEnds {
             _ => {}
         }
         let deadline = Instant::now() + BOUND;
-        let mut brain = scripted(
-            control,
-            data,
-            AudioSession::Legacy,
-            Commit::Settings,
-            deadline,
-        );
+        let mut brain = scripted(control, data, audio(&child), Commit::Settings, deadline);
         let held = child.script().after_commit.take();
         if let Some(held) = held {
             let _released = held.recv_timeout(BOUND);
@@ -291,11 +287,19 @@ fn attempt_with(
         harden,
         read_item,
         Channel::Dev,
-        AudioSession::Legacy,
+        audio(child),
         None,
         by,
         |_| DrawingText::default(),
     )
+}
+
+fn audio(child: &Child) -> AudioSession {
+    if child.script().queued {
+        AudioSession::QueuedRequired
+    } else {
+        AudioSession::Legacy
+    }
 }
 
 #[expect(clippy::unnecessary_wraps, reason = "it stands in for the item read")]
@@ -538,6 +542,41 @@ fn a_poll_that_blocks_ends_the_link_unsettled_while_the_peer_holds_both_ends_ope
     assert!(took < 3 * WAIT + Duration::from_secs(2), "{took:?}");
     assert_eq!(child.script().kills, 0, "the owner never got past its poll");
     drop(unblock);
+}
+
+#[test]
+fn custody_ending_as_the_connection_is_handed_over_publishes_no_connected() {
+    for queued in [false, true] {
+        let child = Child::default();
+        child.script().queued = queued;
+        let (events, states) = async_channel::unbounded();
+        let (brain_child, mut first) = (child.clone(), true);
+        let link = start_scripted(events, audio(&child), move |word, _, by| {
+            if !std::mem::take(&mut first) {
+                return refused(word, by);
+            }
+            let (connection, owner) = attempt(word, &brain_child, Then::Closes, by, honest)?;
+            // The handoff holds until the child's end is published.
+            brain_child.exits(Exit::Code(0));
+            let ended_by = Instant::now() + BOUND;
+            while !owner.has_ended() {
+                assert!(Instant::now() < ended_by, "custody ended in time");
+                thread::sleep(Duration::from_millis(5));
+            }
+            Ok((connection, Some(owner)))
+        });
+        until(&states, |event| {
+            assert!(
+                !connected(event),
+                "queued {queued}: no Connected once custody ended"
+            );
+            failed(event)
+        });
+        assert!(link.begin_quit());
+        link.finish_quit();
+        assert_eq!(link.quit_end(), QuitEnding::Ended(None), "queued {queued}");
+        assert_eq!(child.script().spawns, 1, "queued {queued}: one attempt");
+    }
 }
 
 /// A brain for the queued pair that says READY only once `go` comes, then exits 0 on Quit.

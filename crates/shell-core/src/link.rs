@@ -1849,7 +1849,8 @@ impl Link {
             tracing::info!(incarnation = ?connection.issue_origin.incarnation, "connected to the brain");
             let previous = connection.issue_origin;
             let attempt = Arc::<Attempt>::default();
-            let attended = self.attend_until(connection, events, reconnect_by, &attempt);
+            let attended =
+                self.attend_until(connection, child.as_ref(), events, reconnect_by, &attempt);
             let settled = child.map(platform::ChildOwner::settle);
             if self.quitting() {
                 if let Some(settled) = settled {
@@ -1962,6 +1963,7 @@ impl Link {
     fn attend(&self, connection: Connection, events: &Sender<LinkEvent>) -> Attendance {
         self.attend_until(
             connection,
+            None,
             events,
             Instant::now() + CONNECT_TIMEOUT,
             &Arc::default(),
@@ -1969,7 +1971,8 @@ impl Link {
     }
 
     /// Serves one connection until it ends: starts the writers, says Connected, then reads data
-    /// on its own thread and control here. A refused output needs explicit retry.
+    /// on its own thread and control here. A refused output needs explicit retry, and so does a
+    /// `child` whose custody ended before Connected went out.
     #[expect(
         clippy::too_many_lines,
         reason = "one connection keeps its scoped readers and writers together"
@@ -1977,6 +1980,7 @@ impl Link {
     fn attend_until(
         &self,
         connection: Connection,
+        child: Option<&platform::ChildOwner>,
         events: &Sender<LinkEvent>,
         reconnect_by: Instant,
         attempt: &Arc<Attempt>,
@@ -2031,6 +2035,8 @@ impl Link {
         let mut helpers = Vec::new();
         let closing = Arc::<AtomicBool>::default();
         let reader = queued.then(Arc::<OnceLock<Thread>>::default);
+        let custody_ended = || child.is_some_and(platform::ChildOwner::has_ended);
+        let cancelled = || self.quitting() || events.is_closed() || custody_ended();
         let registration = if let Some(reader) = &reader {
             let (ack, started) = std::sync::mpsc::sync_channel(1);
             let pipes = [Arc::downgrade(&control), Arc::downgrade(&data)];
@@ -2056,7 +2062,6 @@ impl Link {
             {
                 return Attendance::Ended;
             }
-            let cancelled = || self.quitting() || events.is_closed();
             let Some(deadline) = self.shared.output.begin_queued(
                 generation,
                 abort,
@@ -2080,6 +2085,9 @@ impl Link {
         } else {
             None
         };
+        if !queued && custody_ended() {
+            return Attendance::Retry;
+        }
         let connected = LinkEvent::Connected(Session {
             alive: Arc::clone(&ended.alive),
             closing: Arc::clone(&closing),
@@ -2100,7 +2108,7 @@ impl Link {
         let legacy_connected = if !queued {
             Some(connected)
         } else if Instant::now() >= reconnect_by
-            || self.quitting()
+            || cancelled()
             || events.try_send(connected).is_err()
         {
             drop(outbox);

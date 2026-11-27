@@ -466,6 +466,10 @@ custody of the child ending (reaped, Lost or Unsettled) shuts the shell's two en
 READY wait, the initiator and the wait for `Settings` return at once however long the deadline,
 and the attempt is `Custody` on each side of the item read and at the handoff, each asking
 whether custody has an outcome, so no item is read and no connection handed over once it has.
+Attendance asks once more before Connected goes out: the queued start counts an ended custody as
+cancelled, both while it waits for the microphone to retire and as it publishes, and the legacy
+start checks it before publishing. Either way the link shows Failed and waits for Retry, with no
+Connected and no generation recorded.
 A failed attempt shuts its ends down before it settles, so a child that exits on EOF is reaped,
 not killed. A child in Quit's grace is still owned and may finish connecting. A live child that
 closes only one leg holds the attempt until its deadline, then is settled. `initiate` takes the
