@@ -1,11 +1,12 @@
 //! The main thread, and what the shell may change about a thread: a task's title and a thread's
 //! model choice. Neither change moves a thread in the list.
 
-use kumochi_protocol::message::{ModelChoice, ThreadId, ThreadKind, ThreadTitle};
+use kumochi_protocol::message::{ConnectionKind, ModelChoice, ThreadId, ThreadKind, ThreadTitle};
 use rusqlite::{OptionalExtension as _, params};
 
 use super::choice::{StoredChoice, connection_text, effort_text};
 use super::{Generation, Store, StoreError, now_ms, row_id, sql_id};
+use crate::connections::facts;
 
 /// Who set a task's title. A first-words title is `BeginTurn`'s, and only it can be replaced by
 /// a model's.
@@ -97,6 +98,30 @@ impl Store {
             ],
         )?;
         Ok(changed > 0)
+    }
+
+    /// The route a thread's own saved choice names; `None` for a thread with none, a spelling no
+    /// build wrote, or no such thread yet.
+    ///
+    /// # Errors
+    /// Fails when SQLite fails.
+    pub(crate) fn saved_route(
+        &self,
+        thread: ThreadId,
+    ) -> Result<Option<ConnectionKind>, StoreError> {
+        let Ok(thread) = sql_id(thread.0, StoreError::NoThread) else {
+            return Ok(None);
+        };
+        let saved: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT connection FROM threads WHERE id = ?1",
+                params![thread],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        Ok(saved.as_deref().and_then(facts::stored))
     }
 }
 

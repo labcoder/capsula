@@ -312,6 +312,98 @@ async fn reply(replies: &mut mpsc::UnboundedReceiver<Input>) -> Input {
         .expect("the thread is alive")
 }
 
+/// No build serves a local server yet: a turn whose route is local, by the thread's own choice or
+/// by the default for a thread with none, keeps no text, title or thread. A cloud thread's turn
+/// under a local default is stored.
+#[tokio::test]
+async fn a_turn_for_the_local_server_is_never_stored() {
+    use kumochi_protocol::message::{ConnectionKind, Effort, ModelChoice, ModelSlug};
+
+    let scratch = Scratch::new("local-turn-refused");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    let on = |connection| ModelChoice {
+        model: ModelSlug::new("m").expect("valid"),
+        effort: Effort::Low,
+        connection,
+    };
+    store
+        .begin_turn(ThreadId(2), Some("local"), RunId(1), "first")
+        .expect("turn");
+    store
+        .begin_turn(ThreadId(3), Some("cloud"), RunId(2), "first")
+        .expect("turn");
+    assert!(
+        store
+            .set_model(ThreadId(2), &on(ConnectionKind::LocalChat))
+            .expect("set")
+    );
+    assert!(
+        store
+            .set_model(ThreadId(3), &on(ConnectionKind::ChatGpt))
+            .expect("set")
+    );
+    let (acks, mut replies) = mpsc::unbounded_channel();
+    let custody = crate::test_support::custody(&store);
+    let thread = StoreThread::spawn(store, custody, acks, Schedule::default()).expect("thread");
+    let turn = |thread, title: Option<&str>, run, text: &str, local_default| StoreOp::BeginTurn {
+        thread,
+        title: title.map(Into::into),
+        run,
+        text: text.into(),
+        screen: None,
+        local_default,
+    };
+    for (op, stored) in [
+        (
+            turn(ThreadId(2), None, RunId(3), "refusedown", false),
+            false,
+        ),
+        (turn(ThreadId(3), None, RunId(4), "storedcloud", true), true),
+        (
+            turn(
+                ThreadId(4),
+                Some("refusedtitle"),
+                RunId(5),
+                "refuseddefault",
+                true,
+            ),
+            false,
+        ),
+        (
+            turn(ThreadId(5), Some("new"), RunId(6), "storednew", false),
+            true,
+        ),
+    ] {
+        let run = match &op {
+            StoreOp::BeginTurn { run, .. } => *run,
+            _ => unreachable!("a turn"),
+        };
+        assert!(thread.send(op));
+        let expected = if stored {
+            Input::TurnStored { run }
+        } else {
+            Input::StoreFailed { run }
+        };
+        assert_eq!(reply(&mut replies).await, expected);
+    }
+    thread.close().await.expect("closed");
+
+    let store = Store::open(&scratch.db()).expect("reopen");
+    for (marker, threads) in [
+        ("refusedown", Vec::new()),
+        ("refusedtitle", Vec::new()),
+        ("refuseddefault", Vec::new()),
+        ("storedcloud", vec![ThreadId(3)]),
+        ("storednew", vec![ThreadId(5)]),
+    ] {
+        assert_eq!(
+            store.pages().search_ids(marker).expect("search"),
+            threads,
+            "{marker}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn a_held_model_write_answers_only_after_release() {
     use kumochi_protocol::message::{ConnectionKind, Effort, ModelChoice, ModelSlug};
@@ -664,6 +756,7 @@ async fn an_op_fails_while_the_store_cant_reopen_and_the_next_is_stored_once_it_
         run,
         text: text.into(),
         screen: None,
+        local_default: false,
     };
     assert!(thread.send(turn(RunId(3), "refused words")));
     assert_eq!(
@@ -819,6 +912,7 @@ fn every_operation_gets_one_reply_in_order() {
             run,
             text: "hi".into(),
             screen: None,
+            local_default: false,
         },
         StoreOp::CommitStep {
             thread: ThreadId(2),
@@ -922,6 +1016,7 @@ fn a_round_the_reader_would_refuse_fails_its_run_and_the_thread_goes_on() {
             run: RunId(1),
             text: "hi".into(),
             screen: None,
+            local_default: false,
         },
         round(RunId(1), item, over),
         end(RunId(1), RunEnd::Failed(crate::store::Failure::Store)),
@@ -931,6 +1026,7 @@ fn a_round_the_reader_would_refuse_fails_its_run_and_the_thread_goes_on() {
             run: RunId(2),
             text: "again".into(),
             screen: None,
+            local_default: false,
         },
         round(RunId(2), &growing, ok()),
         end(RunId(2), RunEnd::Failed(crate::store::Failure::Store)),
@@ -940,6 +1036,7 @@ fn a_round_the_reader_would_refuse_fails_its_run_and_the_thread_goes_on() {
             run: RunId(3),
             text: "once more".into(),
             screen: None,
+            local_default: false,
         },
         round(RunId(3), item, ok()),
         end(RunId(3), RunEnd::Done),
@@ -1012,6 +1109,7 @@ fn a_heard_point_is_stored_and_answers_nothing() {
             run,
             text: "hi".into(),
             screen: None,
+            local_default: false,
         },
         StoreOp::EndRun {
             screen: None,
@@ -1028,6 +1126,7 @@ fn a_heard_point_is_stored_and_answers_nothing() {
             run: refused,
             text: "again".into(),
             screen: None,
+            local_default: false,
         },
         StoreOp::EndRun {
             screen: None,
@@ -1097,6 +1196,7 @@ fn a_held_turns_screen_is_stored_with_its_turn() {
         run,
         text: "hi".into(),
         screen: Some(HeldScreen::NotIncluded(ScreenClass::TooLarge)),
+        local_default: false,
     }));
     store.close().blocking_recv().expect("closed");
     let mut got = Vec::new();
@@ -1448,6 +1548,7 @@ fn measure_delete_during_a_purge() {
                 run: turn.1,
                 text: "a measured turn".into(),
                 screen: None,
+                local_default: false,
             }));
             let released = Instant::now();
             releasing.send(()).expect("the copy waits");
@@ -1510,6 +1611,7 @@ fn a_withdrawn_screen_is_stored_after_its_turn() {
         run,
         text: "hi".into(),
         screen: Some(HeldScreen::Attached),
+        local_default: false,
     }));
     assert!(store.send(StoreOp::WithdrawScreen { run }));
     store.close().blocking_recv().expect("closed");
@@ -1544,6 +1646,7 @@ fn an_unsent_screen_is_cleared_after_its_turn() {
         run,
         text: "hi".into(),
         screen: Some(HeldScreen::Screen),
+        local_default: false,
     }));
     let other = RunId(2);
     assert!(store.send(StoreOp::BeginTurn {
@@ -1552,6 +1655,7 @@ fn an_unsent_screen_is_cleared_after_its_turn() {
         run: other,
         text: "hey".into(),
         screen: Some(HeldScreen::Attached),
+        local_default: false,
     }));
     assert!(store.send(StoreOp::RepairScreen {
         run,
@@ -1679,6 +1783,7 @@ fn a_job_key_picture_authorization_is_refused_without_touching_the_store() {
             run: RunId(id),
             text: "hi".into(),
             screen: Some(HeldScreen::Screen),
+            local_default: false,
         }));
     }
     let job = LeaseId {

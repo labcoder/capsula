@@ -20,6 +20,19 @@ impl Coordinator {
                 source: TitleSource::User,
                 job: None,
             },
+            // No build serves a local server yet, so none is saved as a thread's route.
+            ThreadOp::SetModel { thread, choice }
+                if choice.connection == kumochi_protocol::message::ConnectionKind::LocalChat =>
+            {
+                effects.push(Effect::Control(
+                    kumochi_protocol::message::ControlToShell::ThreadModelSet {
+                        thread,
+                        choice,
+                        applied: false,
+                    },
+                ));
+                return;
+            }
             ThreadOp::SetModel { thread, choice } => StoreOp::SetModel { thread, choice },
         };
         effects.push(Effect::Store(op));

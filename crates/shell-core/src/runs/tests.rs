@@ -598,6 +598,7 @@ fn deliver(runs: &mut Runs, mut store: Option<&mut Store>, effects: Vec<BrainEff
                 run,
                 text,
                 screen,
+                ..
             }) => {
                 if let Some(store) = store.as_deref_mut() {
                     store

@@ -40,6 +40,67 @@ async fn a_local_choice_is_refused_by_its_own_engine_never_the_default() {
     brain.close().await;
 }
 
+/// No build serves a local server yet, so the brain refuses one as the default, whatever the
+/// shell sends, and starts no write.
+#[tokio::test]
+async fn a_local_default_model_is_refused_and_nothing_is_written() {
+    use crate::runtime::settings::{Change, Queued};
+    use kumochi_protocol::message::{Effort, ModelChoice, ModelSlug, SettingsOp};
+    let scratch = Scratch::new("dormant-local-default");
+    let mut brain = test_support::brain(&scratch, "");
+    let before = brain.config.default_choice();
+    brain.settings_ops.push_back(Queued {
+        change: Change::User(SettingsOp::SetDefaultModel(ModelChoice {
+            connection: ConnectionKind::LocalChat,
+            model: ModelSlug::new("gpt-6-luna").expect("model"),
+            effort: Effort::Low,
+        })),
+        epoch: brain.epoch + 1,
+    });
+    brain.pump_settings(None).expect("pumped");
+    assert!(brain.config_write.is_none(), "no write started");
+    assert!(brain.settings_ops.is_empty());
+    assert_eq!(brain.config.default_choice(), before);
+    brain.close().await;
+}
+
+/// A saved local default marks each turn the runtime stores, so the store refuses a turn in a
+/// thread with no choice of its own.
+#[tokio::test]
+async fn a_saved_local_default_marks_each_turn_for_the_store() {
+    use crate::coordinator::StoreOp;
+    use kumochi_protocol::message::{Effort, ModelChoice, ModelSlug, RunId, SettingsOp, ThreadId};
+    let scratch = Scratch::new("dormant-local-seed");
+    let mut brain = test_support::brain(&scratch, "");
+    let pending = brain
+        .config
+        .stage(SettingsOp::SetDefaultModel(ModelChoice {
+            connection: ConnectionKind::LocalChat,
+            model: ModelSlug::new("gpt-6-luna").expect("model"),
+            effort: Effort::Low,
+        }))
+        .expect("staged");
+    pending.write().expect("written");
+    brain.config.commit(pending);
+    let mut op = StoreOp::BeginTurn {
+        thread: ThreadId(2),
+        title: None,
+        run: RunId(1),
+        text: "words".into(),
+        screen: None,
+        local_default: false,
+    };
+    brain.seed_op(&mut op);
+    assert!(matches!(
+        op,
+        StoreOp::BeginTurn {
+            local_default: true,
+            ..
+        }
+    ));
+    brain.close().await;
+}
+
 async fn assert_owned_refusal(
     brain: &mut Brain,
     connection: ConnectionKind,

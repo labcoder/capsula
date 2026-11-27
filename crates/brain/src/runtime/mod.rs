@@ -1658,6 +1658,15 @@ impl Brain {
     fn seed_op(&self, op: &mut StoreOp) {
         match op {
             StoreOp::BuildContext(build) => self.seed(build),
+            StoreOp::BeginTurn { local_default, .. } => {
+                *local_default = matches!(
+                    self.config.default_choice(),
+                    crate::store::choice::StoredChoice::Valid {
+                        connection: ConnectionKind::LocalChat,
+                        ..
+                    }
+                );
+            }
             StoreOp::ReadJob(read) => {
                 read.snapshot = Some(self.snapshot(read.origin));
                 read.compact_at = self.compact_at;

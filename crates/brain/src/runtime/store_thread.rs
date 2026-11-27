@@ -835,7 +835,15 @@ fn serve_op(
             run,
             text,
             screen,
+            local_default,
         } => write(store, purger, acks, run, "turn", |store| {
+            // No build serves a local server yet, so its turn is never kept for another to replay.
+            // shortcut: it fails as a store failure, with that copy; the local task binding gives
+            // it its own refusal.
+            let route = store.saved_route(thread)?;
+            if route == Some(ConnectionKind::LocalChat) || (route.is_none() && local_default) {
+                return Err(StoreError::Dormant);
+            }
             store
                 .begin_held_turn(thread, title.as_deref(), run, &text, screen)
                 .map(|()| Input::TurnStored { run })

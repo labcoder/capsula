@@ -197,6 +197,8 @@ pub enum StoreOp {
         text: Content,
         /// What a screen hold carried into the turn; `None` for every other turn.
         screen: Option<HeldScreen>,
+        /// Whether the saved default names the local server; the runtime sets it.
+        local_default: bool,
     },
     /// The text streamed since the last write, then one step.
     CommitStep {

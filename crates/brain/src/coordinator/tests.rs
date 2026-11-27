@@ -380,6 +380,7 @@ fn a_turn_is_stored_before_the_engine_starts() {
                 run: R,
                 text: "  \n  Draw a cat\nplease".into(),
                 screen: None,
+                local_default: false,
             }),
             state(R, T, Phase::Thinking),
             Effect::ArmDeadline {
@@ -624,6 +625,7 @@ fn a_new_turn_replaces_the_current_run_with_a_higher_id() {
                 run: RunId(11),
                 text: "again".into(),
                 screen: None,
+                local_default: false,
             }),
         ]
     );
@@ -834,6 +836,7 @@ fn a_failed_ending_is_reported_after_done_after_stop_and_after_a_replacement() {
                 run: RunId(11),
                 text: "again".into(),
                 screen: None,
+                local_default: false,
             }),
         ],
         "the old run's step failed while its replacement waits"
@@ -1120,6 +1123,7 @@ fn a_replacement_is_stored_and_started_only_after_the_runs_before_it() {
             run,
             text: text.into(),
             screen: None,
+            local_default: false,
         })
     };
     let mut core = started();

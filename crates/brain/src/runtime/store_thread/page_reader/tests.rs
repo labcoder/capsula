@@ -152,6 +152,7 @@ fn turn(id: u64) -> StoreOp {
         run: RunId(id),
         text: "words".into(),
         screen: None,
+        local_default: false,
     }
 }
 
@@ -892,6 +893,7 @@ fn the_helper_keeps_a_raise_made_while_it_ran_and_retries_what_a_reader_held() {
         run: RunId(id),
         text: "x".repeat(64 * 1024).into(),
         screen: None,
+        local_default: false,
     };
     assert!(running.thread.send(big(1)));
     assert_eq!(running.ack(), Input::TurnStored { run: RunId(1) });

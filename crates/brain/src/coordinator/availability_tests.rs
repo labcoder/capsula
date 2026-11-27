@@ -1364,7 +1364,7 @@ fn a_local_choice_is_refused_and_never_answered_on_chatgpt() {
     let mut core = turn_after(vec![ready(7, &["haiku"])]);
     assert_eq!(
         core.handle(built_on(ConnectionKind::LocalChat, "haiku")),
-        Ok(failed(Some(model_unavailable())))
+        Ok(failed(Some(open(ErrorKey::ModelUnavailable))))
     );
 }
 

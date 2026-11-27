@@ -337,6 +337,17 @@ impl Brain {
                 };
                 *choice = repaired;
             }
+            // No build serves a local server yet, so none is saved as the default.
+            if let Change::User(SettingsOp::SetDefaultModel(choice)) = &change
+                && false
+            {
+                self.settled(
+                    epoch,
+                    Outcome::Refused(ErrorKey::ModelUnavailable),
+                    link.as_deref_mut(),
+                )?;
+                continue;
+            }
             let model = matches!(&change, Change::User(SettingsOp::SetDefaultModel(_)));
             let op = match &change {
                 Change::User(op) => Some(op.clone()),

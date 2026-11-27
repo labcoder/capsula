@@ -224,6 +224,7 @@ async fn session_eof_cancels_a_page_still_waiting_at_the_store_barrier() {
         run: RunId(1),
         text: "text".into(),
         screen: None,
+        local_default: false,
     }));
     while !matches!(
         seen.recv().await,
@@ -1196,6 +1197,7 @@ async fn a_page_read_after_the_sent_marker_waits_for_the_mark_and_shows_the_acti
         run: RunId(1),
         text: "text".into(),
         screen: Some(HeldScreen::Attached),
+        local_default: false,
     }));
     let lease = crate::coordinator::LeaseId {
         key: crate::coordinator::SendKey::Build(crate::coordinator::BuildKey {

@@ -1427,6 +1427,7 @@ impl Coordinator {
             run,
             text,
             screen: screen.as_ref().map(crate::context::Screen::held),
+            local_default: false,
         };
         if let Some(hold) = &mut hold {
             hold.defaults.origin = admission::origin(thread, self.main_thread);
