@@ -152,10 +152,7 @@ pub fn links_unsupported(error: &io::Error) -> bool {
 
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests {
-    use super::{
-        available_bytes, free_space, links_unsupported, model_free_space, replace_file,
-        replace_with,
-    };
+    use super::{available_bytes, free_space, links_unsupported, replace_file, replace_with};
     use crate::test_support::{SCRATCH_PUBLICATION_UNCERTAIN, propagate_scratch_publication};
     use std::env;
     use std::fs;
@@ -327,7 +324,7 @@ mod tests {
             io::ErrorKind::NotFound
         );
         assert!(
-            model_free_space(&absent, &held).is_ok(),
+            super::model_free_space(&absent, &held).is_ok(),
             "measured through the descriptor"
         );
     }
