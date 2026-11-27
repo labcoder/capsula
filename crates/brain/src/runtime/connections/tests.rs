@@ -64,10 +64,10 @@ async fn a_local_default_model_is_refused_and_nothing_is_written() {
     brain.close().await;
 }
 
-/// A saved local default, malformed or not, sets the coordinator's intake flag from the start,
-/// and a committed cloud default clears it.
+/// A local default saved by hand, malformed or not, sets the coordinator's flag from the start,
+/// and no edit in the app replaces it, so a turn typed under it never meets another route.
 #[tokio::test]
-async fn the_coordinator_hears_the_saved_local_intent_at_start_and_after_each_commit() {
+async fn a_saved_local_default_is_heard_at_start_and_kept() {
     use crate::runtime::settings::{Change, Queued};
     use kumochi_protocol::message::{Effort, ModelChoice, ModelSlug, SettingsOp};
     let scratch = Scratch::new("dormant-local-intent");
@@ -79,6 +79,7 @@ async fn the_coordinator_hears_the_saved_local_intent_at_start_and_after_each_co
     .expect("written");
     let mut brain = test_support::brain(&scratch, "");
     assert!(brain.coordinator.local_default, "read at start");
+    let before = brain.config.default_choice();
     brain.settings_ops.push_back(Queued {
         change: Change::User(SettingsOp::SetDefaultModel(ModelChoice {
             connection: ConnectionKind::ChatGpt,
@@ -88,9 +89,9 @@ async fn the_coordinator_hears_the_saved_local_intent_at_start_and_after_each_co
         epoch: brain.epoch + 1,
     });
     brain.pump_settings(None).expect("pumped");
-    let written = crate::runtime::settings::written(&mut brain.config_write).await;
-    brain.settings_done(written, None).expect("committed");
-    assert!(!brain.coordinator.local_default, "cleared by the commit");
+    assert!(brain.config_write.is_none(), "no write started");
+    assert_eq!(brain.config.default_choice(), before);
+    assert!(brain.config.local_intent());
     brain.close().await;
 }
 

@@ -100,6 +100,43 @@ fn route_choice_keeps_the_same_slug_on_each_connection_after_reopen() {
     }
 }
 
+/// A thread saved on the local server keeps that route: no build serves it yet, so no later model
+/// write can move a turn typed under it to another route.
+#[test]
+fn a_local_route_is_kept_against_every_later_model_write() {
+    use kumochi_protocol::message::ConnectionKind;
+
+    let scratch = Scratch::new("route-choice-local-kept");
+    let mut store = opened(&scratch);
+    let thread = task(&mut store, "route");
+    let local = ModelChoice {
+        connection: ConnectionKind::LocalChat,
+        ..choice("same-slug", Effort::High)
+    };
+    assert!(store.set_model(thread, &local).expect("save"));
+    for connection in [
+        ConnectionKind::ChatGpt,
+        ConnectionKind::ClaudeCode,
+        ConnectionKind::AnthropicKey,
+        ConnectionKind::LocalChat,
+    ] {
+        let other = ModelChoice {
+            connection,
+            ..choice("other-slug", Effort::Low)
+        };
+        assert!(
+            !store.set_model(thread, &other).expect("save"),
+            "{connection:?}"
+        );
+    }
+    let read = Snapshot::begin(&store.conn).expect("snapshot");
+    assert_eq!(read.choice(thread).expect("context choice"), Some(local));
+    assert_eq!(
+        store.saved_route(thread).expect("route"),
+        Some(ConnectionKind::LocalChat)
+    );
+}
+
 #[test]
 fn route_choice_migration_backfills_selected_rows_only() {
     let scratch = Scratch::new("route-choice-migration");

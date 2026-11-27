@@ -1113,59 +1113,27 @@ fn a_deadline_after_done_leaves_the_finished_run_alone() {
     );
 }
 
-/// A turn keeps the local intent it was typed under while it waits behind an older run, and its
-/// thread's model write that came meanwhile goes to the store only after it.
+/// A turn carries whether the saved default named the local server, for the store to judge it by.
 #[test]
-fn a_held_turn_keeps_its_intake_route_and_its_threads_model_write_follows_it() {
-    let b = RunId(11);
-    let mut core = started();
-    draw_step(&mut core, R, "one").expect("current");
-    core.handle(engine(
-        engine_key(&core, R),
-        TurnEvent::TextDelta("tail".to_owned()),
-    ))
-    .expect("current");
+fn a_turn_carries_the_saved_local_intent_to_the_store() {
+    let mut core = fresh();
     core.local_default = true;
-    core.handle(Input::Turn {
-        turn: 1,
-        thread: Some(T),
-        text: "b".into(),
-    })
-    .expect("turn");
-    core.local_default = false;
-    let choice = kumochi_protocol::message::ModelChoice {
-        model: kumochi_protocol::message::ModelSlug::new("m").expect("valid"),
-        effort: kumochi_protocol::message::Effort::Low,
-        connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
-    };
-    assert_eq!(
-        core.handle(Input::ThreadOp(
-            kumochi_protocol::message::ThreadOp::SetModel {
-                thread: T,
-                choice: choice.clone(),
-            }
-        )),
-        Ok(Vec::new()),
-        "the write waits for the turn"
-    );
-    assert_eq!(
-        core.handle(ack(0, "one")).expect("ending"),
-        vec![
-            end_run(
-                Some("tail"),
-                None,
-                RunEnd::Interrupted(Interruption::Replaced)
-            ),
-            Effect::Store(StoreOp::BeginTurn {
-                thread: T,
-                title: None,
-                run: b,
-                text: "b".into(),
-                screen: None,
+    let effects = core
+        .handle(Input::Turn {
+            turn: 1,
+            thread: None,
+            text: "b".into(),
+        })
+        .expect("turn");
+    assert!(
+        matches!(
+            effects.first(),
+            Some(Effect::Store(StoreOp::BeginTurn {
                 local_default: true,
-            }),
-            Effect::Store(StoreOp::SetModel { thread: T, choice }),
-        ]
+                ..
+            }))
+        ),
+        "{effects:?}"
     );
 }
 

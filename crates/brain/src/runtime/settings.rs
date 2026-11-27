@@ -337,9 +337,11 @@ impl Brain {
                 };
                 *choice = repaired;
             }
-            // No build serves a local server yet, so none is saved as the default.
+            // No build serves a local server yet, so none is saved as the default, and one saved by
+            // hand stays: a turn typed under it then never meets another route at the store.
             if let Change::User(SettingsOp::SetDefaultModel(choice)) = &change
-                && choice.connection == kumochi_protocol::message::ConnectionKind::LocalChat
+                && (choice.connection == kumochi_protocol::message::ConnectionKind::LocalChat
+                    || self.config.local_intent())
             {
                 self.settled(
                     epoch,
@@ -540,7 +542,6 @@ impl Brain {
                     })
                 ) && self.config.implicit_talk_back();
                 self.config.commit(pending);
-                self.coordinator.local_default = self.config.local_intent();
                 defaulted = first_spoken_install
                     && self.config.view().talk_back
                     && link

@@ -294,10 +294,9 @@ impl Config {
             .map_or(StoredChoice::Invalid, default_choice_of)
     }
 
-    /// Whether the saved default names the local server, however malformed the rest of it is; a
-    /// file that couldn't be read may have, so it counts.
+    /// Whether the saved default names the local server, however malformed the rest of it is.
     pub(crate) fn local_intent(&self) -> bool {
-        self.table.as_ref().map_or(true, |table| {
+        self.table.as_ref().is_ok_and(|table| {
             table
                 .get(DEFAULT_MODEL)
                 .and_then(|value| value.get("connection"))

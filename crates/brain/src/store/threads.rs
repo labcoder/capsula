@@ -75,7 +75,9 @@ impl Store {
     }
 
     /// Stores a live thread's model and effort, returning whether a live row matched.
-    /// A missing, hidden or unrepresentable thread returns false without changing anything.
+    /// A missing, hidden or unrepresentable thread returns false without changing anything, and so
+    /// does one whose saved route is the local server: no build serves it yet, so it stays, and a
+    /// turn typed under it never meets another route at the store.
     ///
     /// # Errors
     /// Fails when SQLite fails.
@@ -89,12 +91,13 @@ impl Store {
         };
         let changed = self.conn.execute(
             "UPDATE threads SET model = ?2, effort = ?3, connection = ?4
-             WHERE id = ?1 AND state = 'live'",
+             WHERE id = ?1 AND state = 'live' AND connection IS NOT ?5",
             params![
                 thread,
                 choice.model.as_str(),
                 effort_text(choice.effort),
-                connection_text(choice.connection)
+                connection_text(choice.connection),
+                connection_text(ConnectionKind::LocalChat)
             ],
         )?;
         Ok(changed > 0)
