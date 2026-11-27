@@ -393,7 +393,7 @@ creates no file. Both need a shell built with the `gate-recorder` feature (see
     both presses
   - `voice failed reason=<kind>` when a begun hold ends before Listening: `microphone` when its
     microphone doesn't start, otherwise the brain's failure, `not-loaded`, `busy`, `unavailable`,
-    `invalid-audio`, `too-long`, `timed-out`, `choice-changed` or `decode-failed`
+    `invalid-audio`, `too-long`, `timed-out`, `choice-changed`, `decode-failed` or `no-connection`
   - `listening on` and `listening off`, as the line takes and leaves the Listening colour
   - `speech input ready=true|false`, from each speech state the brain sends
   - `input opened focused=true|false` and `input dismissed`
@@ -852,7 +852,7 @@ the Listening row.
 - **Listening (hold recognised → Listening on screen).** Only with `--speech`, which needs
   `--prebuilt` images whose brain was also built with `kumochi-brain/gate-fixture`: the run has no
   account, and the brain admits a hold only while a connection is ready, so without the fixture
-  route every hold ends in `voice failed reason=choice-changed` before its microphone opens. The
+  route every hold ends in `voice failed reason=no-connection` before its microphone opens. The
   fixture reads `ChatGPT` ready and fails every run at once without sending anything, and the
   run's fresh profile has no account to reach; `hold-gate` refuses a prebuilt brain without it. The
   images are

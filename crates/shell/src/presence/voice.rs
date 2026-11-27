@@ -1083,5 +1083,6 @@ fn failed_line(reason: kumochi_protocol::message::HoldFailure) -> &'static str {
         HoldFailure::TimedOut => "voice failed reason=timed-out",
         HoldFailure::ChoiceChanged => "voice failed reason=choice-changed",
         HoldFailure::DecodeFailed => "voice failed reason=decode-failed",
+        HoldFailure::NoConnection => "voice failed reason=no-connection",
     }
 }
