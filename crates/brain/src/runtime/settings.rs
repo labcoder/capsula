@@ -339,7 +339,7 @@ impl Brain {
             }
             // No build serves a local server yet, so none is saved as the default.
             if let Change::User(SettingsOp::SetDefaultModel(choice)) = &change
-                && false
+                && choice.connection == kumochi_protocol::message::ConnectionKind::LocalChat
             {
                 self.settled(
                     epoch,
