@@ -285,7 +285,11 @@ fn native_a_bad_final_and_a_bad_partial_are_discarded_by_name_and_identity() {
         Err(Untrusted::Unsafe)
     );
     assert_eq!(fs::read(&partial).expect("kept"), b"arrival");
-    let resumed = open_model_write(&moved).expect("the moved partial resumes, unlocked");
+    let resumed = resume_model_write(
+        open_model_write(&moved).expect("the moved partial opens, unlocked"),
+        &moved,
+    )
+    .expect("a writable partial is kept");
     let creation = hold_model_creation(&part).expect("the part folder, held private");
     assert_eq!(discard_model(resumed, &creation, &moved), Ok(()));
     assert!(!moved.exists());

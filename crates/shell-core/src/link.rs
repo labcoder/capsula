@@ -670,7 +670,18 @@ struct Attempt {
     quit_written: AtomicBool,
 }
 
-/// How Quit ended the attempt it ended, read by [`LinkHandle::quit_end`].
+/// What [`LinkHandle::quit_end`] knows of how Quit ended the link.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum QuitEnding {
+    /// The link thread hasn't returned, so its attempt's end isn't known yet: a native item read
+    /// can outlast Quit's wait, and its settlement is read once the thread returns.
+    Pending,
+    /// The link thread has returned. None when the attempt Quit ended owned no child, as for a
+    /// detached brain, or when Quit came between attempts.
+    Ended(Option<QuitEnd>),
+}
+
+/// How Quit ended the attempt it ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct QuitEnd {
     /// The attempt's link generation, or None when Quit ended it before Connected.
@@ -1190,10 +1201,14 @@ impl LinkHandle {
     /// [`QUIT_TIMEOUT`], so call it off the UI thread; if the brain never takes them, the
     /// deletes and Quit aren't sent.
     pub fn finish_quit(&self) {
+        self.finish_quit_by(Instant::now() + CONNECT_TIMEOUT + QUIT_TIMEOUT);
+    }
+
+    /// [`Self::finish_quit`], waiting for the link to end only until `deadline`.
+    pub(crate) fn finish_quit_by(&self, deadline: Instant) {
         let Some(worker) = &self.worker else {
             return;
         };
-        let deadline = Instant::now() + CONNECT_TIMEOUT + QUIT_TIMEOUT;
         let mut told = false;
         // shortcut: polls for the link's end; a joinable handle would avoid it, once Quit
         // needs more than this one wait.
@@ -1222,14 +1237,20 @@ impl LinkHandle {
     }
 
     /// How the last Quit ended the attempt it ended, with that attempt's generation once it was
-    /// Connected. Read it after [`Self::finish_quit`]. None when that attempt owned no child, as
-    /// for a detached brain, or when Quit came between attempts.
+    /// Connected. Read it after [`Self::finish_quit`]; it's Pending while the link thread runs.
     #[cfg_attr(
         not(test),
         expect(dead_code, reason = "R2-D's first-turn route reads it")
     )]
-    pub(crate) fn quit_end(&self) -> Option<QuitEnd> {
-        self.shared.quit_end.get().copied()
+    pub(crate) fn quit_end(&self) -> QuitEnding {
+        if self
+            .worker
+            .as_ref()
+            .is_some_and(|worker| !worker.done.is_closed())
+        {
+            return QuitEnding::Pending;
+        }
+        QuitEnding::Ended(self.shared.quit_end.get().copied())
     }
 
     /// The control writer's test hold: set 1 and the writer parks unwritten at its next
@@ -1828,7 +1849,8 @@ impl Link {
             tracing::info!(incarnation = ?connection.issue_origin.incarnation, "connected to the brain");
             let previous = connection.issue_origin;
             let attempt = Arc::<Attempt>::default();
-            let attended = self.attend_until(connection, events, reconnect_by, &attempt);
+            let attended =
+                self.attend_until(connection, child.as_ref(), events, reconnect_by, &attempt);
             let settled = child.map(platform::ChildOwner::settle);
             if self.quitting() {
                 if let Some(settled) = settled {
@@ -1941,6 +1963,7 @@ impl Link {
     fn attend(&self, connection: Connection, events: &Sender<LinkEvent>) -> Attendance {
         self.attend_until(
             connection,
+            None,
             events,
             Instant::now() + CONNECT_TIMEOUT,
             &Arc::default(),
@@ -1948,7 +1971,8 @@ impl Link {
     }
 
     /// Serves one connection until it ends: starts the writers, says Connected, then reads data
-    /// on its own thread and control here. A refused output needs explicit retry.
+    /// on its own thread and control here. A refused output needs explicit retry, and so does a
+    /// `child` whose custody ended before Connected went out.
     #[expect(
         clippy::too_many_lines,
         reason = "one connection keeps its scoped readers and writers together"
@@ -1956,6 +1980,7 @@ impl Link {
     fn attend_until(
         &self,
         connection: Connection,
+        child: Option<&platform::ChildOwner>,
         events: &Sender<LinkEvent>,
         reconnect_by: Instant,
         attempt: &Arc<Attempt>,
@@ -2010,6 +2035,14 @@ impl Link {
         let mut helpers = Vec::new();
         let closing = Arc::<AtomicBool>::default();
         let reader = queued.then(Arc::<OnceLock<Thread>>::default);
+        let custody_ended = || child.is_some_and(platform::ChildOwner::has_ended);
+        let cancelled = || self.quitting() || events.is_closed() || custody_ended();
+        // Connected never follows an ended custody: both are decided under custody's lock. The
+        // send's error, None once sent; the outer None is an ended custody.
+        let admit = |event| match child {
+            Some(child) => child.while_open(|| events.try_send(event).err()),
+            None => Some(events.try_send(event).err()),
+        };
         let registration = if let Some(reader) = &reader {
             let (ack, started) = std::sync::mpsc::sync_channel(1);
             let pipes = [Arc::downgrade(&control), Arc::downgrade(&data)];
@@ -2035,7 +2068,6 @@ impl Link {
             {
                 return Attendance::Ended;
             }
-            let cancelled = || self.quitting() || events.is_closed();
             let Some(deadline) = self.shared.output.begin_queued(
                 generation,
                 abort,
@@ -2079,8 +2111,8 @@ impl Link {
         let legacy_connected = if !queued {
             Some(connected)
         } else if Instant::now() >= reconnect_by
-            || self.quitting()
-            || events.try_send(connected).is_err()
+            || cancelled()
+            || !matches!(admit(connected), Some(None))
         {
             drop(outbox);
             drop(control_slot);
@@ -2164,11 +2196,30 @@ impl Link {
                 }
             })
         })();
-        let open = legacy_connected.is_none_or(|connected| events.send_blocking(connected).is_ok());
+        let mut custody_ended_first = false;
+        let open = legacy_connected.is_none_or(|mut connected| {
+            loop {
+                match admit(connected) {
+                    Some(None) => break true,
+                    Some(Some(async_channel::TrySendError::Full(unsent))) => connected = unsent,
+                    Some(Some(async_channel::TrySendError::Closed(_))) => break false,
+                    None => {
+                        custody_ended_first = true;
+                        break false;
+                    }
+                }
+                // shortcut: polls for room, as the channel can't wait for capacity without sending;
+                // a capacity wake would avoid it if a full UI queue ever holds Connected for long.
+                thread::sleep(Duration::from_millis(10));
+            }
+        });
         if open {
             let _first = attempt.generation.set(generation);
         }
         let read = spawned.and_then(|()| {
+            if !open {
+                return Ok(());
+            }
             // Only now, so nothing from the brain reaches the UI before Connected.
             spawn_helper("link-data-reader", &mut helpers, {
                 let (data, control, events) =
@@ -2233,7 +2284,13 @@ impl Link {
                 tracing::error!("a link thread panicked");
             }
         }
-        if open { attendance } else { Attendance::Ended }
+        if open {
+            attendance
+        } else if custody_ended_first {
+            Attendance::Retry
+        } else {
+            Attendance::Ended
+        }
     }
 }
 

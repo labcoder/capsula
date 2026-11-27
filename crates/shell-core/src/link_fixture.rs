@@ -192,7 +192,7 @@ fn authenticated_with_output(
         .expect("authenticate both fixture legs");
         start
             .link
-            .attend_until(connection, &start.events, end, &Arc::default())
+            .attend_until(connection, None, &start.events, end, &Arc::default())
             == Attendance::Lost
     });
     Authenticated {

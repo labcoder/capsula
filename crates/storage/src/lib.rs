@@ -22,7 +22,7 @@ pub use platform::macos::{
     check_product_folder, create_private_dir, create_private_file, discard_entry, hold_chain,
     hold_private_chain, instance_edition, keep_sealed, open_private_write, open_sealed,
     open_shell_storage, owner_only_dir, private_tree, read_settings, remove_private_tree,
-    replace_settings, seal_and_publish, status, validate_private_path,
+    replace_settings, resume_private_write, seal_and_publish, status, validate_private_path,
 };
 #[cfg(windows)]
 pub use platform::windows::{

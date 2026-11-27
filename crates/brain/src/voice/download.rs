@@ -21,7 +21,7 @@ use url::{Host, Url};
 use crate::platform::{
     self, NativeTlsError, TrustDiagnostics, Untrusted, check_model_final, create_model_dir,
     create_model_write, discard_model, hold_model_creation, keep_model_final, model_final,
-    open_model_write, publish_model,
+    open_model_write, publish_model, resume_model_write,
 };
 
 const IDLE: Duration = Duration::from_secs(30);
@@ -227,6 +227,10 @@ impl Downloader {
             .await
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "every phase shares the held folders and the checked handles of the one before"
+    )]
     async fn fetch_files(
         &self,
         files: &[&ModelFile],
@@ -294,13 +298,19 @@ impl Downloader {
             pending.push((model, path, partial, final_file, existing));
         }
         self.check_space(missing, &root_creation)?;
-        let mut ready = Vec::new();
+        let mut acquired = Vec::new();
         for (model, path, partial, final_file, existing) in pending {
             check_cancel(cancel)?;
             let file = match existing {
                 Some(file) => file,
                 None => create_model_write(&partial).map_err(path_error)?,
             };
+            acquired.push((model, path, partial, final_file, file));
+        }
+        // Only once every file is checked and every partial held may a stopped publish be unsealed.
+        let mut ready = Vec::new();
+        for (model, path, partial, final_file, file) in acquired {
+            let file = resume_model_write(file, &partial).map_err(path_error)?;
             ready.push((model, path, final_file, file));
         }
         drop((root_creation, part_creation));

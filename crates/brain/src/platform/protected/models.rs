@@ -94,6 +94,15 @@ pub(crate) fn open_model_write(path: &Path) -> Result<File, Untrusted> {
     kumochi_storage::open_private_write(&anchor()?, path).map_err(Untrusted::from)
 }
 
+/// Makes a partial `open_model_write` opened writable, unsealing a stopped publish's.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "re-exported by the macOS voice activation")
+)]
+pub(crate) fn resume_model_write(file: File, path: &Path) -> Result<File, Untrusted> {
+    kumochi_storage::resume_private_write(&anchor()?, file, path).map_err(Untrusted::from)
+}
+
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "re-exported by the macOS voice activation")
