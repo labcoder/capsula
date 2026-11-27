@@ -12,7 +12,7 @@ use std::fmt;
 use std::time::Instant;
 
 mod choice;
-pub use choice::{Choice, MODEL_WRITE_TIME};
+pub use choice::{Choice, MODEL_READ_RETRY, MODEL_WRITE_TIME};
 mod hold;
 use hold::Hold;
 pub use hold::{HoldRelease, ScreenHold, ScreenLine, ScreenNotice};
@@ -320,9 +320,9 @@ impl Runs {
     }
 
     /// A `ThreadModelSet` or `ThreadModelRead` from the current connection.
-    pub fn apply_model(&mut self, reply: &ControlToShell) {
+    pub fn apply_model(&mut self, reply: &ControlToShell, now: Instant) {
         self.choice.sync(self.revision, self.thread());
-        self.choice.apply(reply);
+        self.choice.apply(reply, now);
     }
 
     pub fn revision(&self) -> u64 {

@@ -236,3 +236,69 @@ async fn a_parked_read_fails_at_its_deadline_and_frees_its_slot() {
         1
     );
 }
+
+/// A read the reader holds past its deadline answers `Failed` once and is cancelled; it keeps
+/// its slot until the reader lets it go, and the late answer is dropped.
+#[tokio::test(start_paused = true)]
+async fn a_handed_out_read_fails_at_its_deadline_and_holds_its_slot_until_retired() {
+    let mut core = fresh();
+    let effects = core.handle(read(1, T)).expect("sent");
+    let reads = sent(&effects);
+    assert_eq!(reads.len(), 1);
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::ArmModelReads { .. })),
+        "its deadline is armed: {effects:?}"
+    );
+    tokio::time::advance(READ_TIME).await;
+    assert_eq!(core.handle(Input::ModelReadsDue), Ok(vec![refused(1, T)]));
+    assert!(
+        reads[0].control.check().is_err(),
+        "the reader is told to stop"
+    );
+    assert_eq!(
+        core.handle(Input::ModelReadsDue),
+        Ok(Vec::new()),
+        "answered once"
+    );
+    assert_eq!(sent(&core.handle(read(2, T)).expect("admitted")).len(), 1);
+    assert_eq!(
+        core.handle(read(3, T)),
+        Ok(vec![refused(3, T)]),
+        "the expired read still holds its slot"
+    );
+    let found = ChoiceRead::Found {
+        choice: SavedChoice::Inherit,
+        revision: ChoiceRev(0),
+    };
+    assert_eq!(
+        core.handle(Input::ModelRead {
+            read: reads[0].clone(),
+            result: found,
+        }),
+        Ok(Vec::new()),
+        "the late answer is dropped"
+    );
+    assert_eq!(
+        sent(&core.handle(read(3, T)).expect("a slot is free")).len(),
+        1
+    );
+}
+
+/// Losing the pair cancels its reads at once, before any new pair starts.
+#[test]
+fn losing_the_shell_cancels_its_reads() {
+    let mut core = fresh();
+    let reads = sent(&core.handle(read(1, T)).expect("sent"));
+    assert_eq!(core.handle(Input::ShellLost), Ok(Vec::new()));
+    assert!(reads[0].control.check().is_err(), "cancelled on loss");
+    assert_eq!(
+        core.handle(Input::ModelRead {
+            read: reads[0].clone(),
+            result: ChoiceRead::Missing,
+        }),
+        Ok(Vec::new()),
+        "nobody is left to tell"
+    );
+}

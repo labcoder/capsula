@@ -1146,6 +1146,7 @@ impl Coordinator {
             Input::RunStored { run } => self.run_stored(run, &mut effects)?,
             Input::StoreFailed { run } => self.store_failed(run, &mut effects)?,
             Input::ShellLost => {
+                self.begin_model_session();
                 for (_, _, end) in &mut self.drawing_held {
                     *end = None;
                 }

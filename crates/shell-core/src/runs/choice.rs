@@ -18,6 +18,11 @@ use kumochi_protocol::message::{
 /// again [guess].
 pub const MODEL_WRITE_TIME: Duration = Duration::from_secs(5);
 
+/// How long after a failed read the shell asks again for the same chat [guess].
+// shortcut: the retry goes with the first link batch after the pause, not on its own timer;
+// a view that shows the choice arms one.
+pub const MODEL_READ_RETRY: Duration = Duration::from_secs(1);
+
 /// What the shell knows of the current chat's model choice.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Choice {
@@ -57,6 +62,8 @@ pub(super) struct Tracker {
     write: Option<(u32, Key, Instant)>,
     /// A read is owed for the current key.
     wanted: bool,
+    /// A read failed: the next one waits until then.
+    retry_at: Option<Instant>,
     /// A write's answer was lost or failed: only a read issued after this request settles.
     settle_after: Option<u32>,
     known: Option<Choice>,
@@ -88,6 +95,7 @@ impl Tracker {
         self.key = key;
         self.write = None;
         self.settle_after = None;
+        self.retry_at = None;
         self.known = None;
         self.newest = None;
         self.wanted = key.is_some();
@@ -115,12 +123,13 @@ impl Tracker {
     pub(super) fn read(&mut self, now: Instant) -> Option<ControlToBrain> {
         self.expire(now);
         let key = self.key?;
-        if !self.wanted || self.read.is_some() {
+        if !self.wanted || self.read.is_some() || self.retry_at.is_some_and(|at| at > now) {
             return None;
         }
         let request = self.issue()?;
         self.read = Some((request, key));
         self.wanted = false;
+        self.retry_at = None;
         Some(ControlToBrain::ReadModel {
             request,
             thread: key.thread,
@@ -182,7 +191,10 @@ impl Tracker {
         }
     }
 
-    pub(super) fn apply(&mut self, reply: &ControlToShell) {
+    /// A write past its deadline is lost before its answer is matched, so a late answer can't
+    /// stand in for the read that settles it.
+    pub(super) fn apply(&mut self, reply: &ControlToShell, now: Instant) {
+        self.expire(now);
         let (request, thread, result, written) = match reply {
             ControlToShell::ThreadModelSet {
                 request,
@@ -198,7 +210,7 @@ impl Tracker {
         };
         let asked = if written {
             self.write
-                .filter(|(id, ..)| *id == request)
+                .filter(|(id, key, _)| *id == request && key.thread == thread)
                 .map(|(_, key, _)| key)
         } else {
             self.read
@@ -226,7 +238,10 @@ impl Tracker {
                 self.settle_after = Some(request);
                 self.wanted = true;
             }
-            ChoiceRead::Failed => {}
+            ChoiceRead::Failed => {
+                self.wanted = true;
+                self.retry_at = Some(now + MODEL_READ_RETRY);
+            }
             _ if self.known == Some(Choice::Missing) => {}
             ChoiceRead::Missing => {
                 self.known = Some(Choice::Missing);

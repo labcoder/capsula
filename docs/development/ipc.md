@@ -723,7 +723,9 @@ write, and these facts add no GPUI presentation.
   restarted shell reusing request numbers can't receive one. At most `MAX_PENDING_MODEL_READS`
   reads hold slots, cancelled ones included until the reader answers; one more answers `Failed` at
   once. A read of a New chat whose first turn's row is still waiting behind an older run's outcome
-  parks until that write is queued, or fails at its two-second deadline. The tap records only the
+  parks until that write is queued. Every read answers `Failed` once at its two-second deadline,
+  counted from admission, whether parked or held by a busy reader; a reader's late answer is
+  dropped. Losing the shell cancels its reads, and a read that arrives with no shell is ignored. The tap records only the
   operation and length of both answers; `ReadModel` carries no content.
 
   ```mermaid
@@ -745,7 +747,8 @@ write, and these facts add no GPUI presentation.
   no panel open. It keeps one read and one write outstanding, matches answers by request, kind and
   thread, and takes a found choice only at a revision at least the newest it saw. It writes only over
   a current found answer; a write that fails, isn't sent or goes unanswered for `MODEL_WRITE_TIME` leaves
-  the choice unknown until a read sent after it answers. No picker sends a write yet.
+  the choice unknown until a read sent after it answers. A failed read is asked again after
+  `MODEL_READ_RETRY`. No picker sends a write yet.
 - **The main thread's name isn't a title.** Generic `Rename` of the main thread is gone: the
   brain refuses it with no write, and logs that it did, never the title. The shell renames Kumo
   with `SettingsOp::SetAssistantName`, under the 24-character name rule. `SettingsView` carries

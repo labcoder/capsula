@@ -40,6 +40,8 @@ struct Slot {
     cancel: Arc<AtomicBool>,
     /// Handed to the reader; a parked read waits for its new thread's row to be queued.
     sent: bool,
+    /// Already answered `Failed` at its deadline; the reader's late answer is dropped.
+    expired: bool,
 }
 
 /// The pair's session and its admitted reads.
@@ -47,6 +49,8 @@ struct Slot {
 pub(super) struct ModelChoices {
     session: u64,
     slots: Vec<Slot>,
+    /// The deadline the runtime's timer is set to, cleared when it fires.
+    armed: Option<Instant>,
 }
 
 impl Coordinator {
@@ -55,6 +59,7 @@ impl Coordinator {
         self.model_choices.session
     }
 
+    /// A pair starts or is lost: its reads are cancelled and none of its answers go out again.
     pub(super) fn begin_model_session(&mut self) {
         let choices = &mut self.model_choices;
         choices.session = choices
@@ -122,12 +127,17 @@ impl Coordinator {
             deadline: Instant::now() + READ_TIME,
             cancel: Arc::new(AtomicBool::new(false)),
             sent: false,
+            expired: false,
         });
     }
 
     /// Hands the reader every parked read whose thread has no new row waiting to be queued, so
-    /// the read is stamped after the write that creates it; arms the earliest parked deadline.
+    /// the read is stamped after the write that creates it; arms the earliest deadline still owed
+    /// an answer, parked or handed out.
     pub(super) fn release_model_reads(&mut self, effects: &mut Vec<Effect>) {
+        if self.model_choices.slots.is_empty() {
+            return;
+        }
         let unborn: Vec<ThreadId> = self
             .ending
             .iter()
@@ -141,7 +151,6 @@ impl Coordinator {
                 _ => None,
             })
             .collect();
-        let mut parked = None;
         for slot in self
             .model_choices
             .slots
@@ -149,7 +158,6 @@ impl Coordinator {
             .filter(|slot| !slot.sent)
         {
             if unborn.contains(&slot.thread) {
-                parked = Some(parked.map_or(slot.deadline, |at: Instant| at.min(slot.deadline)));
                 continue;
             }
             slot.sent = true;
@@ -160,27 +168,41 @@ impl Coordinator {
                 control: Control::new(slot.deadline.into_std()).observe(Arc::clone(&slot.cancel)),
             })));
         }
-        if let Some(at) = parked {
+        let choices = &mut self.model_choices;
+        let next = choices
+            .slots
+            .iter()
+            .filter(|slot| slot.session == choices.session && !slot.expired)
+            .map(|slot| slot.deadline)
+            .min();
+        if let Some(at) = next
+            && choices.armed.is_none_or(|armed| at < armed)
+        {
+            choices.armed = Some(at);
             effects.push(Effect::ArmModelReads { at });
         }
     }
 
-    /// Fails each parked read past its deadline: its new thread's row is still waiting.
+    /// Answers `Failed` once for each read past its deadline. A parked one frees its slot; one
+    /// the reader holds is cancelled and keeps its slot until the reader lets it go.
     pub(super) fn model_reads_due(&mut self, effects: &mut Vec<Effect>) {
         let now = Instant::now();
-        let session = self.model_choices.session;
-        self.model_choices.slots.retain(|slot| {
-            if slot.sent || slot.deadline > now {
+        let choices = &mut self.model_choices;
+        choices.armed = None;
+        choices.slots.retain_mut(|slot| {
+            if slot.expired || slot.deadline > now {
                 return true;
             }
-            if slot.session == session {
+            slot.expired = true;
+            slot.cancel.store(true, Ordering::SeqCst);
+            if slot.session == choices.session {
                 effects.push(Effect::Control(ControlToShell::ThreadModelRead {
                     request: slot.request,
                     thread: slot.thread,
                     result: ChoiceRead::Failed,
                 }));
             }
-            false
+            slot.sent
         });
     }
 
@@ -191,10 +213,14 @@ impl Coordinator {
         result: ChoiceRead,
         effects: &mut Vec<Effect>,
     ) {
-        self.model_choices.slots.retain(|slot| {
-            !(slot.sent && slot.session == read.session && slot.request == read.request)
-        });
-        if read.session == self.model_choices.session {
+        let choices = &mut self.model_choices;
+        let Some(at) = choices.slots.iter().position(|slot| {
+            slot.sent && slot.session == read.session && slot.request == read.request
+        }) else {
+            return;
+        };
+        let slot = choices.slots.swap_remove(at);
+        if !slot.expired && slot.session == choices.session {
             effects.push(Effect::Control(ControlToShell::ThreadModelRead {
                 request: read.request,
                 thread: read.thread,

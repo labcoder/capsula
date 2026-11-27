@@ -9,7 +9,7 @@ use kumochi_protocol::message::{
     ModelChoice, ModelSlug, Phase, RunId, RunOrigin, SavedChoice, ThreadId, ThreadOp,
 };
 
-use super::{Choice, MODEL_WRITE_TIME, Runs};
+use super::{Choice, MODEL_READ_RETRY, MODEL_WRITE_TIME, Runs};
 
 const KUMO: ThreadId = ThreadId(1);
 const TASK: ThreadId = ThreadId(9);
@@ -65,7 +65,7 @@ fn settled(thread: ThreadId, result: ChoiceRead) -> (Runs, Instant) {
     let mut runs = connected();
     runs.select_thread(Some(thread));
     assert_eq!(runs.model_read(now), Some(read(1, thread)));
-    runs.apply_model(&answer(1, thread, result));
+    runs.apply_model(&answer(1, thread, result), now);
     (runs, now)
 }
 
@@ -88,7 +88,7 @@ fn kumo_focus_promotion_and_reconnect_each_ask_again() {
         "Kumo's chat is read like a task"
     );
     assert_eq!(runs.model_read(now), None, "one read per key");
-    runs.apply_model(&answer(1, KUMO, found(SavedChoice::Inherit, 0)));
+    runs.apply_model(&answer(1, KUMO, found(SavedChoice::Inherit, 0)), now);
     assert_eq!(
         runs.model_choice(),
         Choice::Found {
@@ -104,7 +104,10 @@ fn kumo_focus_promotion_and_reconnect_each_ask_again() {
         "Kumo's answer isn't the task's"
     );
     assert_eq!(runs.model_read(now), Some(read(2, TASK)));
-    runs.apply_model(&answer(2, TASK, found(SavedChoice::Chosen(picked()), 4)));
+    runs.apply_model(
+        &answer(2, TASK, found(SavedChoice::Chosen(picked()), 4)),
+        now,
+    );
 
     runs.select_thread(None);
     assert_eq!(runs.model_choice(), Choice::NoThread);
@@ -122,7 +125,7 @@ fn kumo_focus_promotion_and_reconnect_each_ask_again() {
         "promoted, not read yet"
     );
     assert_eq!(runs.model_read(now), Some(read(3, OTHER)));
-    runs.apply_model(&answer(3, OTHER, found(SavedChoice::Inherit, 0)));
+    runs.apply_model(&answer(3, OTHER, found(SavedChoice::Inherit, 0)), now);
 
     runs.disconnected();
     assert_eq!(
@@ -159,23 +162,26 @@ fn an_answer_asked_under_an_earlier_selection_is_dropped() {
         None,
         "the old read still holds its slot"
     );
-    runs.apply_model(&answer(1, TASK, found(SavedChoice::Chosen(picked()), 2)));
+    runs.apply_model(
+        &answer(1, TASK, found(SavedChoice::Chosen(picked()), 2)),
+        now,
+    );
     assert_eq!(runs.model_choice(), Choice::Unknown);
     assert_eq!(runs.model_read(now), Some(read(2, TASK)));
-    runs.apply_model(&answer(2, OTHER, found(SavedChoice::Inherit, 0)));
+    runs.apply_model(&answer(2, OTHER, found(SavedChoice::Inherit, 0)), now);
     assert_eq!(
         runs.model_choice(),
         Choice::Unknown,
         "another thread's answer"
     );
     assert_eq!(runs.model_read(now), Some(read(3, TASK)));
-    runs.apply_model(&written(3, TASK, found(SavedChoice::Inherit, 0)));
+    runs.apply_model(&written(3, TASK, found(SavedChoice::Inherit, 0)), now);
     assert_eq!(
         runs.model_choice(),
         Choice::Unknown,
         "a write answer for a read's number"
     );
-    runs.apply_model(&answer(3, TASK, found(SavedChoice::Inherit, 0)));
+    runs.apply_model(&answer(3, TASK, found(SavedChoice::Inherit, 0)), now);
     assert_eq!(
         runs.model_choice(),
         Choice::Found {
@@ -205,11 +211,10 @@ fn set_and_clear_use_the_committed_answer() {
         model: ModelSlug::new("committed-model").expect("valid"),
         ..picked()
     };
-    runs.apply_model(&written(
-        2,
-        TASK,
-        found(SavedChoice::Chosen(other.clone()), 1),
-    ));
+    runs.apply_model(
+        &written(2, TASK, found(SavedChoice::Chosen(other.clone()), 1)),
+        now,
+    );
     assert_eq!(
         runs.model_choice(),
         Choice::Found {
@@ -225,7 +230,7 @@ fn set_and_clear_use_the_committed_answer() {
             choice: None,
         }))
     );
-    runs.apply_model(&written(3, TASK, found(SavedChoice::Inherit, 2)));
+    runs.apply_model(&written(3, TASK, found(SavedChoice::Inherit, 2)), now);
     assert_eq!(
         runs.model_choice(),
         Choice::Found {
@@ -243,7 +248,7 @@ fn no_write_goes_before_the_chat_is_known_to_exist() {
     assert_eq!(runs.set_model(Some(picked()), now), None, "unread");
     assert_eq!(runs.model_read(now), Some(read(1, TASK)));
     assert_eq!(runs.set_model(None, now), None, "the read is unanswered");
-    runs.apply_model(&answer(1, TASK, ChoiceRead::Failed));
+    runs.apply_model(&answer(1, TASK, ChoiceRead::Failed), now);
     assert_eq!(runs.model_choice(), Choice::Unknown);
     assert_eq!(
         runs.set_model(None, now),
@@ -268,13 +273,19 @@ fn a_lost_write_is_settled_only_by_a_later_read() {
     );
     let late = now + MODEL_WRITE_TIME;
     assert_eq!(runs.model_read(late), Some(read(3, TASK)));
-    runs.apply_model(&written(2, TASK, found(SavedChoice::Chosen(picked()), 1)));
+    runs.apply_model(
+        &written(2, TASK, found(SavedChoice::Chosen(picked()), 1)),
+        now,
+    );
     assert_eq!(
         runs.model_choice(),
         Choice::Unknown,
         "the late answer isn't used"
     );
-    runs.apply_model(&answer(3, TASK, found(SavedChoice::Chosen(picked()), 1)));
+    runs.apply_model(
+        &answer(3, TASK, found(SavedChoice::Chosen(picked()), 1)),
+        now,
+    );
     assert_eq!(
         runs.model_choice(),
         Choice::Found {
@@ -291,14 +302,14 @@ fn a_lost_write_is_settled_only_by_a_later_read() {
 
     let (mut runs, now) = settled(TASK, found(SavedChoice::Inherit, 0));
     runs.set_model(Some(picked()), now).expect("a write");
-    runs.apply_model(&written(2, TASK, ChoiceRead::Failed));
+    runs.apply_model(&written(2, TASK, ChoiceRead::Failed), now);
     assert_eq!(
         runs.model_choice(),
         Choice::Unknown,
         "never an assumed rollback"
     );
     assert_eq!(runs.model_read(now), Some(read(3, TASK)));
-    runs.apply_model(&answer(3, TASK, found(SavedChoice::Inherit, 0)));
+    runs.apply_model(&answer(3, TASK, found(SavedChoice::Inherit, 0)), now);
     assert_eq!(
         runs.model_choice(),
         Choice::Found {
@@ -314,11 +325,14 @@ fn a_lost_write_is_settled_only_by_a_later_read() {
 fn an_older_revision_or_a_late_failure_never_wins() {
     let (mut runs, now) = settled(TASK, found(SavedChoice::Inherit, 0));
     runs.set_model(Some(picked()), now).expect("a write");
-    runs.apply_model(&written(2, TASK, found(SavedChoice::Chosen(picked()), 5)));
+    runs.apply_model(
+        &written(2, TASK, found(SavedChoice::Chosen(picked()), 5)),
+        now,
+    );
     runs.set_model(None, now).expect("a write");
-    runs.apply_model(&written(3, TASK, ChoiceRead::Failed));
+    runs.apply_model(&written(3, TASK, ChoiceRead::Failed), now);
     assert_eq!(runs.model_read(now), Some(read(4, TASK)));
-    runs.apply_model(&answer(4, TASK, found(SavedChoice::Inherit, 4)));
+    runs.apply_model(&answer(4, TASK, found(SavedChoice::Inherit, 4)), now);
     assert_eq!(
         runs.model_choice(),
         Choice::Unknown,
@@ -329,16 +343,16 @@ fn an_older_revision_or_a_late_failure_never_wins() {
     let set = runs.set_model(None, now).expect("a write");
     runs.model_unsent(&set);
     assert_eq!(runs.model_read(now), Some(read(3, TASK)));
-    runs.apply_model(&answer(3, TASK, ChoiceRead::Failed));
+    runs.apply_model(&answer(3, TASK, ChoiceRead::Failed), now);
     assert_eq!(runs.model_choice(), Choice::Unknown);
 
     let (mut runs, now) = settled(TASK, ChoiceRead::Missing);
     runs.select_thread(Some(TASK));
     assert_eq!(runs.model_read(now), Some(read(2, TASK)));
-    runs.apply_model(&answer(2, TASK, ChoiceRead::Missing));
+    runs.apply_model(&answer(2, TASK, ChoiceRead::Missing), now);
     runs.select_thread(Some(TASK));
     assert_eq!(runs.model_read(now), Some(read(3, TASK)));
-    runs.apply_model(&answer(3, TASK, found(SavedChoice::Inherit, 0)));
+    runs.apply_model(&answer(3, TASK, found(SavedChoice::Inherit, 0)), now);
     assert_eq!(
         runs.model_choice(),
         Choice::Found {
@@ -355,8 +369,11 @@ fn a_confirmed_delete_moves_the_choice_back_to_kumo() {
     assert!(runs.confirm_delete(TASK));
     assert_eq!(runs.model_choice(), Choice::Unknown);
     assert_eq!(runs.model_read(now), Some(read(2, KUMO)));
-    runs.apply_model(&answer(2, KUMO, found(SavedChoice::Inherit, 0)));
-    runs.apply_model(&answer(1, TASK, found(SavedChoice::Chosen(picked()), 1)));
+    runs.apply_model(&answer(2, KUMO, found(SavedChoice::Inherit, 0)), now);
+    runs.apply_model(
+        &answer(1, TASK, found(SavedChoice::Chosen(picked()), 1)),
+        now,
+    );
     assert_eq!(
         runs.model_choice(),
         Choice::Found {
@@ -364,5 +381,99 @@ fn a_confirmed_delete_moves_the_choice_back_to_kumo() {
             revision: ChoiceRev(0)
         },
         "a late answer for the deleted chat doesn't restore it"
+    );
+}
+
+/// A failed read asks again for the same chat after a pause, never at once, and its answer
+/// settles the choice without a refocus.
+#[test]
+fn a_failed_read_is_retried_after_a_pause() {
+    let (mut runs, now) = settled(TASK, ChoiceRead::Failed);
+    assert_eq!(runs.model_choice(), Choice::Unknown);
+    assert_eq!(runs.model_read(now), None, "no immediate retry");
+    let later = now + MODEL_READ_RETRY;
+    assert_eq!(runs.model_read(later), Some(read(2, TASK)));
+    assert_eq!(runs.model_read(later), None, "one read at a time");
+    runs.apply_model(
+        &answer(2, TASK, found(SavedChoice::Chosen(picked()), 1)),
+        later,
+    );
+    assert_eq!(
+        runs.model_choice(),
+        Choice::Found {
+            choice: SavedChoice::Chosen(picked()),
+            revision: ChoiceRev(1)
+        }
+    );
+
+    let (mut runs, now) = settled(TASK, found(SavedChoice::Inherit, 0));
+    let set = runs.set_model(None, now).expect("a write");
+    runs.model_unsent(&set);
+    assert_eq!(runs.model_read(now), Some(read(3, TASK)));
+    runs.apply_model(&answer(3, TASK, ChoiceRead::Failed), now);
+    let later = now + MODEL_READ_RETRY;
+    assert_eq!(
+        runs.model_read(later),
+        Some(read(4, TASK)),
+        "the reread after a lost write is retried too"
+    );
+    runs.apply_model(&answer(4, TASK, found(SavedChoice::Inherit, 0)), later);
+    assert_eq!(
+        runs.model_choice(),
+        Choice::Found {
+            choice: SavedChoice::Inherit,
+            revision: ChoiceRev(0)
+        }
+    );
+}
+
+/// A write answer for another thread neither settles the write nor frees it for another.
+#[test]
+fn a_write_answer_for_another_thread_is_ignored() {
+    let (mut runs, now) = settled(TASK, found(SavedChoice::Inherit, 0));
+    runs.set_model(Some(picked()), now).expect("a write");
+    runs.apply_model(&written(2, OTHER, found(SavedChoice::Inherit, 7)), now);
+    assert_eq!(runs.model_choice(), Choice::Unknown, "still unanswered");
+    assert_eq!(
+        runs.set_model(None, now),
+        None,
+        "the write is still outstanding"
+    );
+    runs.apply_model(
+        &written(2, TASK, found(SavedChoice::Chosen(picked()), 1)),
+        now,
+    );
+    assert_eq!(
+        runs.model_choice(),
+        Choice::Found {
+            choice: SavedChoice::Chosen(picked()),
+            revision: ChoiceRev(1)
+        }
+    );
+}
+
+/// An answer that arrives after the write's deadline, with no pump in between, is not used:
+/// only a read sent afterwards settles the choice.
+#[test]
+fn a_write_answer_past_its_deadline_is_not_used() {
+    let (mut runs, now) = settled(TASK, found(SavedChoice::Inherit, 0));
+    runs.set_model(Some(picked()), now).expect("a write");
+    let late = now + MODEL_WRITE_TIME;
+    runs.apply_model(
+        &written(2, TASK, found(SavedChoice::Chosen(picked()), 1)),
+        late,
+    );
+    assert_eq!(runs.model_choice(), Choice::Unknown);
+    assert_eq!(runs.model_read(late), Some(read(3, TASK)));
+    runs.apply_model(
+        &answer(3, TASK, found(SavedChoice::Chosen(picked()), 1)),
+        late,
+    );
+    assert_eq!(
+        runs.model_choice(),
+        Choice::Found {
+            choice: SavedChoice::Chosen(picked()),
+            revision: ChoiceRev(1)
+        }
     );
 }

@@ -286,6 +286,10 @@ impl Brain {
             }
             return;
         }
+        if matches!(message, ControlToBrain::ReadModel { .. }) {
+            // Nobody is left to answer, and an admitted read would hold a slot for the next pair.
+            return;
+        }
         if let ControlToBrain::AccountOp(op) = message {
             let applied = self.account_input(AccountInput::Op(op), None);
             debug_assert!(applied.is_ok(), "applying without a shell can't fail");
