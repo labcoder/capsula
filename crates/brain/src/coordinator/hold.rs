@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use kumochi_protocol::message::{
-    ConnectionKind, Content, ControlToShell, GestureId, HeldScreen, RunOrigin, ScreenClass,
-    ThreadId,
+    ConnectionKind, Content, ControlToShell, GestureId, HeldScreen, HoldFailure, RunOrigin,
+    ScreenClass, ThreadId,
 };
 
 use super::availability::Arrived;
@@ -223,14 +223,17 @@ impl Coordinator {
         selection: u64,
         mut defaults: RunSnapshot,
         cancel: Arc<AtomicBool>,
-    ) -> Result<StoreOp, ()> {
+    ) -> Result<StoreOp, HoldFailure> {
         let arrived = self.arrived_now();
-        if cancel.load(Ordering::SeqCst)
-            || arrived.is_empty()
-            || thread.is_some_and(|thread| self.deleting_thread(thread))
-        {
+        let stale = cancel.load(Ordering::SeqCst)
+            || thread.is_some_and(|thread| self.deleting_thread(thread));
+        if stale || arrived.is_empty() {
             cancel.store(true, Ordering::SeqCst);
-            return Err(());
+            return Err(if stale {
+                HoldFailure::ChoiceChanged
+            } else {
+                HoldFailure::NoConnection
+            });
         }
         // The store sets it again once a pinned choice resolves; native items replay under it.
         defaults.connection = arrived.replay(defaults.choice.as_ref());

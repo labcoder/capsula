@@ -112,6 +112,8 @@ pub enum HoldFailure {
     ChoiceChanged,
     /// Local speech recognition failed without recognized text.
     DecodeFailed,
+    /// No account or connection is ready to answer, so no microphone opened.
+    NoConnection,
 }
 
 /// A committed step: its scene and its lifetime index there.

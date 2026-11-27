@@ -2,8 +2,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use kumochi_protocol::message::{
-    AssistantName, ConnectionKind, Effort, EffortSet, GestureId, ModelChoice, ModelInfo, ModelName,
-    ModelSlug, RunOrigin, ThreadOp,
+    AssistantName, ConnectionKind, Effort, EffortSet, GestureId, HoldFailure, ModelChoice,
+    ModelInfo, ModelName, ModelSlug, RunOrigin, ThreadOp,
 };
 
 use super::*;
@@ -129,11 +129,15 @@ fn preparation_refuses_pending_delete_unavailable_or_cancelled_without_revival()
     for refusal in 0..3 {
         let mut core = fresh();
         let cancel = Arc::new(AtomicBool::new(false));
-        match refusal {
-            0 => cancel.store(true, Ordering::SeqCst),
+        let failure = match refusal {
+            0 => {
+                cancel.store(true, Ordering::SeqCst);
+                HoldFailure::ChoiceChanged
+            }
             1 => {
                 core.availability[ConnectionKind::ChatGpt] =
                     Availability::Unavailable(super::super::availability::sign_in_needed());
+                HoldFailure::NoConnection
             }
             2 => {
                 core.handle(Input::Delete {
@@ -142,17 +146,18 @@ fn preparation_refuses_pending_delete_unavailable_or_cancelled_without_revival()
                     resend: false,
                 })
                 .unwrap();
+                HoldFailure::ChoiceChanged
             }
             _ => unreachable!(),
-        }
+        };
         assert_eq!(
             core.prepare_hold(KEY, Some(T), 12, defaults(), Arc::clone(&cancel)),
-            Err(())
+            Err(failure)
         );
         core.availability[ConnectionKind::ChatGpt] = Availability::Ready(Ready::fixture());
         assert_eq!(
             core.prepare_hold(KEY, None, 12, defaults(), cancel),
-            Err(())
+            Err(HoldFailure::ChoiceChanged)
         );
         assert_eq!(
             (core.last_run, core.last_thread, core.turns_read),

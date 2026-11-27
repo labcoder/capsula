@@ -824,6 +824,7 @@ impl State {
                         _ => Text::VoiceStatusUnknown,
                     },
                     HoldFailure::Busy => Text::TurnBusy,
+                    HoldFailure::NoConnection => Text::HoldNoConnection,
                     _ => Text::HoldFailed,
                 },
             ),

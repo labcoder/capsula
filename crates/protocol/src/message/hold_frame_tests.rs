@@ -47,6 +47,7 @@ fn voice_only_hold_controls_append_tags_without_screen_authority() {
         super::HoldStatus::Failed(super::HoldFailure::TimedOut),
         super::HoldStatus::Failed(super::HoldFailure::ChoiceChanged),
         super::HoldStatus::Failed(super::HoldFailure::DecodeFailed),
+        super::HoldStatus::Failed(super::HoldFailure::NoConnection),
     ] {
         let message = ControlToShell::VoiceHoldStatus {
             gesture: GESTURE,

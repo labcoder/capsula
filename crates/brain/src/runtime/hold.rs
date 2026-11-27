@@ -665,9 +665,12 @@ impl Brain {
             self.snapshot(Origin::Kumo),
             Arc::clone(&cancel),
         );
-        let Ok(op) = prepared else {
-            Self::hold_status(key, HoldStatus::Failed(HoldFailure::ChoiceChanged), link)?;
-            return Ok(false);
+        let op = match prepared {
+            Ok(op) => op,
+            Err(failure) => {
+                Self::hold_status(key, HoldStatus::Failed(failure), link)?;
+                return Ok(false);
+            }
         };
         self.holds.pending = Some(Hold {
             key,

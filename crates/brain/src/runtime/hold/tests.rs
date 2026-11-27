@@ -37,6 +37,7 @@ fn failed_hold_status_logs_only_closed_reason_without_identifiers() {
         HoldFailure::TimedOut,
         HoldFailure::ChoiceChanged,
         HoldFailure::DecodeFailed,
+        HoldFailure::NoConnection,
     ] {
         Brain::hold_status(KEY, HoldStatus::Failed(reason), &mut link).unwrap();
         assert_eq!(status(&mut output), HoldStatus::Failed(reason));
@@ -51,6 +52,7 @@ fn failed_hold_status_logs_only_closed_reason_without_identifiers() {
         "TimedOut",
         "ChoiceChanged",
         "DecodeFailed",
+        "NoConnection",
     ];
     let diagnostics = text.lines().collect::<Vec<_>>();
     assert_eq!(diagnostics.len(), reasons.len());

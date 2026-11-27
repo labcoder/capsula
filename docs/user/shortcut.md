@@ -7,6 +7,8 @@ Kumochi listens for **left Ctrl + left Alt**, from any app, without taking those
   Speech is transcribed locally and sent once to the model and connection chosen for your
   [input target](tasks.md), like an ordinary chat message. This hold does not take a screenshot.
   [Speech input](voice.md) must already be installed; the shortcut never downloads a model.
+  You also need an [account](accounts.md) signed in or connected; without one, Kumochi says
+  **Sign in or connect an account in Settings → Accounts, then hold to talk.**
   If Kumochi only notices the hold as you release it, nothing was recorded and it says
   **Speech input failed. Try again.** Once the reply starts, Esc no longer cancels speech input.
 - **Double tap** both keys, two short presses with their releases less than 300 ms apart. A small

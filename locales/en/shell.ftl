@@ -253,6 +253,7 @@ hold-unavailable = Speech input unavailable. Restart the app if the microphone s
 hold-microphone-unavailable = Microphone unavailable. Check microphone access and your input device, then try again.
 hold-unconfirmed = Replies stay paused until the microphone is confirmed closed.
 hold-failed = Speech input failed. Try again.
+hold-no-connection = Sign in or connect an account in Settings → Accounts, then hold to talk.
 hold-lost = Not sent. Hold to try again.
 hold-lost-restored = Not sent. Your words are in the box.
 hold-lost-picture = The picture wasn't kept.

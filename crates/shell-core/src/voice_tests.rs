@@ -249,6 +249,21 @@ fn offer(epoch: u64) -> Offer {
 }
 
 #[test]
+fn a_hold_with_no_ready_connection_ends_by_pointing_to_accounts() {
+    let (state, _gate) = holding(Source::Waiting);
+    let failed = state.status(
+        4,
+        GestureId(1),
+        HoldStatus::Failed(HoldFailure::NoConnection),
+        || Text::VoiceUnloaded,
+    );
+    assert_eq!(
+        failed,
+        StatusStep::Failed(HoldFailure::NoConnection, Text::HoldNoConnection)
+    );
+}
+
+#[test]
 fn a_status_from_another_connection_or_after_the_end_does_nothing() {
     let (mut state, _gate) = holding(Source::Waiting);
     let speech = || Text::VoiceUnloaded;

@@ -731,7 +731,10 @@ the connection without rolling back the load or retrying it.
 
 Key-down can warm the model for a later recognized hold; it doesn't open the
 microphone or create a turn. Hold admission still waits for a ready model before
-the production capture and transcription flow can start.
+the production capture and transcription flow can start. It also needs a ready connection:
+with no account signed in or connected, the brain refuses the hold as `Failed(NoConnection)`
+before any microphone opens, and the shell points to Settings → Accounts. A hold cancelled or
+aimed at a thread being deleted during preparation stays `ChoiceChanged`.
 
 Both owners, speech input's and spoken replies', take `load(models, ask)` and `unload(ask)`, where
 the ask is the caller's own counter, and send one `LoadReport { ask, event }` per outcome:
