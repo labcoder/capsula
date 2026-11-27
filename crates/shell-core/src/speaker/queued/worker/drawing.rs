@@ -30,6 +30,10 @@ pub(crate) trait DrawingIo: Send + 'static {
     fn requires_narration(&self) -> bool {
         false
     }
+
+    fn plain(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

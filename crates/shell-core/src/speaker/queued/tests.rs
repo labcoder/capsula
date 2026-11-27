@@ -415,6 +415,63 @@ fn a_failed_open_does_not_rebase_the_running_virtual_clock() {
     assert_eq!(engine.progress.heard, 0);
 }
 
+fn plain_first_open(len: usize) -> (Engine, u64) {
+    let mut engine = Engine::new(RUN, LOGICAL);
+    engine.hold_first_open = true;
+    engine.expect(ms(0));
+    let generation = engine.request(ms(0)).unwrap();
+    assert!(matches!(
+        engine.offer(segment(0, len), ms(0)),
+        Ok(Admission::Return(_))
+    ));
+    assert_eq!(engine.phase, Phase::Running);
+    (engine, generation)
+}
+
+#[test]
+fn a_slow_plain_first_open_keeps_the_reply_start_until_its_retry_time() {
+    for outcome in [Opened::Physical, Opened::Unavailable] {
+        let (mut engine, generation) = plain_first_open(480);
+        assert_eq!(engine.tick(ms(400)), Ok(None));
+        assert_eq!(engine.progress.consumed, 0);
+        assert!(engine.opened(generation, outcome, ms(999)));
+        assert_eq!(engine.progress.consumed, 0);
+        assert_eq!(engine.queue.samples.len(), 480);
+        assert_eq!(engine.tick(ms(1009)), Ok(None));
+        let expected = if outcome == Opened::Physical { 0 } else { 240 };
+        assert_eq!(engine.progress.consumed, expected);
+    }
+}
+
+#[test]
+fn a_plain_first_open_past_its_retry_time_paces_from_that_time() {
+    let (mut engine, _) = plain_first_open(960);
+    assert_eq!(engine.tick(ms(1010)), Ok(None));
+    assert_eq!(engine.progress.consumed, 240);
+    assert_eq!(engine.progress.heard, 0);
+    assert_eq!(engine.tick(ms(1020)), Ok(None));
+    assert_eq!(engine.progress.consumed, 480);
+}
+
+#[test]
+fn a_plain_retry_open_does_not_hold_virtual_pacing() {
+    let mut engine = Engine::new(RUN, LOGICAL);
+    engine.hold_first_open = true;
+    engine.expect(ms(0));
+    let first = engine.request(ms(0)).unwrap();
+    assert!(engine.opened(first, Opened::Unavailable, ms(0)));
+    for seq in 0..20 {
+        assert!(matches!(
+            engine.offer(frame(seq, 2400, None, 1), ms(0)),
+            Ok(Admission::Return(_))
+        ));
+    }
+    engine.request(ms(1000)).unwrap();
+    assert_eq!(engine.progress.consumed, 24_000);
+    assert_eq!(engine.tick(ms(1010)), Ok(None));
+    assert_eq!(engine.progress.consumed, 24_240);
+}
+
 fn losing_a() -> (Engine, u64) {
     let mut engine = Engine::new(RUN, LOGICAL);
     engine.expect(ms(0));
