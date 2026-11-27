@@ -126,16 +126,17 @@ impl InstanceLock {
 impl InstanceLock {
     /// First touch: takes this edition's lock in the product folder the brain made under the
     /// `support` anchor, without waiting, and only then makes its `logs` folder. The product
-    /// folder is never created.
+    /// folder is never created. When `logs` can't be made the lock is still held, with no
+    /// [`Self::storage`], so its owner keeps it while refusing with `Log`.
     ///
     /// # Errors
     /// `Missing` when the product folder isn't there, `Busy` when another shell holds the lock,
-    /// `Refused` for anything not admitted.
+    /// `Refused` for a folder or lock not admitted.
     pub fn try_acquire_existing(support: &Path) -> Result<Self, FirstTouchError> {
         let (lock, storage) = crate::platform::macos::try_acquire_existing_lock(support)?;
         Ok(Self {
             _held: Held::Admitted { _lock: lock },
-            storage: Some(storage),
+            storage,
         })
     }
 

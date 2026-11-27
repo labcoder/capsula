@@ -347,15 +347,14 @@ impl Product {
     /// Takes the private lock basename `name` in this product folder without waiting, then
     /// creates `logs` beneath the folder as [`open_shell_storage`] does, so nothing but the lock
     /// file is made before the lock is held. None, with no `logs` made, when another owner holds
-    /// it.
+    /// it. The lock comes back held even when `logs` fails, with no storage beside it.
     ///
     /// # Errors
-    /// As [`Product::into_lock`], a lock failure other than another holder, and as
-    /// [`open_shell_storage`]'s `logs` step.
+    /// As [`Product::into_lock`], and a lock failure other than another holder.
     pub fn try_lock_storage(
         self,
         name: &str,
-    ) -> Result<Option<(AdmittedLock, ShellStorage)>, AcquisitionError> {
+    ) -> Result<Option<(AdmittedLock, Option<ShellStorage>)>, AcquisitionError> {
         let mut directories = self.held;
         let file = directories.open_lock(name)?;
         match file.try_lock() {
@@ -363,14 +362,15 @@ impl Product {
             Err(TryLockError::WouldBlock) => return Ok(None),
             Err(TryLockError::Error(error)) => return Err(AcquisitionError::Open(error.kind())),
         }
-        directories.create_private(c"logs".to_owned(), false)?;
-        directories.check()?;
+        let logs = directories
+            .create_private(c"logs".to_owned(), false)
+            .and_then(|()| directories.check());
         let directories = Arc::new(directories);
         let lock = AdmittedLock {
             file,
             directories: Arc::clone(&directories),
         };
-        Ok(Some((lock, ShellStorage(directories))))
+        Ok(Some((lock, logs.ok().map(|()| ShellStorage(directories)))))
     }
 }
 

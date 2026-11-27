@@ -27,10 +27,11 @@ pub(crate) fn try_acquire_instance_lock()
 }
 
 /// Takes `<SHELL_LOCK>.lock` in the existing product folder under `support` without waiting,
-/// then makes `logs`; never creates the product folder. The storage stays with the lock.
+/// then makes `logs`; never creates the product folder. The storage stays with the lock, and the
+/// lock stays held with none when `logs` fails.
 pub(crate) fn try_acquire_existing_lock(
     support: &Path,
-) -> Result<(AdmittedLock, ShellStorage), FirstTouchError> {
+) -> Result<(AdmittedLock, Option<ShellStorage>), FirstTouchError> {
     let anchor = kumochi_storage::admit_support(support).map_err(|_| FirstTouchError::Refused)?;
     match anchor
         .product_folder(constants::DATA_DIR)
@@ -121,6 +122,39 @@ mod tests {
         std::fs::remove_dir(&support).expect("remove the fixture anchor");
         assert_eq!(second, Err(FirstTouchError::Busy));
         assert_eq!(after, Ok(()), "dropping the lock releases it");
+    }
+
+    #[test]
+    #[ignore = "requires exact-head review and a bounded native fixture-parent commission"]
+    fn native_a_logs_leaf_that_isnt_a_folder_leaves_the_lock_held() {
+        let support = support("logs-leaf");
+        let product = support.join(constants::DATA_DIR);
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&product)
+            .expect("the brain's product folder");
+        let leaf = product.join("logs");
+        std::fs::write(&leaf, b"").expect("a logs leaf that isn't a folder");
+        let held = try_acquire_existing_lock(&support);
+        let storage = held
+            .as_ref()
+            .map(|(_, storage)| storage.is_some())
+            .map_err(|error| *error);
+        let contender = try_acquire_existing_lock(&support).map(drop);
+        drop(held);
+        let after = try_acquire_existing_lock(&support).map(drop);
+        std::fs::remove_file(&leaf).expect("remove the fixture leaf");
+        std::fs::remove_file(product.join(format!("{}.lock", constants::SHELL_LOCK)))
+            .expect("remove the fixture lock");
+        std::fs::remove_dir(&product).expect("remove the fixture product folder");
+        std::fs::remove_dir(&support).expect("remove the fixture anchor");
+        assert_eq!(storage, Ok(false), "the lock is held without its storage");
+        assert_eq!(
+            contender,
+            Err(FirstTouchError::Busy),
+            "the lock stays held while its owner settles"
+        );
+        assert_eq!(after, Ok(()), "dropping it releases the lock");
     }
 
     #[test]
