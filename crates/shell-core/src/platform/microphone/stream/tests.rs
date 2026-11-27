@@ -144,6 +144,7 @@ fn a_pump_failing_before_release_discards_and_cancels() {
 fn a_device_check_failing_after_stop_discards_the_collected_audio() {
     let changed = Fake {
         checked: Err(MicError::Format),
+        cancels_on_drop: None,
         ..CLEAN
     };
     let hold = hold(changed, speak_and_release(Ok(())));
@@ -175,7 +176,11 @@ fn an_unconfirmed_stop_or_pump_is_an_error_and_never_a_receipt() {
         (Err(MicError::Unavailable), Err(MicError::Unconfirmed)),
         (Err(MicError::Unconfirmed), Ok(())),
     ] {
-        let unknown = Fake { stopped, ..CLEAN };
+        let unknown = Fake {
+            stopped,
+            cancels_on_drop: None,
+            ..CLEAN
+        };
         let hold = hold(unknown, speak_and_release(pumped));
         assert_eq!(hold.result, Err(MicError::Unconfirmed));
         assert_eq!(hold.sent, vec![]);
