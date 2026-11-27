@@ -422,6 +422,20 @@ impl Presence {
             })
             .detach();
         }
+        let (chat, tasks) = (self.text_open(), self.threads_open());
+        let drawn = (chat || tasks).then(|| self.presenter.on_screen());
+        if let Some(drawn) = drawn.filter(|drawn| *drawn != self.on_screen) {
+            self.on_screen = drawn;
+            for (model, open) in [(&self.chat, chat), (&self.threads, tasks)] {
+                if open {
+                    model.update(cx, |state, cx| {
+                        if state.follow_drawn(drawn) {
+                            cx.notify();
+                        }
+                    });
+                }
+            }
+        }
         moving
     }
 

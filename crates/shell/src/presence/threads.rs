@@ -193,7 +193,10 @@ impl Presence {
                 Ok::<_, platform::PresenceError>(())
             })
             .map_err(|error| OpenError::Gpui(error.into()))??;
+        self.on_screen = self.presenter.on_screen();
+        let drawn = self.on_screen;
         self.threads.update(cx, |state, cx| {
+            state.drawn = drawn;
             state.show();
             cx.notify();
         });

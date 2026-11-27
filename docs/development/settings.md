@@ -159,9 +159,15 @@ Hiding or removing the exact active reply's thread ends its control side, but th
 waits for the reply's data end and any speaking quiet receipt before allowing a change.
 When successful Spoken Replies setup supplies the default (On for an unset preference),
 a queued pair opened Off gets the tagged `SpokenRepliesDefaulted` snapshot instead of an
-ordinary Settings change. It still speaks no new replies until its next ordinary connection,
-while the setting shows what was saved. That snapshot doesn't answer any queued preference
-write. An explicit Off still saves normally and clears the difference without re-registering.
+ordinary Settings change. On that snapshot, which arrives as the user's Install finishes,
+presence saves On again through the link switch the **Speak answers aloud** checkbox uses,
+skipping only the checkbox's already-on check. An idle pair takes it, and its answer reconnects
+the pair in the saved mode, so the next reply speaks without a restart. A busy pair refuses it
+without an error and nothing retries: it speaks no new replies until its next ordinary
+connection, while the setting shows what was saved and the Voice tab asks for a restart. An
+accepted save closes turn and hold admission until its answer, as any Talk-back save does.
+That snapshot doesn't answer any queued preference write. An explicit Off still saves normally
+and clears the difference without re-registering.
 The registered mode still governs hold release. An explicit On racing the default only
 reconnects if its own write succeeds; an On snapshot after a refusal reflects the default.
 If the pair drops with an Off save pending, its replacement waits for that save before
@@ -218,8 +224,8 @@ before Settings sees the updated snapshot, so the warning does not depend on the
 The Voice tab reveals the focused group within its scroll viewport, including when tabbing
 back from Stop. The Spoken Replies action keeps focus while its request is pending; if the
 next snapshot removes the button, the group's focus context survives.
-The stock Legacy session has no playback output. The Voice tab discloses that limit
-separately from model status; replace that disclosure when queued playback ships.
+The Voice tab explains that playback also needs an audio output; model status alone doesn't
+show whether a reply can play.
 
 Settings stays visible when deactivated. With Settings focused, Esc stops work, then clears a
 drawing, then cancels the active field edit; another Esc dismisses. The close button also

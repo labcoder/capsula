@@ -472,6 +472,28 @@ impl Runs {
         self.recovery = None;
     }
 
+    /// The notice for a drawing `run` of `thread` that didn't come back. A typed run whose draw
+    /// calls left nothing on screen keeps its text for Retry, as a failed run's does, while it's
+    /// still the named, unfenced run and its thread and selection are current. The brain sends
+    /// this notice before the run's `Done`, which would use the submission up.
+    pub fn drawing_notice(&mut self, key: ErrorKey, thread: ThreadId, run: RunId) -> UserError {
+        let retryable = key == ErrorKey::DrawingNotReturned
+            && run > self.fence
+            && self.owned_disposition(run) == RunDisposition::Live
+            && self.thread() == Some(thread)
+            && self.named.as_ref().is_some_and(|(named, submitted)| {
+                *named == run
+                    && submitted.text.is_some()
+                    && submitted.revision == self.revision
+                    && submitted.thread == Some(thread)
+            });
+        if !retryable {
+            return key.into();
+        }
+        self.recovery = self.named.take();
+        UserError::new(key, Vec::new(), vec![Action::Retry]).expect("one action is within bounds")
+    }
+
     pub fn retry(
         &mut self,
         run: RunId,
@@ -574,6 +596,7 @@ impl Runs {
         } else {
             return None;
         };
+        self.recovery.take_if(|(owner, _)| *owner == run);
         if let Some(stop) = stop {
             self.pending_stops.insert(run, stop);
         }
@@ -1238,6 +1261,9 @@ mod choice_tests;
 
 #[cfg(test)]
 mod delete_tests;
+
+#[cfg(test)]
+mod drawing_retry_tests;
 
 #[cfg(test)]
 mod focus_tests;

@@ -174,6 +174,21 @@ impl Settings {
         true
     }
 
+    /// Saves On again, as the checkbox would, for a pair that opened Off before Spoken Replies set
+    /// the default, so its answer reconnects in the saved mode. A busy pair sends nothing and
+    /// shows no error; the restart note stays.
+    pub fn send_deferred_talk_back(&mut self, send: impl FnOnce() -> Result<(), Denied>) -> bool {
+        if !self.talk_back_deferred || self.talk_back_pending() || send().is_err() {
+            return false;
+        }
+        self.pending.push_back(Pending {
+            slot: Slot::TalkBack(true),
+            failed: false,
+            reset_draft: false,
+        });
+        true
+    }
+
     /// Whether a hold also sends the model the screen: the choice in flight, else the saved one.
     pub fn show_screen_choice(&self) -> Option<bool> {
         let saved = self.view.as_ref()?.show_screen;

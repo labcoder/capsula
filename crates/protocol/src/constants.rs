@@ -365,6 +365,10 @@ pub const FIXTURE_ENV: &str = "KUMOCHI_FIXTURE";
 /// Dev builds only: fail the screen worker's next request.
 pub const SCREEN_FAULT_ENV: &str = "KUMOCHI_SCREEN_FAULT";
 
+/// Whether a user may point Kumochi at a model server on this machine's loopback address. Off:
+/// no setting, saved choice or job can reach one until a release turns it on.
+pub const LOCAL_CHAT: bool = false;
+
 /// Dev builds only: the most model requests the brain may send, set by `cargo xtask live`.
 /// A value that isn't a count allows none.
 pub const LIVE_BUDGET_ENV: &str = "KUMOCHI_LIVE_BUDGET";

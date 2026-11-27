@@ -527,9 +527,8 @@ fn row(
             kumochi_protocol::constants::DEFAULT_ASSISTANT_NAME,
             |settings| settings.assistant_name.as_str(),
         ))),
-        PageEventKind::SceneStep | PageEventKind::NoVisual { .. } => {
-            Some(strings.get(Text::ThreadNoVisual))
-        }
+        PageEventKind::SceneStep => Some(strings.get(Text::ThreadNoVisual)),
+        PageEventKind::NoVisual { scene } => Some(strings.get(state.drawing_label(scene))),
         PageEventKind::Issue { .. } | PageEventKind::TaskDeleted => None,
     };
     let text = match kind {

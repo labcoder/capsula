@@ -89,6 +89,7 @@ texts! {
     ThreadUser => "thread-user",
     ThreadAssistant => "thread-assistant",
     ThreadNoVisual => "thread-no-visual",
+    ThreadDrawingShown => "thread-drawing-shown",
     ThreadsOffline => "threads-offline",
     ThreadSearchTooLong => "threads-search-too-long",
     ThreadsFailed => "threads-failed",

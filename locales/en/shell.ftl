@@ -58,6 +58,7 @@ threads-close = Close
 thread-user = You
 thread-assistant = { $assistant }
 thread-no-visual = Drawing step
+thread-drawing-shown = Drawing shown on screen
 thread-issue-title = Issue: { $title }
 
 # Saved issue states never authorize a send without explicit confirmation.
@@ -211,7 +212,7 @@ talk-back-busy = Finish or stop the current work, then try again.
 settings-privacy = Privacy
 voice-speech-input = Speech input
 voice-spoken-replies = Spoken replies
-voice-spoken-playback-unavailable = This version can install the voice model, but it can't play spoken replies.
+voice-spoken-playback-unavailable = Spoken replies need an available audio output.
 voice-spoken-replies-model = Phonon 31M (Q8) · Juniper · 65 MB
 voice-spoken-replies-install = Install spoken replies
 voice-spoken-replies-install-help = The first install turns on Speak answers aloud if you haven't saved a preference. An unchecked box on its own doesn't save an Off choice.

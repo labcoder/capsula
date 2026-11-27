@@ -7,8 +7,8 @@ use kumochi_protocol::constants;
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
     DataToBrain, DataToShell, DraftId, EventId, MAX_ISSUE_CARDS, MAX_PAGE_BYTES, MAX_PAGE_ROWS,
-    ModelName, PageEvent, PageEventKind, PageOf, RunId, SceneId, SettingsView, ThreadCursor,
-    ThreadId, ThreadKind, ThreadRow,
+    MAX_VISIBLE_SCENES, ModelName, PageEvent, PageEventKind, PageOf, RunId, SceneId, SettingsView,
+    ThreadCursor, ThreadId, ThreadKind, ThreadRow,
 };
 use kumochi_scene::text::Bounded;
 
@@ -192,6 +192,8 @@ pub struct Threads {
     pub sees: Option<Text>,
     #[cfg(debug_assertions)]
     pub fixture_engine: bool,
+    /// The scenes on screen now, so their stored steps say so.
+    pub drawn: [Option<SceneId>; MAX_VISIBLE_SCENES],
     connected: bool,
     /// Pages are read only while the panel is shown.
     shown: bool,
@@ -575,6 +577,24 @@ impl Threads {
         }
         self.select(thread);
         true
+    }
+
+    /// Takes the scenes on screen now: true when a loaded step's label changes with them.
+    pub fn follow_drawn(&mut self, drawn: [Option<SceneId>; MAX_VISIBLE_SCENES]) -> bool {
+        let old = std::mem::replace(&mut self.drawn, drawn);
+        self.events.iter().any(|event| {
+            matches!(event.kind, PageEventKind::NoVisual { scene }
+                if old.contains(&Some(scene)) != drawn.contains(&Some(scene)))
+        })
+    }
+
+    /// A stored drawing step's label: whether its scene is on screen now.
+    pub fn drawing_label(&self, scene: SceneId) -> Text {
+        if self.drawn.contains(&Some(scene)) {
+            Text::ThreadDrawingShown
+        } else {
+            Text::ThreadNoVisual
+        }
     }
 
     /// The panel closed: nothing more is read until it opens.

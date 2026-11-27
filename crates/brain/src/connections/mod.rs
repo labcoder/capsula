@@ -13,6 +13,7 @@ pub mod github;
 pub mod http_client;
 #[cfg(debug_assertions)]
 pub mod image_check;
+pub mod local;
 pub mod marker;
 #[cfg(debug_assertions)]
 pub mod marks_check;

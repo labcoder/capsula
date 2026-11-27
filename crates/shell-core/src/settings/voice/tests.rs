@@ -689,6 +689,38 @@ fn only_the_current_pair_shows_deferred_saved_talk_back_without_settling_prefere
 }
 
 #[test]
+fn a_deferred_default_saves_on_unless_the_pair_is_busy() {
+    use crate::link::output::Denied;
+
+    let mut state = connected();
+    let mut sends = 0;
+    let mut offer = |state: &mut Settings, result: Result<(), Denied>| {
+        state.send_deferred_talk_back(|| {
+            sends += 1;
+            result
+        })
+    };
+    assert!(!offer(&mut state, Ok(())), "no default to hear");
+    let mut on = saved(SttUnload::Kept);
+    on.talk_back = true;
+    assert!(state.receive(Some(7), 7, on, Update::SpokenRepliesDefaulted));
+    assert!(!offer(&mut state, Err(Denied::Busy)));
+    assert!(!state.talk_back_pending(), "a busy pair saves nothing");
+    assert_eq!(
+        state.talk_back_send_error(),
+        None,
+        "a busy pair shows no error"
+    );
+    assert!(offer(&mut state, Ok(())));
+    assert!(state.talk_back_pending());
+    assert!(
+        !offer(&mut state, Ok(())),
+        "a save in flight isn't sent twice"
+    );
+    assert_eq!(sends, 2, "the refused save and the accepted one");
+}
+
+#[test]
 fn show_screen_waits_for_its_own_answer_and_a_refusal_restores_the_saved_choice() {
     let mut saved = saved(SttUnload::Kept);
     saved.screen_holds = false;
