@@ -504,12 +504,15 @@ rows must later match that one owned PID. A completed PID-filtered warm capture 
 dock swapchain. PresentMon 2.6 swallows the first present of each swapchain as a seed. From that
 chain's first CSV row, the harness derives seed present = `QPCTime − msBetweenPresents` and
 seed displayed = `first row displayed − msBetweenDisplayChange`, in checked QPC arithmetic.
+The present needs only its own positive interval. When the row is dropped or its display
+interval is zero, `NA` or would put the display before the present, the seed keeps its present
+and its display is unmeasured (`NA` in `cold.tsv`); it is never inferred.
 The derived seed must fit at least one recorded Dock paint/completion interval, and every
 containing interval must have begun before the first harness repaint; its cutoff is retained
 in `first-harness-repaint.txt`. Overlapping startup intervals are allowed because cold start
 measures creation to the first present, not a particular frame.
 The matching paint need not be the first recorded paint: only the first actual present is the
-seed. Missing, invalid, post-repaint or dropped seed evidence is unmeasured; no later
+seed. Missing, invalid or post-repaint seed evidence is unmeasured; no later
 ordinary row or warm-up repaint substitutes. `seed.txt` retains the first raw row and intervals.
 The 400ms gate is creation → first eligible dock **present**, with
 display latency reported beside it when available. The existing prelaunch name trace remains:

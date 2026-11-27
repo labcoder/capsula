@@ -271,6 +271,7 @@ impl PresentRows {
             .checked_sub(delta)
             .filter(|qpc| *qpc > 0)
             .ok_or(Join::InvalidClock)?;
+        // The present stands on its own interval; without display proof its display is unmeasured.
         let displayed_qpc = source
             .present
             .display_after_ms
@@ -278,8 +279,7 @@ impl PresentRows {
             .and_then(|ms| display_qpc(source.present.qpc, ms, frequency))
             .zip(source.between_display_change_ms)
             .and_then(|(displayed, ms)| displayed.checked_sub(qpc_delta(ms, frequency)?))
-            .filter(|displayed| *displayed >= qpc)
-            .ok_or(Join::Unavailable)?;
+            .filter(|displayed| *displayed >= qpc);
         Ok(MatchedPresent {
             present: Present {
                 qpc,
@@ -287,7 +287,7 @@ impl PresentRows {
                 dropped: false,
                 display_after_ms: None,
             },
-            displayed_qpc: Some(displayed_qpc),
+            displayed_qpc,
             source: Source::Seed(*source),
         })
     }
@@ -554,12 +554,18 @@ mod tests {
         assert_eq!(parsed.join_present(10, 101, 105, 1000), Err(Join::Reused));
         let dropped = seed_row(122, 10, "20", "20").replace("DXGI,0,0,0,", "DXGI,0,0,1,");
         let mut parsed = parse(&csv(&dropped), 35620).unwrap();
+        let seed = parsed.seed(10, 1000).unwrap();
+        assert_eq!(seed.present.qpc, 102);
         assert_eq!(
-            parsed.seed(10, 1000),
-            Err(Join::Unavailable),
+            seed.displayed_qpc, None,
             "a dropped following row provides no seed display proof"
         );
-        assert_eq!(parsed.join_present(10, 101, 105, 1000), Err(Join::Missing));
+        assert_eq!(
+            parsed
+                .join_present(10, 101, 105, 1000)
+                .map(|row| (row.present.qpc, row.displayed_qpc)),
+            Ok((102, None))
+        );
         assert_eq!(parsed.join_present(10, 121, 125, 1000), Err(Join::Dropped));
     }
 
@@ -578,16 +584,23 @@ mod tests {
                 "only the observed row remains"
             );
             let mut parsed = parse(&csv(&seed_row(122, 10, "20", interval)), 35620).unwrap();
-            assert_eq!(parsed.seed(10, 1000), Err(Join::Unavailable));
             assert_eq!(
-                parsed.join_present(10, 101, 105, 1000),
-                Err(Join::Missing),
-                "display interval {interval:?} cannot prove seed eligibility"
+                parsed
+                    .seed(10, 1000)
+                    .map(|row| (row.present.qpc, row.displayed_qpc)),
+                Ok((102, None)),
+                "display interval {interval:?} proves no display, but the present stands"
+            );
+            assert_eq!(
+                parsed
+                    .join_present(10, 101, 105, 1000)
+                    .map(|row| row.present.qpc),
+                Ok(102)
             );
             let mut parsed = parse(&csv(&seed_row(122, 10, "20", interval)), 35620).unwrap();
             assert_eq!(
                 parsed.join(10, 101, 105, 1000),
-                Join::Missing,
+                Join::Unavailable,
                 "display joins remain strict"
             );
         }
@@ -608,23 +621,25 @@ mod tests {
         );
         let parsed = parse(&csv(&seed_row(122, 10, "20", "200")), 35620).unwrap();
         assert_eq!(
-            parsed.seed(10, 1000),
-            Err(Join::Unavailable),
+            parsed.seed(10, 1000).map(|row| row.displayed_qpc),
+            Ok(None),
             "display cannot precede the seed present"
         );
     }
 
     #[test]
-    fn seed_eligibility_requires_display_history_from_the_suppressed_present() {
+    fn seed_display_requires_display_history_from_the_suppressed_present() {
         for display_ms in ["0", "NA"] {
             let parsed = parse(&csv(&seed_row(122, 10, "20", display_ms)), 35620).unwrap();
-            assert_eq!(parsed.seed(10, 1000), Err(Join::Unavailable));
-            assert_eq!(parsed.candidates(1000).count(), 1);
+            let seed = parsed.seed(10, 1000).unwrap();
+            assert_eq!((seed.present.qpc, seed.displayed_qpc), (102, None));
+            assert_eq!(parsed.candidates(1000).count(), 2);
         }
         for display_ms in ["0", "NA"] {
             let row = seed_row(122, 10, "20", "20").replace(",13,", &format!(",{display_ms},"));
             let parsed = parse(&csv(&row), 35620).unwrap();
-            assert_eq!(parsed.seed(10, 1000), Err(Join::Unavailable));
+            let seed = parsed.seed(10, 1000).unwrap();
+            assert_eq!((seed.present.qpc, seed.displayed_qpc), (102, None));
         }
         let parsed = parse(&csv(&seed_row(122, 10, "20", "33")), 35620).unwrap();
         let seed = parsed.seed(10, 1000).unwrap();
@@ -632,7 +647,22 @@ mod tests {
         assert_eq!(seed.displayed_qpc, Some(102));
         assert!(!seed.present.dropped);
         let parsed = parse(&csv(&seed_row(122, 10, "20", "34")), 35620).unwrap();
-        assert_eq!(parsed.seed(10, 1000), Err(Join::Unavailable));
+        let seed = parsed.seed(10, 1000).unwrap();
+        assert_eq!((seed.present.qpc, seed.displayed_qpc), (102, None));
+    }
+
+    #[test]
+    fn a_first_row_with_zero_display_change_keeps_the_seed_present_at_its_own_interval() {
+        // The 27 Nov cold launch 7 row: a positive msBetweenPresents and msBetweenDisplayChange=0.
+        let row = seed_row(8_451_993_332_586, 10, "128.9735", "0").replace(",13,", ",13.187,");
+        let parsed = parse(&csv(&row), 35620).unwrap();
+        let seed = parsed.seed(10, 10_000_000).unwrap();
+        assert_eq!(seed.present.qpc, 8_451_992_042_851);
+        assert_eq!(
+            seed.displayed_qpc, None,
+            "zero display change proves no display"
+        );
+        assert!(!seed.present.dropped);
     }
 
     #[test]
