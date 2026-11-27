@@ -224,6 +224,7 @@ texts! {
     HoldMicrophoneUnavailable => "hold-microphone-unavailable",
     HoldUnconfirmed => "hold-unconfirmed",
     HoldFailed => "hold-failed",
+    HoldNoConnection => "hold-no-connection",
     HoldLost => "hold-lost",
     HoldLostRestored => "hold-lost-restored",
     HoldLostPictured => "hold-lost-pictured",

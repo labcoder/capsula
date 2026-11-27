@@ -37,6 +37,7 @@ fn failed_hold_status_logs_only_closed_reason_without_identifiers() {
         HoldFailure::TimedOut,
         HoldFailure::ChoiceChanged,
         HoldFailure::DecodeFailed,
+        HoldFailure::NoConnection,
     ] {
         Brain::hold_status(KEY, HoldStatus::Failed(reason), &mut link).unwrap();
         assert_eq!(status(&mut output), HoldStatus::Failed(reason));
@@ -51,6 +52,7 @@ fn failed_hold_status_logs_only_closed_reason_without_identifiers() {
         "TimedOut",
         "ChoiceChanged",
         "DecodeFailed",
+        "NoConnection",
     ];
     let diagnostics = text.lines().collect::<Vec<_>>();
     assert_eq!(diagnostics.len(), reasons.len());
@@ -164,6 +166,39 @@ async fn hold_to_talk_off_refuses_before_admission() {
         .unwrap();
     assert!(brain.holds.pending.is_none());
     assert_eq!(output.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+    brain.close().await;
+}
+
+#[tokio::test]
+async fn a_hold_with_no_ready_connection_is_refused_as_no_connection() {
+    let scratch = Scratch::new("hold-no-connection");
+    let (mut brain, _release, mut decoded, _fetch) =
+        crate::runtime::tests::holds::input(&scratch, Vec::new(), "not submitted").await;
+    brain.offline(Input::Engines(
+        kumochi_protocol::message::ConnectionKind::ChatGpt,
+        Availability::Finding,
+    ));
+    let (out, mut output) = mpsc::channel(8);
+    let queue = RefCell::new(DataQueue::new(0));
+    let ready = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    brain
+        .hold_control(
+            &ControlToBrain::VoiceHoldRecognized {
+                gesture: KEY.gesture,
+                thread: None,
+                selection: 1,
+            },
+            &mut link,
+        )
+        .unwrap();
+    assert_eq!(
+        status(&mut output),
+        HoldStatus::Failed(HoldFailure::NoConnection)
+    );
+    assert!(brain.holds.pending.is_none());
+    assert_eq!(decoded.try_recv(), Err(mpsc::error::TryRecvError::Empty));
     brain.close().await;
 }
 

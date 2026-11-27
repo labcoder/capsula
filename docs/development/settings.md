@@ -430,7 +430,7 @@ connection, a missing or bad model or effort) is invalid intent: it has no displ
 catalog repair and unrelated settings writes leave it as it is. Until the file is fixed, on a thread
 without its own saved choice a typed run ends with `ModelUnavailable` and Open Settings, or
 `SignInNeeded` while signed out, as it does while `config.toml` is unreadable; a hold ends with
-`ChoiceChanged` after recognition, and title and summary jobs stop quietly. An invalid
+`ChoiceChanged` after recognition (`NoConnection` when no account is ready), and title and summary jobs stop quietly. An invalid
 `default_model` is never rewritten; remove the key to reset it.
 
 **Names** follow one rule, checked by `AssistantName` and `UserName` in `crates/protocol` on
