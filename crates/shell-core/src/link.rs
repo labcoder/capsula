@@ -29,6 +29,7 @@ use kumochi_protocol::voice::VoicePart;
 use kumochi_scene::deferred::Deferred;
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::instance::FirstTouchError;
 use crate::platform::microphone::CollectionGate;
 use crate::platform::{self, Connection, HANDSHAKE_TIMEOUT, PipeClient, RETRY_DELAY};
 #[cfg(any(test, feature = "test-support"))]
@@ -660,6 +661,55 @@ struct Shared {
     spawn: Arc<platform::SpawnWord>,
     /// How Quit ended for the attempt it ended, once the link has settled that attempt's child.
     quit_end: OnceLock<QuitEnd>,
+    /// Why a link that doesn't relaunch ended, first reason only.
+    refusal: OnceLock<Refusal>,
+}
+
+/// Why a link that doesn't relaunch ended without Quit: the first refusal it met, by kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// First touch at the child's READY refused.
+    FirstTouch(FirstTouchError),
+    /// The attempt's deadline passed.
+    Expired,
+    /// Any other connection failure.
+    Connect,
+    /// The connection was lost once connected.
+    Lost,
+}
+
+/// Whether a link starts the brain again on its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Relaunch {
+    /// The first loss relaunches; a failure or a repeated loss waits for Retry.
+    Ordinary,
+    /// The first failure or loss ends the link, keeping its [`Refusal`].
+    Never,
+}
+
+/// First touch at READY: the shell's own step once its brain child is ready and the shell is
+/// hardened, before the instance item is read. A refusal ends the attempt with nothing read.
+pub struct AtReady(Box<dyn Fn() -> Result<(), FirstTouchError> + Send + Sync>);
+
+impl AtReady {
+    #[must_use]
+    pub fn new(touch: impl Fn() -> Result<(), FirstTouchError> + Send + Sync + 'static) -> Self {
+        Self(Box::new(touch))
+    }
+
+    /// Runs the step.
+    ///
+    /// # Errors
+    /// Why first touch refused.
+    pub fn run(&self) -> Result<(), FirstTouchError> {
+        (self.0)()
+    }
+}
+
+impl fmt::Debug for AtReady {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("AtReady")
+    }
 }
 
 /// One attempt's own receipts: its generation once Connected went out, and whether `Quitting`
@@ -1253,6 +1303,12 @@ impl LinkHandle {
         QuitEnding::Ended(self.shared.quit_end.get().copied())
     }
 
+    /// The refusal a link that doesn't relaunch ended on, once it has.
+    #[must_use]
+    pub fn refusal(&self) -> Option<Refusal> {
+        self.shared.refusal.get().copied()
+    }
+
     /// The control writer's test hold: set 1 and the writer parks unwritten at its next
     /// message, showing 2.
     #[cfg(any(test, feature = "test-support"))]
@@ -1635,6 +1691,8 @@ struct Link {
     session: u32,
     audio: AudioSession,
     shared: Arc<Shared>,
+    relaunch: Relaunch,
+    at_ready: Option<AtReady>,
 }
 
 /// A link that hasn't started connecting, so the UI can arm the keyboard first. Dropping it
@@ -1663,6 +1721,34 @@ pub fn prepare(
     events: Sender<LinkEvent>,
     audio: AudioSession,
 ) -> std::io::Result<(LinkHandle, LinkStart)> {
+    prepare_with(events, audio, Relaunch::Ordinary, None)
+}
+
+/// Prepares first light's link: `at_ready` runs at the child's READY, before the instance item
+/// is read, and the first failure or loss ends the link with its [`Refusal`] instead of
+/// relaunching or waiting for Retry.
+///
+/// # Errors
+/// As [`prepare`].
+#[cfg(feature = "first-light")]
+pub fn prepare_first_light(
+    events: Sender<LinkEvent>,
+    at_ready: AtReady,
+) -> std::io::Result<(LinkHandle, LinkStart)> {
+    prepare_with(
+        events,
+        AudioSession::Legacy,
+        Relaunch::Never,
+        Some(at_ready),
+    )
+}
+
+fn prepare_with(
+    events: Sender<LinkEvent>,
+    audio: AudioSession,
+    relaunch: Relaunch,
+    at_ready: Option<AtReady>,
+) -> std::io::Result<(LinkHandle, LinkStart)> {
     let exe = std::env::current_exe()?;
     // Before the bundle check, so a platform with no transport refuses as unsupported.
     let session = platform::session_id()?;
@@ -1671,6 +1757,8 @@ pub fn prepare(
         session,
         audio,
         shared: Arc::new(Shared::default()),
+        relaunch,
+        at_ready,
     };
     Ok(start(link, events))
 }
@@ -1706,6 +1794,27 @@ pub fn prepare_disconnected(events: &Sender<LinkEvent>) -> std::io::Result<LinkH
 pub(crate) fn start_scripted(
     events: Sender<LinkEvent>,
     audio: AudioSession,
+    connect: impl FnMut(
+        &Arc<platform::SpawnWord>,
+        Option<IssueSession>,
+        Instant,
+    ) -> Result<(Connection, Option<platform::ChildOwner>), platform::Failed>
+    + Send
+    + 'static,
+) -> LinkHandle {
+    start_scripted_with(events, audio, Relaunch::Ordinary, connect)
+}
+
+/// [`start_scripted`] with its relaunch policy supplied.
+#[cfg(any(test, feature = "test-support"))]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "only the core's own tests script a link")
+)]
+pub(crate) fn start_scripted_with(
+    events: Sender<LinkEvent>,
+    audio: AudioSession,
+    relaunch: Relaunch,
     mut connect: impl FnMut(
         &Arc<platform::SpawnWord>,
         Option<IssueSession>,
@@ -1719,6 +1828,8 @@ pub(crate) fn start_scripted(
         session: 0,
         audio,
         shared: Arc::new(Shared::default()),
+        relaunch,
+        at_ready: None,
     };
     let (handle, start) = start(link, events);
     let word = Arc::clone(&start.link.shared.spawn);
@@ -1802,6 +1913,7 @@ impl Link {
                     self.quit_parked(control);
                 },
                 &mut text_metrics,
+                self.at_ready.as_ref(),
             )
         });
     }
@@ -1839,6 +1951,11 @@ impl Link {
                 }
                 Err(platform::Failed { error, .. }) => {
                     tracing::error!(%error, "can't reach the brain");
+                    if self.relaunch == Relaunch::Never {
+                        let _first = self.shared.refusal.set(error.refusal());
+                        let _notified = events.send_blocking(LinkEvent::State(LinkState::Failed));
+                        return;
+                    }
                     if !wait_for_retry(events, retries) {
                         return;
                     }
@@ -1866,6 +1983,11 @@ impl Link {
             }
             if attended != Attendance::TalkBackChanged {
                 tracing::warn!("lost the brain");
+            }
+            if self.relaunch == Relaunch::Never {
+                let _first = self.shared.refusal.set(Refusal::Lost);
+                let _notified = events.send_blocking(LinkEvent::State(LinkState::Failed));
+                return;
             }
             let Some(next) = self.after_loss(events, retries, attended, last_loss, previous) else {
                 return;

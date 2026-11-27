@@ -24,6 +24,23 @@ enum Held {
     },
 }
 
+/// Why first touch refused a root the brain made, by kind only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum FirstTouchError {
+    /// This edition's product folder isn't there; first touch never creates it.
+    #[error("the data folder isn't there")]
+    Missing,
+    /// Another shell holds this edition's lock.
+    #[error("another shell holds the lock")]
+    Busy,
+    /// The folder or its lock couldn't be admitted or taken.
+    #[error("can't admit the data folder")]
+    Refused,
+    /// The lock is held, but its log didn't start.
+    #[error("can't start the log")]
+    Log,
+}
+
 /// Why the shell couldn't acquire its current session's lock.
 #[derive(Debug, thiserror::Error)]
 pub enum SessionLockError {
@@ -75,6 +92,22 @@ impl InstanceLock {
     #[cfg(not(target_os = "macos"))]
     pub fn admit_current_session() -> Result<(), SessionLockError> {
         crate::platform::instance_lock_path().map(drop)
+    }
+
+    /// First touch: takes this edition's lock in the product folder the brain made under the
+    /// `support` anchor, without waiting, and only then makes its `logs` folder. The product
+    /// folder is never created.
+    ///
+    /// # Errors
+    /// `Missing` when the product folder isn't there, `Busy` when another shell holds the lock,
+    /// `Refused` for anything not admitted.
+    #[cfg(target_os = "macos")]
+    pub fn try_acquire_existing(support: &Path) -> Result<Self, FirstTouchError> {
+        let (lock, storage) = crate::platform::macos::try_acquire_existing_lock(support)?;
+        Ok(Self {
+            _held: Held::Admitted { _lock: lock },
+            storage: Some(storage),
+        })
     }
 
     /// The admitted storage that holds this lock, for owners that must close before it is released.

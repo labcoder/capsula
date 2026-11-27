@@ -18,6 +18,7 @@ use kumochi_session::{
 use super::super::NotStarted;
 use super::super::wipes;
 use super::*;
+use crate::instance::FirstTouchError;
 use crate::link::DrawingText;
 use crate::platform::Connection;
 use crate::platform::SpawnWord;
@@ -690,6 +691,7 @@ fn an_expired_attempt_starts_no_brain() {
         None,
         Instant::now(),
         |_| panic!("no metrics for an expired attempt"),
+        None,
     );
     assert!(matches!(
         result,
@@ -931,6 +933,7 @@ fn after_spawn_hardened(
         deadline,
         |_| DrawingText::default(),
         harden,
+        || Ok(()),
         |into| {
             reads.set(reads.get() + 1);
             buffer.set(Some((wipes::len(), into.as_ptr().addr())));
@@ -979,6 +982,60 @@ fn a_failed_hardening_reads_no_item_and_writes_nothing() {
     nothing_written(&mut brain_control, &mut brain_data);
 }
 
+/// Runs the shell's side after READY, recording each platform call in order, with first touch
+/// answering `touch`.
+fn after_ready_in_order(
+    shell: ShellEnds,
+    touch: Result<(), FirstTouchError>,
+) -> (Result<Connection, LinkError>, Vec<&'static str>) {
+    let order = std::cell::RefCell::new(Vec::new());
+    let result = after_ready(
+        shell,
+        Channel::Dev,
+        AudioSession::Legacy,
+        None,
+        by(),
+        |_| DrawingText::default(),
+        || {
+            order.borrow_mut().push("harden");
+            Ok(())
+        },
+        || {
+            order.borrow_mut().push("first touch");
+            touch
+        },
+        |into| {
+            order.borrow_mut().push("item");
+            *into = SECRET;
+            Ok(())
+        },
+        || false,
+    );
+    (result, order.into_inner())
+}
+
+#[test]
+fn first_touch_runs_after_hardening_and_before_the_item_read() {
+    let (shell, brain_control, brain_data) = ready_queued();
+    drop((brain_control, brain_data));
+    let (result, order) = after_ready_in_order(shell, Ok(()));
+    assert!(result.is_err(), "the brain's ends closed after READY");
+    assert_eq!(order, ["harden", "first touch", "item"]);
+}
+
+#[test]
+fn a_refused_first_touch_reads_no_item_and_writes_nothing() {
+    let (shell, mut brain_control, mut brain_data) = ready_queued();
+    let (result, order) = after_ready_in_order(shell, Err(FirstTouchError::Busy));
+    assert!(
+        matches!(result, Err(LinkError::FirstTouch(FirstTouchError::Busy))),
+        "{:?}",
+        result.map(drop)
+    );
+    assert_eq!(order, ["harden", "first touch"]);
+    nothing_written(&mut brain_control, &mut brain_data);
+}
+
 const CORE_DUMPS_ENTRY: &str = "platform::macos::leg::tests::core_dumps_entry";
 
 /// The re-exec child's exact arguments. The entry does nothing under any others, so a plain
@@ -1017,6 +1074,7 @@ fn core_dumps_entry() {
             hardened.set(true);
             limit_core_dumps()
         },
+        || Ok(()),
         |into| {
             seen.set(Some((hardened.get(), core_limit().ok())));
             *into = SECRET;

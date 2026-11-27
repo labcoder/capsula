@@ -12,14 +12,16 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use async_channel::TryRecvError;
-use kumochi_protocol::constants::SESSION_READY;
+use kumochi_protocol::constants::{BRAIN_EXIT_BUSY, SESSION_READY};
 use kumochi_protocol::message::{AudioSession, ControlToBrain};
 use kumochi_session::Channel;
 
 use super::leg::tests::{Commit, SECRET, ends, scripted};
 use super::{NotStarted, ShellEnds};
+use crate::instance::FirstTouchError;
 use crate::link::{
-    DrawingText, LinkEvent, LinkHandle, LinkState, QuitEnd, QuitEnding, QuitOutcome, start_scripted,
+    DrawingText, LinkEvent, LinkHandle, LinkState, QuitEnd, QuitEnding, QuitOutcome,
+    Refusal as LinkRefusal, Relaunch, start_scripted, start_scripted_with,
 };
 use crate::platform::Connection;
 use crate::platform::child::{
@@ -292,6 +294,7 @@ fn attempt_with(
             Ok((owner, brain(child, then)))
         },
         harden,
+        || Ok(()),
         read_item,
         Channel::Dev,
         audio(child),
@@ -328,17 +331,32 @@ fn ended(generation: Option<u64>, outcome: QuitOutcome) -> QuitEnding {
 fn link(
     child: &Child,
     then: Then,
+    next: impl FnMut(&Arc<SpawnWord>, Instant) -> Attempt + Send + 'static,
+) -> (LinkHandle, async_channel::Receiver<LinkEvent>) {
+    link_with(Relaunch::Ordinary, child, then, next)
+}
+
+/// [`link`] with its relaunch policy supplied.
+fn link_with(
+    relaunch: Relaunch,
+    child: &Child,
+    then: Then,
     mut next: impl FnMut(&Arc<SpawnWord>, Instant) -> Attempt + Send + 'static,
 ) -> (LinkHandle, async_channel::Receiver<LinkEvent>) {
     let (events, states) = async_channel::unbounded();
     let child = child.clone();
     let mut first = true;
-    let handle = start_scripted(events, AudioSession::Legacy, move |word, _, by| {
-        if std::mem::take(&mut first) {
-            return attempt(word, &child, then, by, honest).map(|(c, owner)| (c, Some(owner)));
-        }
-        next(word, by)
-    });
+    let handle = start_scripted_with(
+        events,
+        AudioSession::Legacy,
+        relaunch,
+        move |word, _, by| {
+            if std::mem::take(&mut first) {
+                return attempt(word, &child, then, by, honest).map(|(c, owner)| (c, Some(owner)));
+            }
+            next(word, by)
+        },
+    );
     (handle, states)
 }
 
@@ -353,6 +371,15 @@ fn until(states: &async_channel::Receiver<LinkEvent>, wanted: impl Fn(&LinkEvent
             }
             Err(error) => panic!("the event didn't come in time: {error:?}"),
         }
+    }
+}
+
+/// Waits for the link thread to return.
+fn worker_ended(link: &LinkHandle) {
+    let by = Instant::now() + BOUND;
+    while link.quit_end() == QuitEnding::Pending {
+        assert!(Instant::now() < by, "the link thread returned in time");
+        thread::sleep(Duration::from_millis(5));
     }
 }
 
@@ -513,6 +540,7 @@ fn a_quit_during_a_failed_spawn_tells_a_pending_spawn_from_none() {
                     })
                 },
                 || Ok(()),
+                || Ok(()),
                 honest,
                 Channel::Dev,
                 AudioSession::Legacy,
@@ -657,6 +685,7 @@ fn a_quit_parked_before_the_queued_writers_start_is_clean_on_its_own_receipt() {
                 let owner = owned(&brain_child, word).map_err(NotStarted::Refused)?;
                 Ok((owner, parked_brain(&brain_child, gate)))
             },
+            || Ok(()),
             || Ok(()),
             honest,
             Channel::Dev,
@@ -1072,4 +1101,84 @@ fn a_failed_item_read_lets_a_child_that_exits_on_eof_exit_unkilled() {
         result.map(drop)
     );
     assert_eq!(child.script().kills, 0, "it exited on EOF");
+}
+
+#[test]
+fn a_link_that_doesnt_relaunch_ends_on_a_refused_first_touch_with_its_kind() {
+    let child = Child::default();
+    // The child exits only on EOF, so no kill may come first.
+    child.script().grace = Some(BOUND);
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let (events, states) = async_channel::unbounded();
+    let link = {
+        let (child, attempts) = (child.clone(), Arc::clone(&attempts));
+        start_scripted_with(
+            events,
+            AudioSession::Legacy,
+            Relaunch::Never,
+            move |word, _, by| {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                connect_pair_with(
+                    |_| {
+                        let owner = owned(&child, word).map_err(NotStarted::Refused)?;
+                        // A busy exit after a refused first touch is still that refusal.
+                        let code = i32::from(BRAIN_EXIT_BUSY);
+                        Ok((owner, brain(&child, Then::ExitsOnEof(code))))
+                    },
+                    || Ok(()),
+                    || Err(FirstTouchError::Busy),
+                    |_| panic!("no item read after a refused first touch"),
+                    Channel::Dev,
+                    AudioSession::Legacy,
+                    None,
+                    by,
+                    |_| DrawingText::default(),
+                )
+                .map(|(connection, owner)| (connection, Some(owner)))
+            },
+        )
+    };
+    until(&states, failed);
+    worker_ended(&link);
+    assert_eq!(
+        link.refusal(),
+        Some(LinkRefusal::FirstTouch(FirstTouchError::Busy))
+    );
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        1,
+        "no Retry wait, no relaunch"
+    );
+    assert_eq!(link.quit_end(), QuitEnding::Ended(None));
+    let script = child.script();
+    assert_eq!(
+        (script.exit, script.kills),
+        (Some(Exit::Code(i32::from(BRAIN_EXIT_BUSY))), 0),
+        "it exited on EOF"
+    );
+}
+
+#[test]
+fn a_link_that_doesnt_relaunch_ends_on_its_first_loss() {
+    let child = Child::default();
+    let exit = held_after_commit(&child);
+    let relaunches = Arc::new(AtomicUsize::new(0));
+    let (link, states) = {
+        let relaunches = Arc::clone(&relaunches);
+        link_with(
+            Relaunch::Never,
+            &child,
+            Then::ExitsAfterCommit(0),
+            move |_, _| {
+                relaunches.fetch_add(1, Ordering::SeqCst);
+                Err(LinkError::Rejected.into())
+            },
+        )
+    };
+    until(&states, connected);
+    drop(exit);
+    until(&states, failed);
+    worker_ended(&link);
+    assert_eq!(link.refusal(), Some(LinkRefusal::Lost));
+    assert_eq!(relaunches.load(Ordering::SeqCst), 0);
 }

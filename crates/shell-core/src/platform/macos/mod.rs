@@ -47,7 +47,7 @@ mod wipes;
 
 pub(crate) use child::{NotStarted, start_brain};
 pub(crate) use core_dumps::limit_core_dumps;
-pub(crate) use instance::{read_instance, try_acquire_instance_lock};
+pub(crate) use instance::{read_instance, try_acquire_existing_lock, try_acquire_instance_lock};
 pub use kumochi_storage::application_support_dir as support_dir;
 pub(crate) use leg::{PipeClient, Secret, initiate, read_ready};
 pub(crate) use pair::ShellEnds;

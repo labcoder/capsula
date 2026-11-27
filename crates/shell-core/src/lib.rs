@@ -9,6 +9,9 @@
               when the controller's public surface is designed"
 )]
 
+#[cfg(all(feature = "first-light", not(debug_assertions)))]
+compile_error!("first light is a debug-only route");
+
 #[cfg(test)]
 #[path = "../../scene/tests/support/allocation.rs"]
 #[expect(

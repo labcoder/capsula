@@ -20,7 +20,9 @@ use super::launch_detached;
 #[cfg(not(target_os = "macos"))]
 use crate::credential;
 use crate::credential::CredentialError;
-use crate::link::DrawingText;
+#[cfg(target_os = "macos")]
+use crate::instance::FirstTouchError;
+use crate::link::{AtReady, DrawingText, Refusal};
 
 const LINK_LOG_TARGET: &str = concat!(env!("CARGO_CRATE_NAME"), "::link");
 
@@ -78,12 +80,27 @@ pub(crate) enum LinkError {
     #[cfg(target_os = "macos")]
     #[error("the brain child's custody ended")]
     Custody,
+    #[cfg(target_os = "macos")]
+    #[error("first touch refused")]
+    FirstTouch(#[source] FirstTouchError),
     #[error("quitting")]
     Quitting,
     #[error(transparent)]
     Frame(#[from] FrameError),
     #[error(transparent)]
     Io(std::io::Error),
+}
+
+impl LinkError {
+    /// The refusal a link that doesn't relaunch ends on, by kind.
+    pub(crate) fn refusal(&self) -> Refusal {
+        match self {
+            #[cfg(target_os = "macos")]
+            Self::FirstTouch(error) => Refusal::FirstTouch(*error),
+            Self::ConnectExpired => Refusal::Expired,
+            _ => Refusal::Connect,
+        }
+    }
 }
 
 /// An authenticated connection. Dropping it closes both pipes.
@@ -294,6 +311,11 @@ pub(crate) fn connect(
     )]
     quit_parked: impl Fn(&PipeClient),
     text_metrics: impl FnMut(Instant) -> DrawingText,
+    #[cfg_attr(
+        not(target_os = "macos"),
+        expect(unused_variables, reason = "only the pair has a READY")
+    )]
+    at_ready: Option<&AtReady>,
 ) -> Result<(Connection, Option<super::ChildOwner>), Failed> {
     #[cfg(not(target_os = "macos"))]
     {
@@ -322,14 +344,16 @@ pub(crate) fn connect(
             repair_of,
             deadline,
             text_metrics,
+            at_ready,
         )
         .map(|(connection, owner)| (connection, Some(owner)))
     }
 }
 
 /// Starts a parent-bound brain as the shell's child and connects over its pair, all by
-/// `deadline`: READY, then the instance item from the Keychain, then the initiator. Returns the
-/// connection and the child's owner, which retires the child when dropped.
+/// `deadline`: READY, then `at_ready` when there is one, then the instance item from the
+/// Keychain, then the initiator. Returns the connection and the child's owner, which retires the
+/// child when dropped.
 ///
 /// # Errors
 /// `Quitting` when Quit came first, `Launch` when no child started, `Busy` when the child
@@ -343,11 +367,13 @@ pub(crate) fn connect_pair(
     repair_of: Option<IssueSession>,
     deadline: Instant,
     text_metrics: impl FnOnce(Instant) -> DrawingText,
+    at_ready: Option<&AtReady>,
 ) -> Result<(Connection, super::child::ChildOwner), Failed> {
     check_attempt(Some(deadline)).map_err(not_spawned)?;
     connect_pair_with(
         |by| super::macos::start_brain(brain, word, by),
         super::macos::limit_core_dumps,
+        || at_ready.map_or(Ok(()), AtReady::run),
         super::macos::read_instance,
         channel,
         audio,
@@ -357,17 +383,17 @@ pub(crate) fn connect_pair(
     )
 }
 
-/// [`connect_pair`] with its spawn, its core-dump limit and its item read supplied. A failure
-/// after the spawn settles the child before it returns, so no later attempt starts beside it; an
-/// exit with [`BRAIN_EXIT_BUSY`](kumochi_protocol::constants::BRAIN_EXIT_BUSY) is `Busy`. From
-/// the spawn on, custody ending shuts the ends down, so every wait of the attempt returns at once,
-/// and once connected it aborts both legs: a peer that keeps its ends open can't hold either. No
-/// connection is handed over once custody has ended, and a failed attempt shuts its ends down
-/// before it settles.
+/// [`connect_pair`] with its spawn, its core-dump limit, its first touch and its item read
+/// supplied. A failure after the spawn settles the child before it returns, so no later attempt
+/// starts beside it; an exit with [`BRAIN_EXIT_BUSY`](kumochi_protocol::constants::BRAIN_EXIT_BUSY)
+/// is `Busy`, unless first touch refused first. From the spawn on, custody ending shuts the ends
+/// down, so every wait of the attempt returns at once, and once connected it aborts both legs: a
+/// peer that keeps its ends open can't hold either. No connection is handed over once custody has
+/// ended, and a failed attempt shuts its ends down before it settles.
 #[cfg(target_os = "macos")]
 #[expect(
     clippy::too_many_arguments,
-    reason = "the pair attempt's identity, deadline and its three injected platform calls"
+    reason = "the pair attempt's identity, deadline and its four injected platform calls"
 )]
 pub(super) fn connect_pair_with(
     start: impl FnOnce(
@@ -377,6 +403,7 @@ pub(super) fn connect_pair_with(
         super::macos::NotStarted,
     >,
     harden: impl FnOnce() -> std::io::Result<()>,
+    at_ready: impl FnOnce() -> Result<(), FirstTouchError>,
     read_item: impl FnOnce(
         &mut [u8; kumochi_session::SECRET_LEN],
     ) -> Result<(), kumochi_storage::ItemError>,
@@ -422,6 +449,7 @@ pub(super) fn connect_pair_with(
                 deadline,
                 text_metrics,
                 harden,
+                at_ready,
                 read_item,
                 || owner.has_ended(),
             )
@@ -448,7 +476,10 @@ pub(super) fn connect_pair_with(
             }
             let settled = owner.settle();
             let error = match settled {
-                Settled::Reaped(Exit::Code(code)) if code == i32::from(BRAIN_EXIT_BUSY) => {
+                Settled::Reaped(Exit::Code(code))
+                    if code == i32::from(BRAIN_EXIT_BUSY)
+                        && !matches!(error, LinkError::FirstTouch(_)) =>
+                {
                     LinkError::Busy
                 }
                 _ => error,
@@ -479,15 +510,16 @@ fn not_spawned(error: LinkError) -> Failed {
     }
 }
 
-/// Waits for the brain's READY byte, then turns off core dumps with `harden`, then reads the
-/// instance capability with `read_item`, then runs [`over_pair`]. Nothing is written and the item
-/// isn't read until READY arrives, and a wrong byte or the stream ending is `Rejected`. A failed
-/// `harden` is `Harden`, and the item is never read. Once `ended` says custody of the child is
-/// over, the attempt is `Custody` on each side of the item read.
+/// Waits for the brain's READY byte, then turns off core dumps with `harden`, then runs first
+/// touch with `at_ready`, then reads the instance capability with `read_item`, then runs
+/// [`over_pair`]. Nothing is written and the item isn't read until READY arrives, and a wrong byte
+/// or the stream ending is `Rejected`. A failed `harden` is `Harden` and a refused `at_ready` is
+/// `FirstTouch`; neither reads the item. The deadline and custody are checked on each side of
+/// first touch and of the item read.
 #[cfg(target_os = "macos")]
 #[expect(
     clippy::too_many_arguments,
-    reason = "the pair attempt's ends, identity, deadline, custody and its two platform calls"
+    reason = "the pair attempt's ends, identity, deadline, custody and its three platform calls"
 )]
 pub(super) fn after_ready(
     ends: super::macos::ShellEnds,
@@ -497,6 +529,7 @@ pub(super) fn after_ready(
     deadline: Instant,
     text_metrics: impl FnOnce(Instant) -> DrawingText,
     harden: impl FnOnce() -> std::io::Result<()>,
+    at_ready: impl FnOnce() -> Result<(), FirstTouchError>,
     read_item: impl FnOnce(
         &mut [u8; kumochi_session::SECRET_LEN],
     ) -> Result<(), kumochi_storage::ItemError>,
@@ -519,6 +552,10 @@ pub(super) fn after_ready(
     }
     // Before the secret exists, so no core dump of this process can hold it.
     harden().map_err(|_| LinkError::Harden)?;
+    check_attempt(Some(deadline))?;
+    in_custody()?;
+    // The shell's own lock and log come before the item, so a refused first touch reads nothing.
+    at_ready().map_err(LinkError::FirstTouch)?;
     let mut secret = super::macos::Secret::zeroed();
     check_attempt(Some(deadline))?;
     in_custody()?;

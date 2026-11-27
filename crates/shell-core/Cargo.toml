@@ -72,6 +72,8 @@ kumochi-brain = { path = "../brain", features = ["test-support"] }
 [features]
 # The fixtures the shell's tests share with the core's.
 test-support = []
+# First light's link: first touch at READY and no relaunch. Debug builds only.
+first-light = []
 
 [lints]
 workspace = true
