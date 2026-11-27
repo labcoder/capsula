@@ -76,6 +76,7 @@ fn retry_after_no_drawing_resends_the_exact_turn_and_a_drawn_retry_ends_it() {
 
     state(&mut runs, 2, 2, Phase::Thinking, None);
     state(&mut runs, 2, 2, Phase::Done, None);
+    assert_eq!(not_returned(&mut runs, 2), []);
     assert!(!runs.retry_ready(RunId(2)));
     assert_eq!(retried(&mut runs, 2), None);
 }
@@ -151,6 +152,7 @@ fn only_the_current_typed_turn_with_its_text_is_offered() {
     runs.submit("newer", |_| true).expect("sent");
     assert_eq!(drew_nothing(&mut runs, 1, 1), []);
     state(&mut runs, 2, 2, Phase::Thinking, None);
+    assert_eq!(not_returned(&mut runs, 1), []);
     assert_eq!(not_returned(&mut runs, 2), [Action::Retry]);
     assert_eq!(
         retried(&mut runs, 2),

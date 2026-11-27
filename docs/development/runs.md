@@ -170,8 +170,8 @@ run's `Done`. `Runs::drawing_notice` decides there whether the notice offers Ret
 named typed run that still holds its text, isn't fenced or stopped, and whose thread and
 selection are current. It then moves that submission into the same recovery slot a failed run's
 Retry uses, so Retry resends the exact text as a new typed turn with every typed run's Stop and
-Esc behaviour, and Esc, a spoken stop's fence, a new turn, a selection change, a delete, a
-disconnect, a new brain or Dismiss withdraws it as they do for a failed run. This covers
+Esc behaviour, and an Esc that stops or clears, a spoken stop's fence, a new turn, a selection
+change, a delete, a disconnect, a new brain or Dismiss withdraws it as they do for a failed run. This covers
 every call refused, calls that came back empty, and committed steps that a `StepFailed` cut
 then dropped; those still count against the run's step budget. A step that was shown or that
 the user cleared counts as returned. Stop and failed runs, which report their own ending, get no
