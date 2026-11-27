@@ -1234,3 +1234,60 @@ fn a_lookup_in_a_held_anchor_is_not_redirected_by_a_rename() {
     drop(held_dir);
     scratch.cleanup().expect("remove recorded fixture objects");
 }
+
+#[test]
+#[ignore = "requires exact-head review and a bounded native fixture-parent commission"]
+fn a_product_lock_is_held_before_its_logs_folder_is_made() {
+    use crate::{Product, ProductFolder, admit_support};
+
+    let mut scratch = Scratch::new();
+    let parent = std::env::var_os("STORAGE_ADMISSION_FIXTURE_PARENT")
+        .expect("an explicitly commissioned fixture parent");
+    let support =
+        std::path::PathBuf::from(parent).join(OsStr::from_bytes(scratch.residual.to_bytes()));
+    let product = scratch.directory(c"product");
+    let held = || -> Product {
+        match admit_support(&support)
+            .expect("admit the fixture anchor")
+            .product_folder("product")
+        {
+            Ok(ProductFolder::Held(product)) => product,
+            other => panic!("expected the product folder held, not {other:?}"),
+        }
+    };
+    let logs = support.join("product").join("logs");
+
+    let contender = held()
+        .into_lock("shell.lock")
+        .expect("open the fixture lock");
+    contender.try_lock().expect("the contender holds it");
+    scratch
+        .record(&product, c"shell.lock")
+        .expect("record the lock");
+    assert!(
+        matches!(held().try_lock_storage("shell.lock"), Ok(None)),
+        "another holder is refused"
+    );
+    assert_eq!(
+        std::fs::symlink_metadata(&logs)
+            .expect_err("no logs folder before the lock is held")
+            .kind(),
+        io::ErrorKind::NotFound
+    );
+
+    drop(contender);
+    let first = held()
+        .try_lock_storage("shell.lock")
+        .expect("lock the fixture product")
+        .expect("no other holder");
+    scratch.record(&product, c"logs").expect("record logs");
+    assert!(logs.is_dir(), "logs made once the lock is held");
+    assert!(
+        matches!(held().try_lock_storage("shell.lock"), Ok(None)),
+        "the first owner still holds it"
+    );
+
+    drop(first);
+    drop(product);
+    scratch.cleanup().expect("remove recorded fixture objects");
+}
