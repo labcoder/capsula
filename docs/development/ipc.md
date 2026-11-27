@@ -540,7 +540,11 @@ sequenceDiagram
 
 The capability is checked before anything else, so a client without it learns nothing, not even
 whether its build matches. A shell that meets a brain from another build waits for that brain to
-exit and starts the one beside itself.
+exit and starts the one beside itself. A brain built before `QueuedHello` can't decode the queued
+greeting and closes without answering. So when a queued greeting goes unanswered, the shell asks
+again on a fresh control leg with the Legacy Hello every build reads, and an older brain answers
+`BuildMismatch` and exits as usual. Any other answer still counts as a refusal: the shell never
+opens a data leg after that probe or starts a Legacy session.
 
 After authenticating both legs as one process, the brain reads that pair's single
 `TextMetrics` frame. Both Hello modes use one absolute deadline from the control handshake

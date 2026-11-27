@@ -188,14 +188,18 @@ fn handshake(
     attempt: Option<Instant>,
     text_metrics: impl FnOnce() -> DrawingText,
 ) -> Result<Connection, LinkError> {
-    let control = open(&Pipe::Control.name(session), brain, attempt)?;
-    // A brain that hangs mid-handshake must not hang the shell with it.
-    control.set_timeout(Some(HANDSHAKE_TIMEOUT));
+    let open_control = || {
+        let control = open(&Pipe::Control.name(session), brain, attempt)?;
+        // A brain that hangs mid-handshake must not hang the shell with it.
+        control.set_timeout(Some(HANDSHAKE_TIMEOUT));
+        Ok(control)
+    };
+    let control = open_control()?;
     let hello = Hello {
         build_id: BUILD_ID.to_owned(),
         capability: credential::read(session)?,
     };
-    handshake_pair(
+    handshake_or_probe(
         control,
         hello,
         audio,
@@ -203,7 +207,51 @@ fn handshake(
         attempt,
         text_metrics(),
         || open(&Pipe::Data.name(session), brain, attempt),
+        open_control,
     )
+}
+
+/// A brain built before the queued greeting can't decode it, so it closes without saying it is
+/// from another build. After a queued greeting goes unanswered, the Legacy Hello every build reads
+/// asks again on a fresh control leg, so such a brain answers `BuildMismatch` and exits. Any
+/// other answer stays a refusal: the probe never opens a data leg or starts a Legacy session.
+#[cfg(not(target_os = "macos"))]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the handshake's own arguments plus the leg the probe reopens"
+)]
+fn handshake_or_probe(
+    control: PipeClient,
+    hello: Hello,
+    audio: AudioSession,
+    repair_of: Option<IssueSession>,
+    attempt: Option<Instant>,
+    drawing: DrawingText,
+    open_data: impl FnOnce() -> Result<PipeClient, LinkError>,
+    reopen_control: impl FnOnce() -> Result<PipeClient, LinkError>,
+) -> Result<Connection, LinkError> {
+    match handshake_pair(
+        control,
+        hello.clone(),
+        audio,
+        repair_of,
+        attempt,
+        drawing,
+        open_data,
+    ) {
+        Err(LinkError::Rejected) if audio == AudioSession::QueuedRequired => {
+            let control = reopen_control()?;
+            let limit = Instant::now() + HANDSHAKE_TIMEOUT;
+            let mut probe =
+                HandshakeIo(&control, Some(attempt.map_or(limit, |end| end.min(limit))));
+            write_control_hello(&mut probe, hello, AudioSession::Legacy, None)?;
+            match welcome(&mut probe) {
+                Err(LinkError::BuildMismatch) => Err(LinkError::BuildMismatch),
+                _ => Err(LinkError::Rejected),
+            }
+        }
+        result => result,
+    }
 }
 
 pub(crate) fn handshake_pair(
