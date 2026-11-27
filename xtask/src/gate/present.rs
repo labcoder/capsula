@@ -391,7 +391,42 @@ impl PresentRows {
         Ok(row)
     }
 
+    /// The Listening join: the unique present submitted on `swapchain` within the frame's
+    /// interval, whatever its `Dropped` flag, since `PresentMon` credits at most one present per
+    /// window per DWM frame and two composition swapchains can mark a shown present dropped. Its
+    /// display is known only from that row with `Dropped` = 0, never from another present.
+    pub(super) fn join_submission(
+        &mut self,
+        swapchain: u64,
+        paint_qpc: i64,
+        completion_qpc: i64,
+        frequency: i64,
+    ) -> std::result::Result<MatchedPresent, Join> {
+        let mut row = self.unique(swapchain, paint_qpc, completion_qpc, frequency)?;
+        if row.present.dropped {
+            row.displayed_qpc = None;
+        }
+        if !self.joined.insert((row.present.swapchain, row.present.qpc)) {
+            return Err(Join::Reused);
+        }
+        Ok(row)
+    }
+
     fn candidate(
+        &self,
+        swapchain: u64,
+        paint_qpc: i64,
+        completion_qpc: i64,
+        frequency: i64,
+    ) -> std::result::Result<MatchedPresent, Join> {
+        let row = self.unique(swapchain, paint_qpc, completion_qpc, frequency)?;
+        if row.present.dropped {
+            return Err(Join::Dropped);
+        }
+        Ok(row)
+    }
+
+    fn unique(
         &self,
         swapchain: u64,
         paint_qpc: i64,
@@ -410,9 +445,6 @@ impl PresentRows {
         };
         if candidates.next().is_some() {
             return Err(Join::Ambiguous);
-        }
-        if row.present.dropped {
-            return Err(Join::Dropped);
         }
         Ok(row)
     }
@@ -925,6 +957,64 @@ mod tests {
             parsed.non_dock_swapchain(10, 100, 102, 1000),
             Err(Join::Ambiguous),
             "never choose one of two chains"
+        );
+    }
+
+    #[test]
+    fn listening_joins_a_dropped_submission_without_inferring_its_display() {
+        let mut parsed = parse(
+            &csv(&[
+                row(100, 10, Dropped, "5"),
+                row(101, 20, Presented, "1"),
+                row(200, 10, Presented, "5"),
+            ]
+            .concat()),
+            35620,
+        )
+        .unwrap();
+        let dropped = parsed.join_submission(10, 99, 102, 1000).unwrap();
+        assert_eq!(dropped.present.qpc, 100);
+        assert_eq!(
+            dropped.displayed_qpc, None,
+            "a dropped row proves no display"
+        );
+        let shown = parsed.join_submission(10, 199, 200, 1000).unwrap();
+        assert_eq!(shown.present.qpc, 200);
+        assert_eq!(shown.displayed_qpc, Some(205));
+    }
+
+    #[test]
+    fn listening_join_still_refuses_missing_ambiguous_and_reused_submissions() {
+        let mut parsed = parse(
+            &csv(&[
+                row(100, 20, Presented, "1"),
+                row(200, 10, Dropped, "0"),
+                row(201, 10, Presented, "1"),
+                row(300, 10, Presented, "1"),
+            ]
+            .concat()),
+            35620,
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.join_submission(10, 99, 101, 1000),
+            Err(Join::Missing),
+            "another swapchain's present is not the dock's"
+        );
+        assert_eq!(
+            parsed.join_submission(10, 199, 201, 1000),
+            Err(Join::Ambiguous),
+            "a dropped candidate still counts"
+        );
+        assert_eq!(
+            parsed
+                .join_submission(10, 299, 300, 1000)
+                .map(|row| row.present.qpc),
+            Ok(300)
+        );
+        assert_eq!(
+            parsed.join_submission(10, 299, 300, 1000),
+            Err(Join::Reused)
         );
     }
 }

@@ -419,11 +419,12 @@ creates no file. Both need a shell built with the `gate-recorder` feature (see
 
 A paint isn't a present. The gate harness joins its exact Canvas QPC to the separately logged
 posted-completion interval and a unique eligible PresentMon row on the validated dock swapchain.
-Missing, dropped, reused or ambiguous joins remain unmeasured; a Canvas marker alone never
-passes a present or display gate. Hold to talk can't show Listening before its 300 ms hold is
-recognised, the brain admits it and the microphone reports Running, so the shortcut row gates
-recognition → the line's first Listening present at p95 ≤7ms and reports key-down → that present
-beside it ([the hold to talk rows](#the-hold-to-talk-rows)). Hover gates the native pointer-entry QPC →
+Missing, reused or ambiguous joins remain unmeasured, and so do dropped ones everywhere but the
+Listening row; a Canvas marker alone never passes a present or display gate. Hold to talk can't
+show Listening before its 300 ms hold is recognised, the brain admits it and the microphone
+reports Running, so the shortcut row gates recognition → the submission of the line's first
+Listening dock present, ≤150ms for each launch's first hold and p95 ≤40ms for the rest, and
+reports key-down → that present beside it ([the hold to talk rows](#the-hold-to-talk-rows)). Hover gates the native pointer-entry QPC →
 the peek's first present at p95 ≤8ms. That QPC is read
 when the entering `WM_MOUSEMOVE` is dispatched to the proxy's window procedure. So it excludes
 OS routing and the message's wait in the UI thread's Win32 message queue before dispatch, and
@@ -868,13 +869,22 @@ the Listening row.
   and 1.5 s more. **Each hold opens the real microphone**; the audio stays in the brain and is
   never stored. A silent hold starts no turn; transcribed noise would start a turn that the
   fixture fails at once. The clock
-  starts at the native callback that recognised the hold and stops at the present of the first
-  dock frame painted between `listening on` and `listening off`; key-down → that present is
-  reported beside it. The gate is p95 ≤7ms over all 100 holds; a hold that never reaches
-  Listening or a present fails its batch. The span covers the brain's admission
+  starts at the native callback that recognised the hold and stops at the submission of the
+  present (PresentMon's `QPCTime`, its PresentStart) of the first dock frame painted between
+  `listening on` and `listening off`, whatever its `Dropped` flag. PresentMon credits at most
+  one present per window per DWM frame, and the dock and the panel are both DirectComposition
+  swapchains, so when the panel presents in the same frame the dock's present can be marked
+  dropped although it was shown; `Dropped` isn't used for that reason. Recognition → display
+  comes only from a row with `Dropped` = 0 and an `msUntilDisplayed`, is never inferred from
+  another swapchain or a later present, and is reported with its coverage (how many holds were
+  displayed of those attempted); key-down → that present is reported too, and neither is gated.
+  The gate (owner, 2026-11-27: option A) splits the holds: each launch's first hold is cold and
+  every one must be ≤150ms, and the other 90 are warm, at p95 ≤40ms over all attempted warm holds.
+  A hold that never reaches Listening or a present fails its batch. The span covers the brain's admission
   round trip, the microphone start and the paint, so it is a target for the current input
   model, not the old chord → Listening figure. Each `listening-NN/listening-joins.txt` holds
-  its batch's samples, and the evidence folder's `listening-display.txt` the summary lines.
+  its batch's samples, and the evidence folder's `listening-display.txt` the summary lines, cold
+  and warm labelled apart.
 
 ## Voice hold authority
 

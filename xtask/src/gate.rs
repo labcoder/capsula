@@ -453,8 +453,8 @@ fn run_session(
             {
                 observation::summarize_listening(
                     &presented,
-                    usize::from(crate::session::BATCHES)
-                        * usize::try_from(crate::session::BATCH_HOLDS)?,
+                    usize::from(crate::session::BATCHES),
+                    usize::try_from(crate::session::BATCH_HOLDS)?,
                     output,
                 )?;
             }

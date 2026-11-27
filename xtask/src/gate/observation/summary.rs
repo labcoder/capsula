@@ -12,18 +12,28 @@ use crate::gate::present::{Join, MatchedPresent, PresentRows};
 use crate::session::Heard;
 
 /// One heard hold's present: QPC ticks after its recognition, after its key-down, and to its
-/// display when `PresentMon` saw one, on a counter running at `frequency`.
+/// display when `PresentMon` saw one, on a counter running at `frequency`; `cold` when it was its
+/// launch's first hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::gate) struct Presented {
     recognized: i64,
     key_down: i64,
     display: Option<i64>,
     frequency: i64,
+    cold: bool,
 }
 
+/// Recognition to the first Listening dock present's submission, gated at p95 over all attempted
+/// warm holds (owner, 2026-11-27: option A).
+const WARM_BUDGET_MS: i64 = 40;
+/// Recognition to the first Listening dock present's submission, gated on every attempted cold
+/// hold (owner, 2026-11-27: option A).
+const COLD_BUDGET_MS: i64 = 150;
+
 /// Joins each of one batch's heard holds to the first dock frame painted while the line had the
-/// Listening colour, from `listening on` until `listening off`, and that frame to its present.
-/// Writes `listening-joins.txt` and fails unless every one of `attempted` holds was presented.
+/// Listening colour, from `listening on` until `listening off`, and that frame to the submission
+/// of its present, whatever `PresentMon`'s `Dropped` flag says. Writes `listening-joins.txt` and
+/// fails unless every one of `attempted` holds was presented.
 pub(in crate::gate) fn join_listening(
     heard: &[Heard],
     attempted: usize,
@@ -63,7 +73,7 @@ pub(in crate::gate) fn join_listening(
             writeln!(report, "status=ObservationInvalid")?;
             continue;
         }
-        let joined = rows.join_present(
+        let joined = rows.join_submission(
             dock_chain,
             frame.paint_qpc,
             frame.completion_qpc.unwrap_or(0),
@@ -77,6 +87,7 @@ pub(in crate::gate) fn join_listening(
                 key_down: ticks + (hold.recognized - hold.key_down),
                 display,
                 frequency,
+                cold: index == 0,
             });
         }
     }
@@ -95,11 +106,16 @@ pub(in crate::gate) fn join_listening(
     Ok(())
 }
 
-/// The Listening row over every batch: recognition to present gated at p95 ≤ 7 ms over all
-/// `attempted` holds, with key-down to present and display latency beside it, not gated.
+/// The Listening row over `batches` launches of `batch_holds` holds (owner, 2026-11-27: option
+/// A): recognition to the submission of the line's first Listening dock present. Cold holds, each
+/// launch's first, are gated every one at [`COLD_BUDGET_MS`]; warm holds, the rest, at p95
+/// [`WARM_BUDGET_MS`] over all attempted. Key-down to present and recognition to display are
+/// reported beside them, not gated; display is known only for presents `PresentMon` did not mark
+/// dropped, so each group reports how many of its holds were displayed.
 pub(in crate::gate) fn summarize_listening(
     presented: &[Presented],
-    attempted: usize,
+    batches: usize,
+    batch_holds: usize,
     output: &Path,
 ) -> Result<()> {
     let frequency = presented.first().map_or(0, |sample| sample.frequency);
@@ -107,59 +123,96 @@ pub(in crate::gate) fn summarize_listening(
         presented.iter().all(|sample| sample.frequency == frequency),
         "Listening batches ran on different counter frequencies"
     );
+    let verdict = |pass: bool| if pass { "pass" } else { "unmeasured_or_fail" };
     let mut report = String::from(
-        "hold recognised to the line's first Listening present, gated; key-down to that present and display latency reported beside it, not gated\n",
+        "hold recognised to the submission of the line's first Listening dock present, gated: cold (each launch's first hold) every one, warm (the rest) at p95 over all attempted; key-down to that present and display latency reported beside it, not gated\n",
     );
-    let mut recognized = presented
-        .iter()
-        .map(|sample| sample.recognized)
-        .collect::<Vec<_>>();
-    let mut key_down = presented
-        .iter()
-        .map(|sample| sample.key_down)
-        .collect::<Vec<_>>();
-    let mut displays = presented
-        .iter()
-        .filter_map(|sample| sample.display)
-        .collect::<Vec<_>>();
-    let budget_pass = statistics(
-        &mut report,
-        "recognized_to_listening",
-        &mut recognized,
-        attempted,
-        frequency,
-        Some(7),
-    )?;
-    statistics(
-        &mut report,
-        "key_down_to_listening",
-        &mut key_down,
-        attempted,
-        frequency,
-        None,
-    )?;
-    statistics(
-        &mut report,
-        "recognized_to_listening_display",
-        &mut displays,
-        attempted,
-        frequency,
-        None,
-    )?;
-    let complete = presented.len() == attempted;
+    let mut pass = true;
+    for (label, cold, attempted) in [
+        ("cold", true, batches),
+        ("warm", false, batches * batch_holds.saturating_sub(1)),
+    ] {
+        let group = presented
+            .iter()
+            .filter(|sample| sample.cold == cold)
+            .collect::<Vec<_>>();
+        let mut recognized = group
+            .iter()
+            .map(|sample| sample.recognized)
+            .collect::<Vec<_>>();
+        let mut key_down = group
+            .iter()
+            .map(|sample| sample.key_down)
+            .collect::<Vec<_>>();
+        let mut displays = group
+            .iter()
+            .filter_map(|sample| sample.display)
+            .collect::<Vec<_>>();
+        let displayed = displays.len();
+        let gated = format!("{label}_recognized_to_listening");
+        let budget_pass = if cold {
+            let measured = statistics(
+                &mut report,
+                &gated,
+                &mut recognized,
+                attempted,
+                frequency,
+                None,
+            )?;
+            let every = measured
+                && recognized
+                    .iter()
+                    .all(|&ticks| within(ticks, frequency, COLD_BUDGET_MS));
+            writeln!(
+                report,
+                "cold_every_hold_budget_ms={COLD_BUDGET_MS} budget_pass={every}"
+            )?;
+            every
+        } else {
+            statistics(
+                &mut report,
+                &gated,
+                &mut recognized,
+                attempted,
+                frequency,
+                Some(WARM_BUDGET_MS),
+            )?
+        };
+        statistics(
+            &mut report,
+            &format!("{label}_key_down_to_listening"),
+            &mut key_down,
+            attempted,
+            frequency,
+            None,
+        )?;
+        statistics(
+            &mut report,
+            &format!("{gated}_display"),
+            &mut displays,
+            attempted,
+            frequency,
+            None,
+        )?;
+        let group_pass = group.len() == attempted && budget_pass;
+        writeln!(
+            report,
+            "{label}_holds attempted={attempted} presented={} displayed={displayed} gate={}",
+            group.len(),
+            verdict(group_pass)
+        )?;
+        pass &= group_pass;
+    }
     writeln!(
         report,
-        "expected_holds={attempted} presented={} gate={}",
+        "expected_holds={} presented={} gate={}",
+        batches * batch_holds,
         presented.len(),
-        if complete && budget_pass {
-            "pass"
-        } else {
-            "unmeasured_or_fail"
-        }
+        verdict(pass)
     )?;
     save_report(&output.join("listening-display.txt"), &report)?;
     ensure!(
-        complete && budget_pass,
+        pass,
         "Listening present gate incomplete or over budget; see {}",
         output.display()
     );
@@ -448,13 +501,17 @@ fn statistics(
         milliseconds(p95, frequency)?,
         milliseconds(max, frequency)?
     )?;
-    let pass = budget_ms
-        .is_none_or(|budget| i128::from(p95) * 1000 <= i128::from(frequency) * i128::from(budget));
+    let pass = budget_ms.is_none_or(|budget| within(p95, frequency, budget));
     if let Some(budget) = budget_ms {
         write!(report, " budget_ms={budget} budget_pass={pass}")?;
     }
     writeln!(report)?;
     Ok(pass)
+}
+
+/// Whether `ticks` on a counter running at `frequency` is no longer than `budget_ms`.
+fn within(ticks: i64, frequency: i64, budget_ms: i64) -> bool {
+    i128::from(ticks) * 1000 <= i128::from(frequency) * i128::from(budget_ms)
 }
 
 fn save_report(path: &Path, report: &str) -> Result<()> {
@@ -539,11 +596,12 @@ mod tests {
         heard
     }
 
-    /// Joins `heard` against the scenario, then summarises the presents as `attempted` holds.
+    /// Joins `heard` against the scenario, then summarises the presents as `batches` launches of
+    /// `batch_holds` holds.
     fn listening_report(
         directory: &Path,
         heard: &[Heard],
-        attempted: usize,
+        (batches, batch_holds): (usize, usize),
     ) -> (bool, Vec<Presented>, String) {
         let mut rows = crate::gate::present::read(&directory.join("present.csv"), 42).unwrap();
         let mut presented = Vec::new();
@@ -559,7 +617,7 @@ mod tests {
         let joins = directory.join("listening-joins.txt");
         let mut report = fs::read_to_string(&joins).unwrap();
         fs::remove_file(joins).unwrap();
-        let summarized = summarize_listening(&presented, attempted, directory);
+        let summarized = summarize_listening(&presented, batches, batch_holds, directory);
         let summary = directory.join("listening-display.txt");
         report.push_str(&fs::read_to_string(&summary).unwrap());
         fs::remove_file(summary).unwrap();
@@ -570,20 +628,39 @@ mod tests {
     fn listening_times_the_first_dock_frame_while_listening_from_recognition() {
         let directory = directory();
         let mut heard = listening_scenario(&directory, [3, 5, 7, 6]);
-        let (passed, presented, report) = listening_report(&directory, &heard, 4);
+        let (passed, presented, report) = listening_report(&directory, &heard, (1, 4));
         assert!(passed, "{report}");
-        assert_eq!(presented.len(), 4);
-        assert!(report.contains("summary=recognized_to_listening n=4 successful=4 attempted=4 p50_ms=5.000000 p95_ms=7.000000 max_ms=7.000000 budget_ms=7 budget_pass=true"), "{report}");
-        assert!(report.contains("summary=key_down_to_listening n=4 successful=4 attempted=4 p50_ms=305.000000 p95_ms=307.000000 max_ms=307.000000"), "{report}");
+        assert_eq!(
+            presented
+                .iter()
+                .map(|sample| sample.cold)
+                .collect::<Vec<_>>(),
+            [true, false, false, false],
+            "the launch's first hold is cold and the rest are warm"
+        );
+        assert!(report.contains("summary=cold_recognized_to_listening n=1 successful=1 attempted=1 p50_ms=3.000000 p95_ms=3.000000 max_ms=3.000000\ncold_every_hold_budget_ms=150 budget_pass=true"), "{report}");
+        assert!(report.contains("summary=warm_recognized_to_listening n=3 successful=3 attempted=3 p50_ms=6.000000 p95_ms=7.000000 max_ms=7.000000 budget_ms=40 budget_pass=true"), "{report}");
+        assert!(report.contains("summary=warm_key_down_to_listening n=3 successful=3 attempted=3 p50_ms=306.000000 p95_ms=307.000000 max_ms=307.000000"), "{report}");
         assert!(report.contains("expected_holds=4 presented=4 gate=pass"));
-        let (passed, _, report) = listening_report(&directory, &heard, 5);
+        let (_, second, _) = listening_report(&directory, &heard, (1, 4));
+        let (passed, report) = summary(&[presented, second].concat(), 2, 4);
+        assert!(passed, "{report}");
+        assert!(
+            report.contains("cold_holds attempted=2 presented=2 displayed=2 gate=pass")
+                && report.contains("warm_holds attempted=6 presented=6 displayed=6 gate=pass"),
+            "each launch's first hold is cold: {report}"
+        );
+        let (passed, _, report) = listening_report(&directory, &heard, (1, 5));
         assert!(
             !passed,
             "a hold that never reached Listening stays in the denominator"
         );
-        assert!(report.contains("attempted=5") && report.contains("gate=unmeasured_or_fail"));
+        assert!(
+            report.contains("warm_holds attempted=4 presented=3")
+                && report.contains("gate=unmeasured_or_fail")
+        );
         heard[0].resting = heard[0].listening + 1;
-        let (passed, presented, report) = listening_report(&directory, &heard, 4);
+        let (passed, presented, report) = listening_report(&directory, &heard, (1, 4));
         assert!(
             !passed,
             "a frame painted after Listening ended is not Listening"
@@ -593,13 +670,114 @@ mod tests {
             "{report}"
         );
         assert_eq!(presented.len(), 3);
+        assert!(
+            report.contains("cold_holds attempted=1 presented=0"),
+            "the second hold never becomes the launch's cold one: {report}"
+        );
         fs::remove_dir_all(&directory).unwrap();
-        let directory = super::super::tests::directory();
-        let heard = listening_scenario(&directory, [3, 5, 8, 6]);
-        let (passed, _, report) = listening_report(&directory, &heard, 4);
-        assert!(!passed, "8 ms misses the 7 ms budget");
-        assert!(report.contains("p95_ms=8.000000") && report.contains("budget_pass=false"));
-        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_dropped_listening_present_counts_at_its_submission_without_a_display() {
+        let directory = directory();
+        let heard = listening_scenario(&directory, [3, 5, 7, 6]);
+        let csv_path = directory.join("present.csv");
+        let csv = fs::read_to_string(&csv_path).unwrap();
+        let shown = "app.exe,42,0xA,DXGI,0,0,0,0.1,0,0,0,Composed: Flip,0,13,0,0,0,0,2005\n";
+        assert!(csv.contains(shown));
+        fs::write(
+            &csv_path,
+            csv.replace(shown, &shown.replace("DXGI,0,0,0,", "DXGI,0,0,1,")),
+        )
+        .unwrap();
+        let (passed, presented, report) = listening_report(&directory, &heard, (1, 4));
+        assert!(passed, "{report}");
+        assert_eq!(
+            presented[1].display, None,
+            "a dropped present proves no display"
+        );
+        assert!(report.contains("present_qpc=2005 status=Presented present_latency_ms=5.000000 display_status=Unavailable"), "{report}");
+        assert!(report.contains("summary=warm_recognized_to_listening_display n=2 successful=2 attempted=3 p50_ms=19.000000 p95_ms=20.000000 max_ms=20.000000"), "{report}");
+        assert!(
+            report.contains("cold_holds attempted=1 presented=1 displayed=1 gate=pass")
+                && report.contains("warm_holds attempted=3 presented=3 displayed=2 gate=pass"),
+            "{report}"
+        );
+    }
+
+    /// A warm hold of `recognized` µs, displayed `display` µs after recognition when known.
+    fn warm(recognized: i64, display: Option<i64>) -> Presented {
+        Presented {
+            recognized,
+            key_down: recognized + 300_000,
+            display,
+            frequency: 1_000_000,
+            cold: false,
+        }
+    }
+
+    /// A cold hold of `recognized` µs with no known display.
+    fn cold(recognized: i64) -> Presented {
+        Presented {
+            cold: true,
+            ..warm(recognized, None)
+        }
+    }
+
+    /// Summarises `presented` as `batches` launches of `batch_holds` holds in a fresh folder.
+    fn summary(presented: &[Presented], batches: usize, batch_holds: usize) -> (bool, String) {
+        let directory = directory();
+        let passed = summarize_listening(presented, batches, batch_holds, &directory).is_ok();
+        let report = fs::read_to_string(directory.join("listening-display.txt")).unwrap();
+        (passed, report)
+    }
+
+    #[test]
+    fn warm_holds_pass_at_a_40_ms_p95_and_fail_one_tick_over() {
+        let holds = |at: usize, over: usize, ticks: i64| {
+            [
+                [cold(1_000); 10].as_slice(),
+                &[warm(40_000, Some(50_000)); 90][..at],
+                vec![warm(ticks, None); over].as_slice(),
+            ]
+            .concat()
+        };
+        let (passed, report) = summary(&holds(86, 4, 1_000_000), 10, 10);
+        assert!(passed, "the four slowest of 90 lie above the p95: {report}");
+        assert!(report.contains("summary=warm_recognized_to_listening n=90 successful=90 attempted=90 p50_ms=40.000000 p95_ms=40.000000 max_ms=1000.000000 budget_ms=40 budget_pass=true"), "{report}");
+        let (passed, report) = summary(&holds(85, 5, 40_001), 10, 10);
+        assert!(!passed, "{report}");
+        assert!(
+            report.contains("p95_ms=40.001000 max_ms=40.001000 budget_ms=40 budget_pass=false"),
+            "{report}"
+        );
+        assert!(
+            report.contains(
+                "warm_holds attempted=90 presented=90 displayed=85 gate=unmeasured_or_fail"
+            ),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn every_cold_hold_passes_at_150_ms_and_one_tick_over_fails() {
+        let rest = [warm(1_000, None); 20];
+        let (passed, report) = summary(&[[cold(150_000); 20], rest].concat(), 20, 2);
+        assert!(passed, "{report}");
+        assert!(report.contains("summary=cold_recognized_to_listening n=20 successful=20 attempted=20 p50_ms=150.000000 p95_ms=150.000000 max_ms=150.000000\ncold_every_hold_budget_ms=150 budget_pass=true"), "{report}");
+        let mut first = [cold(1_000); 20];
+        first[7] = cold(150_001);
+        let (passed, report) = summary(&[first, rest].concat(), 20, 2);
+        assert!(
+            !passed,
+            "one slow cold hold fails though the p95 passes: {report}"
+        );
+        assert!(
+            report.contains(
+                "p95_ms=1.000000 max_ms=150.001000\ncold_every_hold_budget_ms=150 budget_pass=false"
+            ),
+            "{report}"
+        );
     }
 
     #[test]
