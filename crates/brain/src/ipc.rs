@@ -43,6 +43,8 @@ pub(crate) const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long the brain waits with no shell before exiting [guess]. A shell that gave up on it,
 /// or quit before it was up, leaves nobody to tell it to stop; the next shell starts another.
 const NO_SHELL_TIMEOUT: Duration = Duration::from_secs(30);
+/// How often a shell that left without `Quitting` is checked for having exited.
+const EXIT_POLL: Duration = Duration::from_millis(100);
 
 /// What the brain checks a shell against.
 #[derive(Debug)]
@@ -220,7 +222,8 @@ impl Pipes {
 
     /// Waits for a shell, serves it, and returns how its session ended. Clients that fail the
     /// handshake are logged and skipped. A relaunched shell that ends before a session starts
-    /// (`launched` fires) counts as lost.
+    /// (`launched` fires) counts as lost. A shell whose connection ended without `Quitting`
+    /// counts as lost only once its process has exited; until then it may reconnect.
     ///
     /// # Errors
     /// Fails only when a pipe can no longer accept clients.
@@ -231,14 +234,16 @@ impl Pipes {
         tap: &mut Tap,
         launched: &mut Option<oneshot::Receiver<()>>,
     ) -> Result<Session, IpcError> {
+        let mut departed = None;
         loop {
-            // A shell the brain relaunched tells it to stop once it connects, so only an
-            // idle brain gives up.
-            let idle = launched.is_none();
+            // A shell the brain relaunched, or one still running, tells it to stop once it
+            // connects, so only an idle brain gives up.
+            let idle = launched.is_none() && departed.is_none();
             tokio::select! {
                 accepted = self.control.connect() => accepted?,
                 () = brain.idle() => {}
                 () = exited(launched) => return Ok(Session::ShellLost),
+                () = ended(departed.as_ref()) => return Ok(Session::ShellLost),
                 () = tokio::time::sleep(NO_SHELL_TIMEOUT), if idle => return Ok(Session::NoShell),
             }
             let session = self
@@ -246,6 +251,17 @@ impl Pipes {
                 .await;
             self.renew()?;
             match session {
+                Ok(Session::ShellLost) => {
+                    departed = brain
+                        .last_shell()
+                        .filter(|shell| matches!(shell.exited(), Ok(false)));
+                    if departed.is_none() {
+                        return Ok(Session::ShellLost);
+                    }
+                    tracing::info!(
+                        "the shell left without quitting and still runs; waiting for it"
+                    );
+                }
                 Ok(session) => return Ok(session),
                 Err(error) => tracing::warn!(%error, "connection refused"),
             }
@@ -548,6 +564,16 @@ async fn exited(launched: &mut Option<oneshot::Receiver<()>>) {
         tracing::warn!("the shell wasn't relaunched");
     }
     *launched = None;
+}
+
+/// Resolves once `shell` has exited or can no longer be checked; never without a shell.
+async fn ended(shell: Option<&platform::ShellProcess>) {
+    let Some(shell) = shell else {
+        return std::future::pending().await;
+    };
+    while matches!(shell.exited(), Ok(false)) {
+        tokio::time::sleep(EXIT_POLL).await;
+    }
 }
 
 fn create(session: u32, pipe: Pipe, instance: Instance) -> Result<PipeServer, IpcError> {
@@ -993,9 +1019,15 @@ mod tests {
             crate::platform::PipeClient,
             crate::platform::PipeClient,
         ) {
-            let mut control = ClientOptions::new()
-                .open(Pipe::Control.name(session))
-                .unwrap();
+            // As the shell does, retry while the brain hasn't renewed the instance yet.
+            let mut control = loop {
+                match ClientOptions::new().open(Pipe::Control.name(session)) {
+                    Err(error) if error.raw_os_error() == Some(231) => {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                    opened => break opened.unwrap(),
+                }
+            };
             let welcome = request_audio(&mut control, AudioSession::QueuedRequired).await;
             let mut data = ClientOptions::new().open(Pipe::Data.name(session)).unwrap();
             let message = DataToBrain::QueuedHello(hello(1, BUILD_ID), replay.unwrap_or(welcome));
@@ -1020,24 +1052,13 @@ mod tests {
         let mut brain = test_support::brain(&scratch, "");
         let mut tap = Tap::from_env();
         let mut launched = None;
-        let first_peer = async {
-            let (welcome, mut control, _data) = connect(session, None).await;
-            expect_startup(&mut control, welcome, ShellTuning::default()).await;
-            welcome
-        };
-        let (result, old) = timeout(std::time::Duration::from_secs(7), async {
-            tokio::join!(
-                pipes.next_session(&id, &mut brain, &mut tap, &mut launched),
-                first_peer
-            )
-        })
-        .await
-        .unwrap();
-        assert_eq!(result.unwrap(), Session::ShellLost);
-        assert_eq!(old.epoch, 1);
-        assert_eq!(brain.issue_session(), None);
-
-        let reconnect = async {
+        let peer = async {
+            let old = {
+                let (welcome, mut control, _data) = connect(session, None).await;
+                expect_startup(&mut control, welcome, ShellTuning::default()).await;
+                welcome
+            };
+            assert_eq!(old.epoch, 1);
             let (welcome, mut control, mut data) = connect(session, Some(old)).await;
             assert_eq!(welcome.incarnation, old.incarnation);
             assert_eq!(welcome.epoch, 2);
@@ -1064,17 +1085,40 @@ mod tests {
                 .await
                 .unwrap();
         };
-        let (result, ()) = timeout(std::time::Duration::from_secs(9), async {
+        // The peer is this test process, so its first, dropped connection leaves a live shell.
+        let (result, ()) = timeout(std::time::Duration::from_secs(16), async {
             tokio::join!(
                 pipes.next_session(&id, &mut brain, &mut tap, &mut launched),
-                reconnect
+                peer
             )
         })
         .await
-        .unwrap();
+        .expect("a live shell that dropped its connection is served again, not lost");
         assert!(matches!(result.unwrap(), Session::Quit { .. }));
         assert_eq!(brain.issue_session(), None);
         brain.close().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_departed_shell_ends_only_once_its_process_exits_or_cannot_be_checked() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU8, Ordering};
+
+        use super::{EXIT_POLL, ended};
+        use crate::platform::ShellProcess;
+
+        let state = Arc::new(AtomicU8::new(0));
+        let shell = ShellProcess::fixture(7, Arc::clone(&state));
+        let running = tokio::time::timeout(EXIT_POLL * 50, ended(Some(&shell))).await;
+        assert!(running.is_err(), "a running shell hasn't ended");
+        state.store(1, Ordering::Release);
+        let exited = tokio::time::timeout(EXIT_POLL * 2, ended(Some(&shell))).await;
+        assert_eq!(exited, Ok(()));
+        let unknown = ShellProcess::fixture(8, Arc::new(AtomicU8::new(2)));
+        let unchecked = tokio::time::timeout(EXIT_POLL, ended(Some(&unknown))).await;
+        assert_eq!(unchecked, Ok(()));
+        let none = tokio::time::timeout(EXIT_POLL * 50, ended(None)).await;
+        assert!(none.is_err(), "no shell never ends");
     }
 
     #[cfg(windows)]

@@ -385,6 +385,11 @@ impl Brain {
         self.holds.connected(peer);
     }
 
+    /// The shell that connected last, whether or not it still is.
+    pub(crate) fn last_shell(&self) -> Option<ShellProcess> {
+        self.holds.peer.clone()
+    }
+
     /// Whether a stop receipt of this connection waits for its shell process to be checked again.
     pub(super) fn owes_stop(&self) -> bool {
         self.holds

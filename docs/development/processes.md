@@ -269,8 +269,9 @@ stateDiagram-v2
 | What happens | What the other process does |
 |---|---|
 | The shell dies | The brain relaunches it after 0.2 s, then 1 s, then 5 s, then stops: a fourth crash within a minute isn't relaunched. A shell that dies before connecting counts. A debug brain that has either live key budget (`KUMOCHI_LIVE_KEY_CATALOG_BUDGET`, `KUMOCHI_LIVE_KEY_MESSAGES_BUDGET`) relaunches it with both at 0, so a brain that shell starts gets no key requests |
+| The shell's connection ends without `Quitting` | The brain checks the shell's process. One that still runs isn't relaunched: the brain waits for it to reconnect, checking every 0.1 s, and counts it as died only once it exits. One that has exited, or can't be checked, is handled as dying |
 | The brain dies | Its helpers end with it. The shell restarts it once; a second loss within a minute shows Retry |
-| No shell for 30 s, and none being relaunched | The brain exits with its helpers, so a shell that gave up on a slow brain or quit before it was up leaves nothing behind. The next shell starts a new brain |
+| No shell for 30 s, and none being relaunched or still running | The brain exits with its helpers, so a shell that gave up on a slow brain or quit before it was up leaves nothing behind. The next shell starts a new brain |
 | A Claude Code launch's process ends or the brain crashes | The launch's run job is terminated and confirmed empty, or the kill-on-close brain job ends it. The next lane call sweeps its folder under the account lock ([claude-code.md](claude-code.md), "Launches") |
 | A shell is started by hand | It finds the running brain through the pipes and the capability |
 | Quit | The shell sends `Quitting`. The brain clears the visible scenes (below), cancels any pending shell relaunch, ends its jobs, deletes the instance capability and exits, then the shell exits. A shell still connecting starts no brain, and tells one it already started once it connects |
