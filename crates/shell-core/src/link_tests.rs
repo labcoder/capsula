@@ -2636,11 +2636,11 @@ fn prepared_queued_pairs_register_the_selected_narration() {
     }
 
     let (prepared, _unstarted) = super::prepare(
-        async_channel::unbounded().0,
+        async_channel::bounded(1).0,
         super::AudioSession::Legacy,
         Narration::Conducted,
     )
-    .expect("prepare without starting the stock connector");
+    .expect("a Legacy link ignores narration, so any sender prepares");
     let link = attended_shared(
         "prepared-legacy-conducted",
         Arc::clone(&prepared.shared),
