@@ -89,6 +89,10 @@ impl Presence {
         cx.spawn(async move |this, cx| {
             let _warning = warning;
             let refused = if let Ok(running) = mic.running.recv().await {
+                #[cfg(any(test, feature = "gate-recorder"))]
+                let _noted = this.update(cx, |_, cx| {
+                    crate::presence::diagnostics::record(cx, format_args!("microphone running"));
+                });
                 // The same receipt and worker through every recheck: collected, or drained.
                 loop {
                     let collected = this.update(cx, |this, cx| {

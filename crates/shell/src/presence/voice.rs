@@ -1054,6 +1054,8 @@ impl Presence {
             StatusStep::Ignored => {}
             // The waiter is installed, then checked at once.
             StatusStep::Admit => {
+                #[cfg(any(test, feature = "gate-recorder"))]
+                super::diagnostics::record(cx, format_args!("hold admitted"));
                 if self.voice.gates.admit(gesture, cx.background_executor()) {
                     self.dispatch(cx);
                 }
