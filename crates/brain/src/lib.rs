@@ -702,6 +702,11 @@ async fn serve(
 /// counts the same way, so the backoff retries it and then gives up.
 async fn relaunch(shell: PathBuf, delay: Duration, exited: oneshot::Sender<()>) {
     tokio::time::sleep(delay).await;
+    // A shell that connected during the backoff supersedes this one, connected or not.
+    if exited.is_closed() || platform::connected_shell_pid() != 0 {
+        tracing::debug!("a shell connected during the backoff; not relaunching");
+        return;
+    }
     let budgets = connections::model::budget::handed_on(|name| std::env::var_os(name).is_some());
     let mut child = match platform::launch_detached(&shell, budgets) {
         Ok(child) => child,
