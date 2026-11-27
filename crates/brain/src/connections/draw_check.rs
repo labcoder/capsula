@@ -227,7 +227,10 @@ fn line(
         (Ok(()), Some(Err(()))) => ("draw=too-long".to_owned(), false),
         (Ok(()), Some(Ok(arguments))) => {
             let verdict = check(arguments.as_bytes());
-            (verdict.words(), matches!(verdict, Verdict::Drawn(_)))
+            (
+                verdict.words(),
+                matches!(verdict, Verdict::Drawn(steps) if steps > 0),
+            )
         }
     };
     (

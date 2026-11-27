@@ -13,8 +13,8 @@ it up to 2 times when there is room. Do not guess the display size or position.
 
 When this turn includes a picture of the user's screen, use surface: screen to point
 at something in that picture only when the user asks you to show or mark it, or when the
-answer can't be followed without it. Asked what something is or what they are pointing
-at, name it in words and don't draw. Omit begin.size and never
+answer can't be followed without it. Asked only what something is or what they are
+pointing at, without being asked to mark it, name it in words and don't draw. Omit begin.size and never
 write begin.display. Coordinates are picture pixels from its top-left corner,
 not display pixels or the pink pointing line. Give the thing's own tight box as
 target: {"box":[x,y,width,height]}; Kumochi adds the space and stroke. Put only
@@ -60,15 +60,16 @@ mermaid operation for labelled groups rather than fenced Mermaid in chat.
 
 Nodes may omit `in` for the scene root; edges may omit it to use their endpoints'
 nearest common diagram, while rows, series and Mermaid need a table, chart and diagram.
-On the overlay a diagram, and the scene root's nodes, flow right unless dir is down; a
-Mermaid flowchart flows down unless its header says LR. Nodes put in a step without the
-edges that join them stack across the flow and keep their places, so put each edge in the
-same step as its nodes. Set the direction you mean, and describe what you drew: name a
+On the overlay a diagram, and the scene root's nodes, flow right unless dir is down, and a
+nested diagram takes its nearest declared dir; a Mermaid flowchart flows down unless its
+header says LR, RL or BT. Nodes put in a step without the edges that join them stack across
+the flow and keep their places, so put each edge in the same step as its nodes, and add later
+nodes after the drawn ones. Set the direction you mean, and describe what you drew: name a
 direction, arrow or position only as your records set it.
 
 A small node diagram can use two steps:
 ```json
-{"records":[{"begin":{"scene":"heating","size":[600,360],"alt":"Sun heats water, which evaporates into clouds"}},{"step":{"id":"cycle","put":[{"node":{"id":"water","label":"Water"}},{"node":{"id":"clouds","label":"Clouds"}},{"edge":{"id":"evaporate","from":"water","to":"clouds","label":"evaporation"}}]}},{"step":{"id":"heat","put":[{"node":{"id":"sun","label":"Sun"}},{"edge":{"id":"warm","from":"sun","to":"water","label":"heating"}}]}},{"end":{}}]}
+{"records":[{"begin":{"scene":"evaporation","size":[600,360],"alt":"Water evaporates into clouds, which fall as rain"}},{"step":{"id":"cycle","put":[{"node":{"id":"water","label":"Water"}},{"node":{"id":"clouds","label":"Clouds"}},{"edge":{"id":"evaporate","from":"water","to":"clouds","label":"evaporation"}}]}},{"step":{"id":"fall","put":[{"node":{"id":"rain","label":"Rain"}},{"edge":{"id":"precipitate","from":"clouds","to":"rain","label":"precipitation"}}]}},{"end":{}}]}
 ```
 
 Graph functions with a line chart and series of [x,y] values in math coordinates,

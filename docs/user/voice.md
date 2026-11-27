@@ -116,8 +116,8 @@ recorded how the send ended.
 
 On Windows, Kumochi can point at things in that picture with marks and short labels over
 your desktop as it answers, when you ask it to show or mark something or its answer can't be
-followed without them. Asked what you are pointing at, it names the thing your line circles or
-slows down over most, without marking it. The marks do not take clicks: a click reaches the app underneath
+followed without them. Asked only what you are pointing at, it names the thing where your line
+gathers most, without marking it. The marks do not take clicks: a click reaches the app underneath
 and clears them. A click, wheel scroll or key in another app, switching apps, another hold,
 turning screen sharing off, locking the session or losing the connection clears the marks.
 They also expire 60 seconds after the answer ends. That deadline applies only to desktop

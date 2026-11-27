@@ -583,8 +583,9 @@ real one only in a live turn the Captain assigned, from the reviewed head.
   built into debug brains only, and a brain without it exits 10. Its preflight is the image
   check's, and it never renews the session.
 - Three requests. The first asks for an overlay diagram of two boxes with an arrow pointing
-  right, in the words a user typed when the first ask drew nothing (OSC-1160), so it checks that
-  an explicit request draws at once. Then one per recorded call in
+  right, in the words a user typed when the first ask drew nothing (OSC-1160). Its line shows
+  whether that explicit request drew on its first answer: only `draw=drawn steps=N` with N of at
+  least 1 counts as drawn, and exit 0 says only that every prompt was worked through. Then one per recorded call in
   `crates/brain/fixtures/responses`: the user asks for the water cycle, then for a graph of
   y = x². `KUMOCHI_LIVE_BUDGET=1` sends only the first. Each goes through the product's request path on the
   default model at low effort, with short fixed instructions and `draw` exactly as Kumo's model is

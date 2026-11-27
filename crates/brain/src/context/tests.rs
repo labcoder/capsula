@@ -2486,7 +2486,7 @@ fn a_screen_picture_tells_the_model_what_it_is_and_where_the_line_lies() {
             message(Role::Developer, picture),
             message(
                 Role::Developer,
-                "While speaking, the user moved the mouse pointer, perhaps to show you something. The pink line on the image follows that movement. It was drawn on the image for you and is not on their screen. It lies inside the rectangle from (9871, 20) to (9890, 41), in image pixels, and gathers most around (9884, 37), where they circled, went back and forth or slowed down. When they ask what they are pointing at, the thing there is the likeliest answer, not where the line starts or everything it crosses."
+                "While speaking, the user moved the mouse pointer, perhaps to show you something. The pink line on the image follows that movement. It was drawn on the image for you and is not on their screen. It lies inside the rectangle from (9871, 20) to (9890, 41), in image pixels, and its points gather most densely around (9884, 37). When they ask what they are pointing at, the thing there is the likeliest answer, not where the line starts or everything it crosses."
             ),
         ]
     );

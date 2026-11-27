@@ -56,6 +56,17 @@ fn a_step_after_the_end_is_refused_and_not_drawn() {
 }
 
 #[test]
+fn a_scene_with_no_step_is_not_counted_as_drawn() {
+    let arguments = r#"{"records":[{"begin":{"scene":"s","surface":"overlay","title":"t","alt":"a"}},{"end":{}}]}"#;
+    assert_eq!(check(arguments.as_bytes()), Verdict::Drawn(0));
+    let reply = Reply {
+        calls: 1,
+        draw: Some(Ok(arguments.to_owned())),
+    };
+    assert!(!line(1, "overlay-diagram", 10, Ok(()), &reply, 5).1);
+}
+
+#[test]
 fn a_reply_not_read_whole_or_a_refused_account_stops_the_run() {
     let provider = |status| Err(Failure::Provider(ProviderError::answered(status, b"")));
     for (result, want) in [

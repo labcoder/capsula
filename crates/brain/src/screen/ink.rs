@@ -95,8 +95,18 @@ pub(crate) fn paint(
         }
     }
     let [left, top, right, bottom] = bounds?;
-    let places: Vec<[f64; 2]> = path.iter().map(|&point| place(point)).collect();
-    let mean = gathered(&places)?;
+    let seen = |at: &[f64; 2]| (0..2).all(|axis| (0.0..f64::from(size[axis])).contains(&at[axis]));
+    let places: Vec<[f64; 2]> = path
+        .iter()
+        .map(|&point| place(point))
+        .filter(seen)
+        .collect();
+    // shortcut: a line whose kept points all lie off the image gathers at its rectangle's centre;
+    // the shell keeps only points on the display the picture shows, so none reaches this yet.
+    let mean = gathered(&places).unwrap_or([
+        f64::midpoint(f64::from(left), f64::from(right)),
+        f64::midpoint(f64::from(top), f64::from(bottom)),
+    ]);
     let focus = [inside(mean[0], left, right), inside(mean[1], top, bottom)];
     Some(InkBounds {
         left,
@@ -107,10 +117,11 @@ pub(crate) fn paint(
     })
 }
 
-/// Where `places` gather most: the mean of the places within [`GATHER`] of the one with the most
-/// such neighbours, the later one on a tie, so a straight line gathers towards its end.
+/// Where `places` are densest: the mean of the places within [`GATHER`] of the one with the most
+/// such neighbours, the later one on a tie; none for no places.
 fn gathered(places: &[[f64; 2]]) -> Option<[f64; 2]> {
-    let near = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).hypot(a[1] - b[1]) <= GATHER;
+    let near =
+        |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) <= GATHER * GATHER;
     let centre = places
         .iter()
         .copied()

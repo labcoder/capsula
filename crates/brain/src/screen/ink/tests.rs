@@ -233,7 +233,7 @@ fn a_long_approach_that_ends_circling_a_word_gathers_on_the_circle() {
 }
 
 #[test]
-fn a_straight_path_gathers_at_its_end() {
+fn sparse_points_that_tie_gather_at_the_later_one() {
     let (mut rgb, region) = blank([200, 20]);
     assert_eq!(
         paint(
@@ -248,6 +248,38 @@ fn a_straight_path_gathers_at_its_end() {
             right: 193,
             bottom: 13,
             focus: [190, 10],
+        })
+    );
+}
+
+#[test]
+fn points_off_the_image_never_decide_where_the_line_gathers() {
+    let (mut rgb, region) = blank([100, 100]);
+    let mut path = vec![[80, 10], [80, 80], [-200, 80]];
+    path.extend([[-200, -200]; 10]);
+    assert_eq!(
+        paint(&mut rgb, [100, 100], region, &points(&path)),
+        Some(InkBounds {
+            left: 0,
+            top: 8,
+            right: 83,
+            bottom: 83,
+            focus: [80, 80],
+        })
+    );
+}
+
+#[test]
+fn a_line_with_no_point_on_the_image_gathers_at_its_centre() {
+    let (mut rgb, region) = blank([20, 20]);
+    assert_eq!(
+        paint(&mut rgb, [20, 20], region, &points(&[[-10, 10], [30, 10]])),
+        Some(InkBounds {
+            left: 0,
+            top: 8,
+            right: 20,
+            bottom: 13,
+            focus: [10, 10],
         })
     );
 }
