@@ -516,8 +516,7 @@ async fn play(
                 Some(_) => {}
             }
         }
-        // Stop aborts the round's task, whose lease settles only once the runtime drops it,
-        // maybe after Interrupted; the settlement's tell comes with its queued sent mark.
+        // The aborted round's lease may settle after Interrupted; its tell comes with the sent mark.
         if wire == Wire::FlushHeld {
             while told.is_empty() {
                 match shell.control().await {
