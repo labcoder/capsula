@@ -507,3 +507,179 @@ fn the_jpeg_cap_admits_its_exact_size_and_refuses_one_byte_less() {
         Err(Failure::Refused(Refusal::TooLarge))
     ));
 }
+
+/// A desktop with a file window away from the display's corner, holding a row of white tiles
+/// 104 physical pixels apart, of which tile 3 is red.
+fn tiles(dpi: u32) -> RawFrame {
+    let holds = |area: PhysicalRect, x: u32, y: u32| {
+        let [x, y] = [i64::from(x), i64::from(y)];
+        let [left, top] = area.origin.map(i64::from);
+        let [width, height] = area.size.map(i64::from);
+        (left..left + width).contains(&x) && (top..top + height).contains(&y)
+    };
+    let mut raw = RawFrame::default();
+    let bytes = raw.begin(2560, 1440).unwrap();
+    for y in 0..1440 {
+        for x in 0..2560 {
+            let pixel = if holds(tile(3), x, y) {
+                [0, 0, 255, 255]
+            } else if (0..8).any(|index| holds(tile(index), x, y)) {
+                [255; 4]
+            } else if holds(rect([300, 400], [1200, 600]), x, y) {
+                [96, 96, 96, 255]
+            } else {
+                [32, 32, 32, 255]
+            };
+            let at = usize::try_from((y * 2560 + x) * 4).unwrap();
+            bytes[at..at + 4].copy_from_slice(&pixel);
+        }
+    }
+    raw.commit(FrameMeta {
+        capture: CaptureId(1),
+        display: rect([0, 0], [2560, 1440]),
+        dpi,
+        acquired_after_ms: 0,
+    })
+    .unwrap();
+    raw
+}
+
+fn tile(index: i32) -> PhysicalRect {
+    rect([320 + 104 * index, 480], [86, 86])
+}
+
+/// Where a box mark on `found`, in picture pixels, is drawn on an overlay over the primary
+/// display at `dpi`, in the overlay's logical pixels.
+fn drawn_mark(
+    geometry: crate::context::Geometry,
+    found: [u32; 4],
+    dpi: u32,
+) -> kumochi_scene::geom::Rect {
+    use kumochi_scene::display::{MeasureError, Prim, TextMeasure, TextStyle};
+    use kumochi_scene::layout::{LayoutState, PrepareInput, SurfaceGeometry, prepare};
+    use kumochi_scene::record::ScreenDisplay;
+    use kumochi_scene::{
+        Admission, Frame, GlobalBudget, Record, SceneState, SceneView, parse_screen_draw_record,
+        screen, theme::Theme,
+    };
+
+    struct Unlabelled;
+    impl TextMeasure for Unlabelled {
+        fn measure(
+            &mut self,
+            _: &str,
+            _: TextStyle,
+            _: Option<f32>,
+        ) -> Result<[f32; 2], MeasureError> {
+            Err(MeasureError)
+        }
+    }
+
+    let Ok(Record::Begin(mut begin)) =
+        parse_screen_draw_record(br#"{"begin":{"scene":"mark","surface":"screen","alt":""}}"#)
+    else {
+        panic!("screen header");
+    };
+    screen::stamp(&mut begin, geometry.picture, geometry.display).unwrap();
+    let mut scene = SceneState::begin(begin).unwrap();
+    let mut budget = GlobalBudget::default();
+    let step = serde_json::json!({"step":{"id":"point","put":[
+        {"highlight":{"id":"h","target":{"box":found},"style":"box"}}
+    ]}});
+    let Ok(Record::Step(step)) = parse_screen_draw_record(&serde_json::to_vec(&step).unwrap())
+    else {
+        panic!("screen step");
+    };
+    let Admission::New(candidate) = scene.admit(&step, &budget).unwrap() else {
+        panic!("new step");
+    };
+    let ticket = scene.commit(candidate, &mut budget).unwrap().preparation;
+    let input = PrepareInput::new(
+        ticket,
+        LayoutState::new(&scene),
+        SurfaceGeometry::Overlay {
+            default_canvas: [960.0, 600.0],
+        },
+        std::sync::Arc::new(Theme::default()),
+    )
+    .unwrap();
+    let prepared = prepare(
+        input,
+        &mut Unlabelled,
+        &std::sync::atomic::AtomicBool::new(false),
+    )
+    .unwrap();
+    let mut view = SceneView::new(&prepared.after, scene.activated());
+    // The overlay covers the primary display, which the shell reports in physical pixels.
+    let overlay = ScreenDisplay {
+        origin: [0, 0],
+        size: [2560, 1440],
+        dpi,
+    };
+    assert!(view.set_screen(scene.header(), Some(overlay)));
+    let mut frame = Frame::new();
+    view.frame(u64::MAX, &mut frame).unwrap();
+    frame
+        .items()
+        .iter()
+        .flat_map(|item| {
+            item.primitives.iter().filter_map(|prim| match prim {
+                Prim::Rect {
+                    rect,
+                    border: Some(_),
+                    ..
+                } => Some(item.transform.bounds(*rect)),
+                _ => None,
+            })
+        })
+        .reduce(kumochi_scene::geom::Rect::union)
+        .expect("a drawn outline")
+}
+
+/// A perfect model finds the red tile in the picture it is sent and marks that box. Through the
+/// stamp and the overlay's placement the mark must surround that tile on screen and leave both
+/// neighbours out, at 100% and at 150%.
+#[test]
+fn a_mark_on_the_tile_found_in_the_picture_lands_on_that_tile_not_a_neighbour() {
+    for dpi in [96, 144] {
+        let mut raw = tiles(dpi);
+        let encoded = overview(&sanitize(&mut raw, &MaskSet::new(CaptureId(1))).unwrap()).unwrap();
+        let red: Vec<_> = decode(&encoded)
+            .enumerate_pixels()
+            .filter(|(_, _, pixel)| pixel[0] > 160 && pixel[1] < 96 && pixel[2] < 96)
+            .map(|(x, y, _)| [x, y])
+            .collect();
+        let low = |axis: usize| red.iter().map(|at| at[axis]).min().unwrap();
+        let high = |axis: usize| red.iter().map(|at| at[axis]).max().unwrap() + 1;
+        let found = [low(0), low(1), high(0) - low(0), high(1) - low(1)];
+        let geometry = super::super::context::ScreenContext::new(encoded).geometry();
+        let mark = drawn_mark(geometry, found, dpi);
+
+        // Overlay logical pixels from physical ones: 96 / dpi each.
+        let scale = 96.0 / f32::from(u16::try_from(dpi).unwrap());
+        let logical = |area: PhysicalRect, axis: usize| {
+            let start = f32::from(i16::try_from(area.origin[axis]).unwrap()) * scale;
+            (
+                start,
+                start + f32::from(u16::try_from(area.size[axis]).unwrap()) * scale,
+            )
+        };
+        let (left, right) = logical(tile(3), 0);
+        let (top, bottom) = logical(tile(3), 1);
+        assert!(
+            mark.origin.x <= left
+                && mark.origin.y <= top
+                && mark.max().x >= right
+                && mark.max().y >= bottom,
+            "the mark surrounds its tile at {dpi} DPI"
+        );
+        for neighbour in [tile(2), tile(4)] {
+            let (start, end) = logical(neighbour, 0);
+            let centre = f32::midpoint(start, end);
+            assert!(
+                centre < mark.origin.x || centre > mark.max().x,
+                "the mark stays off the neighbouring tile at {dpi} DPI"
+            );
+        }
+    }
+}
