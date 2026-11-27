@@ -239,14 +239,15 @@ fn held_after_commit(child: &Child) -> mpsc::Sender<()> {
     release
 }
 
-/// Waits until the shell's end of `control` is shut down, or [`SHUTDOWN_SEEN`] has passed.
+/// Waits until the shell's end of `control` is shut down, for no longer than [`SHUTDOWN_SEEN`].
+/// Only EOF counts: a byte or a timeout fails the brain, which the test then shows.
 fn shut_down_seen(control: &UnixStream) {
     control
         .set_read_timeout(Some(SHUTDOWN_SEEN))
         .expect("bounded");
     let mut byte = [0];
-    // EOF is the shutdown; a timeout means it never came, which the test then shows.
-    let _seen = (&*control).read(&mut byte);
+    let read = (&*control).read(&mut byte).map_err(|error| error.kind());
+    assert_eq!(read, Ok(0), "the shell shut its end down");
 }
 
 fn owned(child: &Child, word: &Arc<SpawnWord>) -> Result<ChildOwner, Refusal> {
@@ -974,8 +975,8 @@ fn no_item_is_read_once_custody_has_ended() {
 #[test]
 fn a_failed_item_read_lets_a_child_that_exits_on_eof_exit_unkilled() {
     let child = Child::default();
-    // Longer than the shutdown takes, shorter than [`SHUTDOWN_SEEN`].
-    child.script().grace = Some(Duration::from_secs(2));
+    // The child exits only on EOF, so no kill may come first.
+    child.script().grace = Some(BOUND);
     let word = Arc::new(SpawnWord::default());
     let result = attempt(
         &word,

@@ -1201,6 +1201,8 @@ mod tests {
         );
         assert_eq!(hook_ran.recv_timeout(BOUND), Ok(()), "the hook ran");
         held.release();
+        // Lets the owner's late reaper end.
+        fake.script().exits = Some((Instant::now(), Exit::Code(0)));
     }
 
     #[test]
@@ -1213,15 +1215,16 @@ mod tests {
         held.entered();
         word.quit();
         assert!(matches!(next(&owner), Report::Settled(Settled::Unsettled)));
+        // The resumed owner reaches its kill decision past the grace; then one poll after it.
+        let (auto_reaps_gate, deciding) = gate();
+        fake.script().auto_reaps_gate = Some(auto_reaps_gate);
         held.release();
-        // Past the grace a resumed owner would start, then two whole polls after it.
-        thread::sleep(WAIT * 2);
-        for _ in 0..2 {
-            let (poll_gate, held) = gate();
-            fake.script().poll_gate = Some(poll_gate);
-            held.entered();
-            held.release();
-        }
+        deciding.entered();
+        deciding.release();
+        let (poll_gate, polling) = gate();
+        fake.script().poll_gate = Some(poll_gate);
+        polling.entered();
+        polling.release();
         assert_eq!(fake.script().kills, 0, "no kill after the published end");
         fake.script().exits = Some((Instant::now(), Exit::Code(0)));
         fake.until(|script| script.reaped);
@@ -1249,6 +1252,8 @@ mod tests {
         polling.entered();
         polling.release();
         assert_eq!(fake.script().kills, 0, "no kill admitted after the outcome");
+        // Lets the owner's late reaper end.
+        fake.script().exits = Some((Instant::now(), Exit::Code(0)));
     }
 
     #[test]

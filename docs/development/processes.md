@@ -240,8 +240,9 @@ the disconnected window, so no child starts.
   the link drops the owner, the owner waits for the child to exit, then sends one SIGKILL and
   waits once more. A failed kill isn't retried. A child still unreaped after that is
   **Unsettled**: it's reported once, the claim stays taken so nothing replaces it, and the owner
-  keeps reaping it quietly while the shell lives. A kill is admitted right before the signal and
-  only while custody has no outcome, the watchdog's Unsettled included, so none follows it.
+  keeps reaping it quietly while the shell lives. A kill is admitted only while custody has no
+  outcome, the watchdog's Unsettled included. Only the admission is checked, right before the
+  signal, so a kill admitted before Unsettled can still land after it, on the same retained PID.
   The owner never holds the shell's ends of the
   pair, only the child's until the spawn: the link closes its own ends when the connection ends
   (aborted for Legacy, dropped for Queued), so the brain sees EOF before it's retired.
