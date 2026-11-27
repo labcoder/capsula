@@ -28,10 +28,10 @@ pub(crate) enum NotStarted {
     /// No child exists, and this attempt starts none.
     #[error(transparent)]
     Refused(#[from] Refusal),
-    /// The spawn hadn't reported by its deadline, so a child may still start. Its owner is
-    /// dropped, so it retires any child it makes, and the spawn claim stays taken until that
-    /// child is reaped.
-    #[error("the brain's spawn didn't report in time")]
+    /// The spawn didn't report, by its deadline or before its owner thread ended, so a child may
+    /// exist or still start. Its owner is dropped, so it retires any child it makes, and the
+    /// spawn claim stays taken until that child is reaped.
+    #[error("the brain's spawn didn't report")]
     Pending,
 }
 
@@ -42,8 +42,8 @@ pub(crate) enum NotStarted {
 /// UI thread.
 ///
 /// # Errors
-/// `Pending` when the report didn't come in time. Otherwise the owner's refusal, or `Spawn` when
-/// the sockets, the path or the owner thread can't be made or the thread died before reporting.
+/// `Pending` when no report came in time or the owner thread ended without one. Otherwise the
+/// owner's refusal, or `Spawn` when the sockets, the path or the owner thread can't be made.
 pub(crate) fn start_brain(
     brain: &Path,
     word: Arc<SpawnWord>,
@@ -57,12 +57,18 @@ pub(crate) fn start_brain(
 /// Starts the owner and waits for its spawn report, until `by` or for `SPAWN_REPORT` at most.
 fn reported(os: impl Os, word: Arc<SpawnWord>, by: Instant) -> Result<ChildOwner, NotStarted> {
     let owner = ChildOwner::start(os, word, crate::link::QUIT_TIMEOUT).map_err(Refusal::Spawn)?;
-    match owner.spawned(by.min(Instant::now() + SPAWN_REPORT)) {
-        Ok(Report::Spawned) => Ok(owner),
+    started(owner.spawned(by.min(Instant::now() + SPAWN_REPORT))).map(|()| owner)
+}
+
+/// What the spawn report proves. Only a report says whether a child exists; a thread that ended
+/// without one proves nothing, so it's `Pending` like a late report.
+fn started(report: Result<Report, RecvTimeoutError>) -> Result<(), NotStarted> {
+    match report {
+        Ok(Report::Spawned) => Ok(()),
         Ok(Report::NotSpawned(refusal)) => Err(refusal.into()),
-        Err(RecvTimeoutError::Timeout) => Err(NotStarted::Pending),
-        Ok(Report::Settled(_)) | Err(RecvTimeoutError::Disconnected) => {
-            Err(Refusal::Spawn(io::ErrorKind::BrokenPipe.into()).into())
+        Ok(Report::Settled(_))
+        | Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {
+            Err(NotStarted::Pending)
         }
     }
 }
@@ -706,6 +712,26 @@ mod tests {
         fn kill(&mut self) -> io::Result<()> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn only_a_report_proves_whether_a_child_exists() {
+        for report in [
+            Err(RecvTimeoutError::Disconnected),
+            Err(RecvTimeoutError::Timeout),
+            Ok(Report::Settled(Settled::Lost)),
+        ] {
+            let shown = format!("{report:?}");
+            assert!(
+                matches!(started(report), Err(NotStarted::Pending)),
+                "{shown}"
+            );
+        }
+        assert!(matches!(started(Ok(Report::Spawned)), Ok(())));
+        assert!(matches!(
+            started(Ok(Report::NotSpawned(Refusal::Claimed))),
+            Err(NotStarted::Refused(Refusal::Claimed))
+        ));
     }
 
     #[test]

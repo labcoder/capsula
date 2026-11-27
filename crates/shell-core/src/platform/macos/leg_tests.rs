@@ -24,7 +24,7 @@ use crate::platform::SpawnWord;
 use crate::platform::connect::{LinkError, after_ready, connect_pair, not_started, over_pair};
 
 /// A synthetic group secret; no real key is ever used here.
-const SECRET: [u8; SECRET_LEN] = [0x5A; SECRET_LEN];
+pub(in crate::platform::macos) const SECRET: [u8; SECRET_LEN] = [0x5A; SECRET_LEN];
 const BOUND: Duration = Duration::from_secs(10);
 const SHORT: Duration = Duration::from_millis(60);
 const GAP: Duration = Duration::from_millis(40);
@@ -34,7 +34,7 @@ fn by() -> Instant {
 }
 
 /// The shell's ends and the brain's, as the spawn would leave them.
-fn ends() -> (ShellEnds, UnixStream, UnixStream) {
+pub(in crate::platform::macos) fn ends() -> (ShellEnds, UnixStream, UnixStream) {
     let (shell, child) = super::super::pair::pairs().expect("pairs");
     (
         shell,
@@ -55,7 +55,7 @@ fn handshake_message(
 }
 
 /// The brain's side of a bound pair, driven by hand.
-struct Brain {
+pub(in crate::platform::macos) struct Brain {
     control: UnixStream,
     data: UnixStream,
     session: Session,
@@ -135,7 +135,7 @@ impl Brain {
         }
     }
 
-    fn control_message(&mut self) -> ControlToBrain {
+    pub(in crate::platform::macos) fn control_message(&mut self) -> ControlToBrain {
         frame::decode(&self.receive(Pipe::Control)[HEADER_LEN..]).expect("decodes")
     }
 
@@ -398,7 +398,7 @@ const ORIGIN: IssueSession = IssueSession {
 
 /// What the brain does after binding, up to the frame it sends once it has committed.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Commit {
+pub(in crate::platform::macos) enum Commit {
     Settings,
     Closes,
     Pings,
@@ -433,7 +433,7 @@ fn attempt(
 
 /// The brain's side of an attempt over its two ends: the honest responder, both greetings and
 /// then `commit`.
-fn scripted(
+pub(in crate::platform::macos) fn scripted(
     brain_control: UnixStream,
     brain_data: UnixStream,
     audio: AudioSession,
@@ -665,7 +665,13 @@ fn an_expired_attempt_starts_no_brain() {
         Instant::now(),
         |_| panic!("no metrics for an expired attempt"),
     );
-    assert!(matches!(result, Err(LinkError::ConnectExpired)));
+    assert!(matches!(
+        result,
+        Err(crate::platform::Failed {
+            error: LinkError::ConnectExpired,
+            child: Some(crate::platform::Unconnected::NotSpawned),
+        })
+    ));
 }
 
 #[test]
@@ -906,6 +912,7 @@ fn after_spawn_hardened(
             thread::sleep(lag);
             item
         },
+        || false,
     );
     Spawned {
         result,
@@ -989,6 +996,7 @@ fn core_dumps_entry() {
             *into = SECRET;
             Ok(())
         },
+        || false,
     );
     assert!(result.is_err(), "the brain's ends closed after READY");
     assert_eq!(

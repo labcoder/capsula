@@ -447,7 +447,9 @@ text metrics go on as a value; a frame the shell sent right after them stays in 
 reader, and a replayed TextMetrics would end serving as Broken.
 
 The shell's side lives in `shell-core`'s `platform/macos/leg.rs` and `connect_pair`, also
-dormant: nothing calls them, since the Mac shell only opens the disconnected window. On macOS the
+dormant: the link reaches them through `platform::connect`, but the Mac shell only opens the
+disconnected window. On macOS `session_id` is 0, since the instance item and lock are per user,
+and the named-pipe connector isn't built. On macOS the
 brain is the helper nested in the shell's bundle: from an absolute
 `<name>.app/Contents/MacOS/<shell>` up to `Contents`, then down `BRAIN_HELPER`
 (`Helpers/kumochid.app/Contents/MacOS/kumochid`); any other path is `NotFound`. Windows and Linux
@@ -459,7 +461,14 @@ is `Harden`, with no read and no byte written. Only then does the shell read the
 `Role::Shell`, into a `Secret`: a boxed buffer, allocated before the read, that wipes itself when
 dropped, so a move copies only the pointer. The clock is checked before the read and again after
 it, before its answer counts, so a read that ends past the deadline is `ConnectExpired` whether it
-succeeded or not. A refused read is `Item`. Either way no byte is written. `initiate` takes the
+succeeded or not. A refused read is `Item`. Either way no byte is written. From the spawn on,
+custody of the child ending (reaped, Lost or Unsettled) shuts the shell's two ends down, so the
+READY wait, the initiator and the wait for `Settings` return at once however long the deadline,
+and the attempt is `Custody` on each side of the item read and at the handoff, each asking
+whether custody has an outcome, so no item is read and no connection handed over once it has.
+A failed attempt shuts its ends down before it settles, so a child that exits on EOF is reaped,
+not killed. A child in Quit's grace is still owned and may finish connecting. A live child that
+closes only one leg holds the attempt until its deadline, then is settled. `initiate` takes the
 box and drops it once the initiator is keyed, before its first message goes out. It runs the
 initiator's steps over the shell's two ends by one deadline and returns the legs only once
 `BindAck` verifies. Each leg is the link's `PipeClient` over the session crate's record owners.

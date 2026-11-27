@@ -657,8 +657,64 @@ struct Shared {
     /// queued.
     deletes: Mutex<Vec<Held>>,
     /// Orders Quit against an owned brain child's spawn.
-    #[cfg(target_os = "macos")]
     spawn: Arc<platform::SpawnWord>,
+    /// How Quit ended for the attempt it ended, once the link has settled that attempt's child.
+    quit_end: OnceLock<QuitEnd>,
+}
+
+/// One attempt's own receipts: its generation once Connected went out, and whether `Quitting`
+/// was written whole to its pair.
+#[derive(Debug, Default)]
+struct Attempt {
+    generation: OnceLock<u64>,
+    quit_written: AtomicBool,
+}
+
+/// How Quit ended the attempt it ended, read by [`LinkHandle::quit_end`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct QuitEnd {
+    /// The attempt's link generation, or None when Quit ended it before Connected.
+    pub(crate) generation: Option<u64>,
+    pub(crate) outcome: QuitOutcome,
+}
+
+/// How Quit ended for the brain child of the attempt it ended, joined from that attempt's own
+/// `Quitting` write receipt and that child's own settlement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum QuitOutcome {
+    /// `Quitting` was written whole to this child's pair, and the child was reaped with exit code 0.
+    Clean,
+    /// Reaped, but not cleanly: a nonzero code, a signal, or code 0 with no `Quitting` written.
+    Reaped(platform::Exit),
+    /// Custody of the child was lost.
+    Lost,
+    /// Retirement was refused or its exit wasn't confirmed in time.
+    Unsettled,
+    /// Proven: the attempt Quit ended started no child.
+    NotSpawned,
+    /// The attempt's spawn hadn't reported, so a child may still exist.
+    SpawnPending,
+}
+
+impl QuitOutcome {
+    /// `settled` joined to the receipt of `connected`, the attempt when it reached Connected.
+    fn of(connected: Option<&Attempt>, settled: platform::Settled) -> Self {
+        let written = connected.is_some_and(|attempt| attempt.quit_written.load(Ordering::Acquire));
+        match settled {
+            settled if written && settled.is_clean() => Self::Clean,
+            platform::Settled::Reaped(exit) => Self::Reaped(exit),
+            platform::Settled::Lost => Self::Lost,
+            platform::Settled::Unsettled => Self::Unsettled,
+        }
+    }
+
+    fn unconnected(child: platform::Unconnected) -> Self {
+        match child {
+            platform::Unconnected::NotSpawned => Self::NotSpawned,
+            platform::Unconnected::Pending => Self::SpawnPending,
+            platform::Unconnected::Settled(settled) => Self::of(None, settled),
+        }
+    }
 }
 
 impl Shared {
@@ -1113,7 +1169,6 @@ impl LinkHandle {
     /// Returns false when Quit was already under way.
     pub fn begin_quit(&self) -> bool {
         let first = self.shared.input.fetch_or(QUIT_INPUT, Ordering::SeqCst) & QUIT_INPUT == 0;
-        #[cfg(target_os = "macos")]
         self.shared.spawn.quit();
         self.shared.microphone.cancel_current();
         // Wakes a link waiting for Retry, so it sees Quit and ends.
@@ -1164,6 +1219,25 @@ impl LinkHandle {
         if !worker.done.is_closed() {
             tracing::warn!("the brain didn't close the pipe after Quit");
         }
+    }
+
+    /// How the last Quit ended the attempt it ended, with that attempt's generation once it was
+    /// Connected. Read it after [`Self::finish_quit`]. None when that attempt owned no child, as
+    /// for a detached brain, or when Quit came between attempts.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "R2-D's first-turn route reads it")
+    )]
+    pub(crate) fn quit_end(&self) -> Option<QuitEnd> {
+        self.shared.quit_end.get().copied()
+    }
+
+    /// The control writer's test hold: set 1 and the writer parks unwritten at its next
+    /// message, showing 2.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn control_writer_hold(&self) -> &std::sync::atomic::AtomicU8 {
+        &self.shared.hold_control_writer
     }
 
     /// Holds a delete the user confirmed until [`LinkHandle::settle_delete`]; it's sent by
@@ -1601,6 +1675,43 @@ pub fn prepare_disconnected(events: &Sender<LinkEvent>) -> std::io::Result<LinkH
     })
 }
 
+/// Starts a link whose attempts `connect` makes with the link's spawn word, for tests that script
+/// the brain and its child.
+#[cfg(any(test, feature = "test-support"))]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "only the core's own tests script a link")
+)]
+pub(crate) fn start_scripted(
+    events: Sender<LinkEvent>,
+    audio: AudioSession,
+    mut connect: impl FnMut(
+        &Arc<platform::SpawnWord>,
+        Option<IssueSession>,
+        Instant,
+    ) -> Result<(Connection, Option<platform::ChildOwner>), platform::Failed>
+    + Send
+    + 'static,
+) -> LinkHandle {
+    let link = Link {
+        brain: PathBuf::new(),
+        session: 0,
+        audio,
+        shared: Arc::new(Shared::default()),
+    };
+    let (handle, start) = start(link, events);
+    let word = Arc::clone(&start.link.shared.spawn);
+    thread::spawn(move || {
+        start
+            .link
+            .run_with(&start.events, &start.retries, |repair_of, by| {
+                connect(&word, repair_of, by)
+            });
+        drop(start.alive);
+    });
+    handle
+}
+
 fn start(link: Link, events: Sender<LinkEvent>) -> (LinkHandle, LinkStart) {
     let (retry, retries) = async_channel::bounded(1);
     let (alive, done) = async_channel::bounded::<()>(1);
@@ -1657,6 +1768,35 @@ impl Link {
         retries: &Receiver<()>,
         mut text_metrics: impl FnMut(Instant) -> DrawingText,
     ) {
+        self.run_with(events, retries, |repair_of, reconnect_by| {
+            platform::connect(
+                &self.brain,
+                self.session,
+                &self.shared.spawn,
+                self.audio,
+                repair_of,
+                reconnect_by,
+                || self.quitting(),
+                |control| {
+                    self.quit_parked(control);
+                },
+                &mut text_metrics,
+            )
+        });
+    }
+
+    /// [`Self::run`] with its connection attempt supplied. A child's custody is settled once its
+    /// connection ends, before any other attempt, so a replacement starts only after a reap.
+    fn run_with(
+        &self,
+        events: &Sender<LinkEvent>,
+        retries: &Receiver<()>,
+        mut connect: impl FnMut(
+            Option<IssueSession>,
+            Instant,
+        )
+            -> Result<(Connection, Option<platform::ChildOwner>), platform::Failed>,
+    ) {
         let mut state = LinkState::Connecting;
         let mut last_loss: Option<Instant> = None;
         let mut repair_of = None;
@@ -1665,19 +1805,18 @@ impl Link {
                 return;
             }
             let reconnect_by = Instant::now() + CONNECT_TIMEOUT;
-            let connection = match platform::connect_brain(
-                &self.brain,
-                self.session,
-                self.audio,
-                repair_of,
-                reconnect_by,
-                || self.quitting(),
-                |control| self.quit_parked(control),
-                &mut text_metrics,
-            ) {
-                Ok(connection) => connection,
-                Err(_) if self.quitting() => return,
-                Err(error) => {
+            let (connection, child) = match connect(repair_of, reconnect_by) {
+                Ok(connected) => connected,
+                Err(failed) if self.quitting() => {
+                    if let Some(child) = failed.child {
+                        let _first = self.shared.quit_end.set(QuitEnd {
+                            generation: None,
+                            outcome: QuitOutcome::unconnected(child),
+                        });
+                    }
+                    return;
+                }
+                Err(platform::Failed { error, .. }) => {
                     tracing::error!(%error, "can't reach the brain");
                     if !wait_for_retry(events, retries) {
                         return;
@@ -1688,8 +1827,19 @@ impl Link {
             };
             tracing::info!(incarnation = ?connection.issue_origin.incarnation, "connected to the brain");
             let previous = connection.issue_origin;
-            let attended = self.attend_until(connection, events, reconnect_by);
-            if attended == Attendance::Ended || self.quitting() {
+            let attempt = Arc::<Attempt>::default();
+            let attended = self.attend_until(connection, events, reconnect_by, &attempt);
+            let settled = child.map(platform::ChildOwner::settle);
+            if self.quitting() {
+                if let Some(settled) = settled {
+                    let _first = self.shared.quit_end.set(QuitEnd {
+                        generation: attempt.generation.get().copied(),
+                        outcome: QuitOutcome::of(Some(&attempt), settled),
+                    });
+                }
+                return;
+            }
+            if attended == Attendance::Ended {
                 return;
             }
             if attended != Attendance::TalkBackChanged {
@@ -1739,29 +1889,32 @@ impl Link {
         self.shared.quitting()
     }
 
-    fn quit_parked(&self, control: &PipeClient) {
+    /// Writes the held deletes and then `Quitting` on a pair no session runs on. True once
+    /// `Quitting` was written whole.
+    fn quit_parked(&self, control: &PipeClient) -> bool {
         self.shared.take_quit_input();
         let generation = 0;
         let (sender, pending) = async_channel::bounded(CONTROL_QUEUE);
         if !queue_on(&sender, generation, 0, &mut self.shared.deletes())
             || sender.try_send(ControlToBrain::Quitting).is_err()
         {
-            return;
+            return false;
         }
         drop(sender);
         let deadline = Instant::now() + QUIT_TIMEOUT;
         while let Ok(message) = pending.try_recv() {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
-                return;
+                return false;
             }
             control.set_timeout(Some(left));
             if let Err(error) = frame::write(&mut &*control, &message, Pipe::Control) {
                 tracing::debug!(%error, "parked control pipe shutdown write failed");
-                return;
+                return false;
             }
         }
         self.shared.quit_sent.store(true, Ordering::Release);
+        true
     }
 
     fn queued_start_refusal(
@@ -1769,9 +1922,12 @@ impl Link {
         control: &PipeClient,
         events: &Sender<LinkEvent>,
         reconnect_by: Instant,
+        attempt: &Attempt,
     ) -> Option<Attendance> {
         if self.quitting() {
-            self.quit_parked(control);
+            attempt
+                .quit_written
+                .store(self.quit_parked(control), Ordering::Release);
             Some(Attendance::Ended)
         } else if events.is_closed() {
             Some(Attendance::Ended)
@@ -1783,7 +1939,12 @@ impl Link {
     #[cfg(windows)]
     #[cfg(any(test, feature = "test-support"))]
     fn attend(&self, connection: Connection, events: &Sender<LinkEvent>) -> Attendance {
-        self.attend_until(connection, events, Instant::now() + CONNECT_TIMEOUT)
+        self.attend_until(
+            connection,
+            events,
+            Instant::now() + CONNECT_TIMEOUT,
+            &Arc::default(),
+        )
     }
 
     /// Serves one connection until it ends: starts the writers, says Connected, then reads data
@@ -1797,6 +1958,7 @@ impl Link {
         connection: Connection,
         events: &Sender<LinkEvent>,
         reconnect_by: Instant,
+        attempt: &Arc<Attempt>,
     ) -> Attendance {
         let Connection {
             control,
@@ -1806,7 +1968,10 @@ impl Link {
             tuning,
         } = connection;
         let queued = self.audio == AudioSession::QueuedRequired;
-        if queued && let Some(refused) = self.queued_start_refusal(&control, events, reconnect_by) {
+        if queued
+            && let Some(refused) =
+                self.queued_start_refusal(&control, events, reconnect_by, attempt)
+        {
             return refused;
         }
         let (control_out, control_queue) = async_channel::bounded(CONTROL_QUEUE);
@@ -1887,7 +2052,7 @@ impl Link {
                 },
             ) else {
                 return self
-                    .queued_start_refusal(&control, events, reconnect_by)
+                    .queued_start_refusal(&control, events, reconnect_by, attempt)
                     .unwrap_or(Attendance::Retry);
             };
             Some((started, deadline))
@@ -1920,7 +2085,7 @@ impl Link {
             drop(outbox);
             drop(control_slot);
             return self
-                .queued_start_refusal(&control, events, reconnect_by)
+                .queued_start_refusal(&control, events, reconnect_by, attempt)
                 .unwrap_or(Attendance::Retry);
         } else {
             None
@@ -1974,12 +2139,13 @@ impl Link {
                 })?;
             }
             spawn_helper("link-control-writer", &mut helpers, {
-                let control = Arc::clone(&control);
+                let (control, attempt) = (Arc::clone(&control), Arc::clone(attempt));
                 let ended = ended.clone();
                 move || {
                     write_control(
                         &control,
                         &control_queue,
+                        &attempt.quit_written,
                         #[cfg(any(test, feature = "test-support"))]
                         &ended.shared.hold_control_writer,
                     );
@@ -1999,6 +2165,9 @@ impl Link {
             })
         })();
         let open = legacy_connected.is_none_or(|connected| events.send_blocking(connected).is_ok());
+        if open {
+            let _first = attempt.generation.set(generation);
+        }
         let read = spawned.and_then(|()| {
             // Only now, so nothing from the brain reaches the UI before Connected.
             spawn_helper("link-data-reader", &mut helpers, {
@@ -2681,10 +2850,12 @@ pub mod credit_fixture {
     }
 }
 
-/// Writes queued control messages in order until the queue closes or the pipe fails.
+/// Writes queued control messages in order until the queue closes or the pipe fails. Marks
+/// `written` once `Quitting` was written whole, the receipt a clean Quit needs.
 fn write_control(
     control: &PipeClient,
     queue: &Receiver<ControlToBrain>,
+    written: &AtomicBool,
     #[cfg(any(test, feature = "test-support"))] hold: &std::sync::atomic::AtomicU8,
 ) {
     while let Ok(message) = queue.recv_blocking() {
@@ -2699,6 +2870,9 @@ fn write_control(
         if let Err(error) = frame::write(&mut &*control, &message, Pipe::Control) {
             tracing::debug!(%error, "control pipe write failed");
             return;
+        }
+        if message == ControlToBrain::Quitting {
+            written.store(true, Ordering::Release);
         }
     }
 }

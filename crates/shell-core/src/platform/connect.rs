@@ -3,6 +3,7 @@
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Arc;
+#[cfg(not(target_os = "macos"))]
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -13,8 +14,12 @@ use kumochi_protocol::message::{
     TextMetricsV1,
 };
 
-use super::{PipeClient, launch_detached};
-use crate::credential::{self, CredentialError};
+use super::PipeClient;
+#[cfg(not(target_os = "macos"))]
+use super::launch_detached;
+#[cfg(not(target_os = "macos"))]
+use crate::credential;
+use crate::credential::CredentialError;
 use crate::link::DrawingText;
 
 const LINK_LOG_TARGET: &str = concat!(env!("CARGO_CRATE_NAME"), "::link");
@@ -24,17 +29,34 @@ pub(crate) const RETRY_DELAY: Duration = Duration::from_millis(50);
 /// How long each handshake read or write may take.
 pub(crate) const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 /// `ERROR_PIPE_BUSY`: the pipe exists but another client holds it.
+#[cfg(not(target_os = "macos"))]
 const PIPE_BUSY: i32 = 231;
+
+/// A failed attempt: why, and what it knows of a child it may have started.
+#[derive(Debug)]
+pub(crate) struct Failed {
+    pub(crate) error: LinkError,
+    /// None when the attempt owns no child, as for a detached brain.
+    pub(crate) child: Option<super::Unconnected>,
+}
+
+impl From<LinkError> for Failed {
+    fn from(error: LinkError) -> Self {
+        Self { error, child: None }
+    }
+}
 
 /// Why a connection attempt failed.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum LinkError {
+    #[cfg(not(target_os = "macos"))]
     #[error("no brain pipe")]
     NoBrain,
     #[error("the brain pipe is busy")]
     Busy,
     #[error("can't start the brain")]
     Launch(#[source] std::io::Error),
+    #[cfg(not(target_os = "macos"))]
     #[error("the pipe isn't served by the brain beside the shell")]
     NotOurBrain,
     #[error("no capability yet")]
@@ -53,6 +75,9 @@ pub(crate) enum LinkError {
     #[cfg(target_os = "macos")]
     #[error("can't turn off core dumps")]
     Harden,
+    #[cfg(target_os = "macos")]
+    #[error("the brain child's custody ended")]
+    Custody,
     #[error("quitting")]
     Quitting,
     #[error(transparent)]
@@ -73,6 +98,7 @@ pub(crate) struct Connection {
 
 /// Connects, starting the brain once if none answers. Legacy uses the deadline for retries;
 /// `QueuedRequired` uses it as a hard deadline for the whole attempt.
+#[cfg(not(target_os = "macos"))]
 #[expect(
     clippy::too_many_arguments,
     reason = "the link supplies the pair identity, deadline and existing callbacks"
@@ -100,6 +126,7 @@ pub(crate) fn connect_brain(
     )
 }
 
+#[cfg(not(target_os = "macos"))]
 pub(crate) fn connect_with(
     deadline: Instant,
     quitting: impl Fn() -> bool,
@@ -152,6 +179,7 @@ pub(crate) fn connect_with(
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 fn handshake(
     brain: &Path,
     session: u32,
@@ -229,17 +257,84 @@ pub(crate) fn read_shell_tuning(
     }
 }
 
+/// One attempt to reach the brain, by `deadline`: a detached brain over its pipes, or on macOS
+/// a parent-bound child over its pair. Returns the connection and, only for a child, its owner,
+/// which the link settles once the connection ends.
+///
+/// # Errors
+/// Why the attempt failed and, for a child, how far it got; a child that started is settled
+/// before the error returns.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the link supplies the brain, its identity, deadline and existing callbacks"
+)]
+pub(crate) fn connect(
+    brain: &Path,
+    #[cfg_attr(
+        target_os = "macos",
+        expect(unused_variables, reason = "the pair has no names")
+    )]
+    session: u32,
+    #[cfg_attr(
+        not(target_os = "macos"),
+        expect(unused_variables, reason = "only the pair starts a child")
+    )]
+    word: &Arc<super::SpawnWord>,
+    audio: AudioSession,
+    repair_of: Option<IssueSession>,
+    deadline: Instant,
+    #[cfg_attr(
+        target_os = "macos",
+        expect(unused_variables, reason = "the child's owner retires it after Quit")
+    )]
+    quitting: impl Fn() -> bool,
+    #[cfg_attr(
+        target_os = "macos",
+        expect(unused_variables, reason = "the child's owner retires it after Quit")
+    )]
+    quit_parked: impl Fn(&PipeClient),
+    text_metrics: impl FnMut(Instant) -> DrawingText,
+) -> Result<(Connection, Option<super::ChildOwner>), Failed> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        connect_brain(
+            brain,
+            session,
+            audio,
+            repair_of,
+            deadline,
+            quitting,
+            quit_parked,
+            text_metrics,
+        )
+        .map(|connection| (connection, None))
+        .map_err(Failed::from)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let channel =
+            super::macos::channel().map_err(|error| not_spawned(LinkError::Launch(error)))?;
+        connect_pair(
+            brain,
+            Arc::clone(word),
+            channel,
+            audio,
+            repair_of,
+            deadline,
+            text_metrics,
+        )
+        .map(|(connection, owner)| (connection, Some(owner)))
+    }
+}
+
 /// Starts a parent-bound brain as the shell's child and connects over its pair, all by
 /// `deadline`: READY, then the instance item from the Keychain, then the initiator. Returns the
 /// connection and the child's owner, which retires the child when dropped.
 ///
 /// # Errors
-/// `Quitting` when Quit came first, `Launch` when no child started, or why the pair failed.
+/// `Quitting` when Quit came first, `Launch` when no child started, `Busy` when the child
+/// exited as another session's brain holds this user's instance, or why the pair failed.
 #[cfg(target_os = "macos")]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the link doesn't connect over the pair until R2")
-)]
 pub(crate) fn connect_pair(
     brain: &Path,
     word: Arc<super::SpawnWord>,
@@ -248,32 +343,151 @@ pub(crate) fn connect_pair(
     repair_of: Option<IssueSession>,
     deadline: Instant,
     text_metrics: impl FnOnce(Instant) -> DrawingText,
-) -> Result<(Connection, super::child::ChildOwner), LinkError> {
-    check_attempt(Some(deadline))?;
-    let (owner, ends) = super::macos::start_brain(brain, word, deadline)
-        .map_err(|error| not_started(error, deadline))?;
-    check_attempt(Some(deadline))?;
-    let connection = after_ready(
-        ends,
+) -> Result<(Connection, super::child::ChildOwner), Failed> {
+    check_attempt(Some(deadline)).map_err(not_spawned)?;
+    connect_pair_with(
+        |by| super::macos::start_brain(brain, word, by),
+        super::macos::limit_core_dumps,
+        super::macos::read_instance,
         channel,
         audio,
         repair_of,
         deadline,
         text_metrics,
-        super::macos::limit_core_dumps,
-        super::macos::read_instance,
-    )?;
-    Ok((connection, owner))
+    )
+}
+
+/// [`connect_pair`] with its spawn, its core-dump limit and its item read supplied. A failure
+/// after the spawn settles the child before it returns, so no later attempt starts beside it; an
+/// exit with [`BRAIN_EXIT_BUSY`](kumochi_protocol::constants::BRAIN_EXIT_BUSY) is `Busy`. From
+/// the spawn on, custody ending shuts the ends down, so every wait of the attempt returns at once,
+/// and once connected it aborts both legs: a peer that keeps its ends open can't hold either. No
+/// connection is handed over once custody has ended, and a failed attempt shuts its ends down
+/// before it settles.
+#[cfg(target_os = "macos")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the pair attempt's identity, deadline and its three injected platform calls"
+)]
+pub(super) fn connect_pair_with(
+    start: impl FnOnce(
+        Instant,
+    ) -> Result<
+        (super::child::ChildOwner, super::macos::ShellEnds),
+        super::macos::NotStarted,
+    >,
+    harden: impl FnOnce() -> std::io::Result<()>,
+    read_item: impl FnOnce(
+        &mut [u8; kumochi_session::SECRET_LEN],
+    ) -> Result<(), kumochi_storage::ItemError>,
+    channel: kumochi_session::Channel,
+    audio: AudioSession,
+    repair_of: Option<IssueSession>,
+    deadline: Instant,
+    text_metrics: impl FnOnce(Instant) -> DrawingText,
+) -> Result<(Connection, super::child::ChildOwner), Failed> {
+    use super::child::{Exit, Settled, Unconnected};
+    use kumochi_protocol::constants::BRAIN_EXIT_BUSY;
+    let (owner, ends) = start(deadline).map_err(|error| {
+        let child = if matches!(error, super::macos::NotStarted::Pending) {
+            Unconnected::Pending
+        } else {
+            Unconnected::NotSpawned
+        };
+        Failed {
+            error: not_started(error, deadline),
+            child: Some(child),
+        }
+    })?;
+    let mut held = None;
+    let connected = ends
+        .control
+        .try_clone()
+        .and_then(|control| Ok([control, ends.data.try_clone()?]))
+        .map_err(LinkError::Io)
+        .and_then(|duplicates| {
+            // Weak, so a failed attempt's ends close with it, not when custody ends.
+            let shut = Arc::downgrade(held.insert(Arc::new(duplicates)));
+            owner.on_settled(move || {
+                if let Some(ends) = shut.upgrade() {
+                    shut_down(&ends);
+                }
+            });
+            check_attempt(Some(deadline))?;
+            after_ready(
+                ends,
+                channel,
+                audio,
+                repair_of,
+                deadline,
+                text_metrics,
+                harden,
+                read_item,
+                || owner.has_ended(),
+            )
+        })
+        .and_then(|connection| {
+            let legs = [&connection.control, &connection.data].map(Arc::downgrade);
+            // In place of the shutdown, which has run already if custody has ended.
+            owner.on_settled(move || {
+                for leg in legs.iter().filter_map(std::sync::Weak::upgrade) {
+                    leg.abort();
+                }
+            });
+            if owner.has_ended() {
+                return Err(LinkError::Custody);
+            }
+            Ok(connection)
+        });
+    match connected {
+        Ok(connection) => Ok((connection, owner)),
+        Err(error) => {
+            // The brain sees EOF now, so a child that exits on it is reaped, not killed.
+            if let Some(ends) = &held {
+                shut_down(ends);
+            }
+            let settled = owner.settle();
+            let error = match settled {
+                Settled::Reaped(Exit::Code(code)) if code == i32::from(BRAIN_EXIT_BUSY) => {
+                    LinkError::Busy
+                }
+                _ => error,
+            };
+            Err(Failed {
+                error,
+                child: Some(Unconnected::Settled(settled)),
+            })
+        }
+    }
+}
+
+/// Shuts down both of the shell's ends, so every wait on them returns and the brain sees EOF.
+#[cfg(target_os = "macos")]
+fn shut_down(ends: &[std::os::unix::net::UnixStream; 2]) {
+    for end in ends {
+        // An end that's already shut down has nothing left to wake.
+        let _shut = end.shutdown(std::net::Shutdown::Both);
+    }
+}
+
+/// An attempt refused before any spawn.
+#[cfg(target_os = "macos")]
+fn not_spawned(error: LinkError) -> Failed {
+    Failed {
+        error,
+        child: Some(super::Unconnected::NotSpawned),
+    }
 }
 
 /// Waits for the brain's READY byte, then turns off core dumps with `harden`, then reads the
 /// instance capability with `read_item`, then runs [`over_pair`]. Nothing is written and the item
 /// isn't read until READY arrives, and a wrong byte or the stream ending is `Rejected`. A failed
-/// `harden` is `Harden`, and the item is never read.
+/// `harden` is `Harden`, and the item is never read. Once `ended` says custody of the child is
+/// over, the attempt is `Custody` on each side of the item read.
 #[cfg(target_os = "macos")]
 #[expect(
     clippy::too_many_arguments,
-    reason = "the pair attempt's ends, identity, deadline and its two injected platform calls"
+    reason = "the pair attempt's ends, identity, deadline, custody and its two platform calls"
 )]
 pub(super) fn after_ready(
     ends: super::macos::ShellEnds,
@@ -286,8 +500,15 @@ pub(super) fn after_ready(
     read_item: impl FnOnce(
         &mut [u8; kumochi_session::SECRET_LEN],
     ) -> Result<(), kumochi_storage::ItemError>,
+    ended: impl Fn() -> bool,
 ) -> Result<Connection, LinkError> {
     use kumochi_protocol::constants::SESSION_READY;
+    let in_custody = || {
+        if ended() {
+            return Err(LinkError::Custody);
+        }
+        Ok(())
+    };
     match super::macos::read_ready(&ends, deadline) {
         Ok(Some(SESSION_READY)) => {}
         Ok(_) => return Err(LinkError::Rejected),
@@ -300,9 +521,11 @@ pub(super) fn after_ready(
     harden().map_err(|_| LinkError::Harden)?;
     let mut secret = super::macos::Secret::zeroed();
     check_attempt(Some(deadline))?;
+    in_custody()?;
     let read = read_item(secret.bytes_mut());
     // The Keychain call can outlast the attempt, so its answer counts only within the deadline.
     check_attempt(Some(deadline))?;
+    in_custody()?;
     read.map_err(LinkError::Item)?;
     over_pair(
         ends,
@@ -497,6 +720,7 @@ pub(crate) fn welcome(control: &mut impl Read) -> Result<IssueSession, LinkError
 }
 
 /// Opens a pipe and checks that the brain beside the shell serves it.
+#[cfg(not(target_os = "macos"))]
 pub(crate) fn open(
     name: &str,
     brain: &Path,

@@ -1,4 +1,6 @@
+#[cfg(not(target_os = "macos"))]
 use std::io;
+#[cfg(not(target_os = "macos"))]
 use std::path::Path;
 
 #[cfg(not(target_os = "macos"))]
@@ -53,10 +55,12 @@ mod pipe {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 pub fn session_id() -> io::Result<u32> {
     Err(io::ErrorKind::Unsupported.into())
 }
 
+#[cfg(not(target_os = "macos"))]
 pub(crate) fn launch_detached(_: &Path) -> io::Result<()> {
     Err(io::ErrorKind::Unsupported.into())
 }
@@ -68,24 +72,27 @@ mod tests {
 
     use kumochi_protocol::message::GestureId;
 
+    #[cfg(not(target_os = "macos"))]
     use super::*;
     use crate::platform::microphone::{CollectionGate, MicError, MicOwner};
 
     #[test]
     fn native_ipc_credentials_and_logging_refuse_without_a_backend() {
-        let unsupported = io::ErrorKind::Unsupported;
-        assert_eq!(session_id().unwrap_err().kind(), unsupported);
-        let (events, _) = async_channel::unbounded();
-        assert!(matches!(
-            crate::link::prepare(events, kumochi_protocol::message::AudioSession::Legacy),
-            Err(error) if error.kind() == unsupported
-        ));
         #[cfg(not(target_os = "macos"))]
-        assert_eq!(PipeClient::open("unused").unwrap_err().kind(), unsupported);
-        assert_eq!(
-            launch_detached(Path::new("unused")).unwrap_err().kind(),
-            unsupported
-        );
+        {
+            let unsupported = io::ErrorKind::Unsupported;
+            assert_eq!(session_id().unwrap_err().kind(), unsupported);
+            let (events, _) = async_channel::unbounded();
+            assert!(matches!(
+                crate::link::prepare(events, kumochi_protocol::message::AudioSession::Legacy),
+                Err(error) if error.kind() == unsupported
+            ));
+            assert_eq!(PipeClient::open("unused").unwrap_err().kind(), unsupported);
+            assert_eq!(
+                launch_detached(Path::new("unused")).unwrap_err().kind(),
+                unsupported
+            );
+        }
         assert!(matches!(
             crate::credential::read(0),
             Err(crate::credential::CredentialError::Unsupported)
