@@ -24,12 +24,12 @@ Only the macOS pair's greeting reads construct a bound greeting, from a frame th
 themselves; on other platforms the type has no values. Neither shell startup nor brain
 admission selects session authorization yet.
 
-## Queued-required session mode (internal)
+## Queued-required session mode
 
-The shipped shell selects Legacy: control Hello, Welcome, then data Hello, with their
+Ordinary launch selects queued-required with Plain output and sends QueuedHello on both
+pipes. The brain still accepts Legacy: control Hello, Welcome, then data Hello, with their
 existing bytes. Both modes follow their data Hello with one drawing-font startup frame.
-The internal queued-required selection instead sends the appended QueuedHello
-on both pipes. Its data Hello echoes this Welcome's incarnation and issue epoch. The brain
+The queued data Hello echoes this Welcome's incarnation and issue epoch. The brain
 checks the executable, matching build and capability on both legs and the existing same-process
 pairing. It refuses a mixed mode or a data Hello from another session. In either mode, one
 absolute deadline covers startup through ShellTuning acceptance; refusal renews both pipe
@@ -43,7 +43,7 @@ loss uses normal connection behavior. Pipe authentication and output registratio
 
 This negotiates a requirement, not an installed audio output. An authenticated queued pair
 installs the exact reserved issue session. Both pipes return to regular I/O after their bounded
-handshake. Ordinary launch still selects Legacy, with no queued-to-Legacy fallback.
+handshake. There is no queued-to-Legacy fallback.
 The Brain starts each queued pair closed to turns. It sends
 `QueuedAudioRegistered(output)` once, only after a valid `QueuedAudioOutput` installs the
 exact logical output in Queued mode. It opens admission only if that receipt queues.
@@ -137,7 +137,7 @@ the predecessor. For a natural end, the exact data `RunEnd` and settled drawing 
 release the single narration slot for the next reply. That releases the audio binding, not an
 already installed frame or its outstanding paint receipt. Decision receipts remain on the
 control pipe. Link preparation takes the narration mode explicitly; the ordinary launcher
-prepares `Plain` on its Legacy session, so it never selects the narrated adapter.
+prepares `Plain` on its queued-required session, so it never selects the narrated adapter.
 
 ## Voice-only hold messages
 
@@ -1030,9 +1030,9 @@ records only their operation and length.
 | Shell to brain | control | `SpeechProgress` | `run`, `segment`, `sample`, `t_qpc` |
 | Shell to brain | control | `SegmentPlayed` | `run`, `segment`, `samples` |
 | Shell to brain | control | `SpeechStopped` | `run`, optional `cursor` (`Cursor { segment, sample }`) |
-| Shell to brain | control | `SpeechRetired` (internal queued output) | `run`, logical `output`, `segment`, cumulative `retired`, `heard`, `final_segment` |
+| Shell to brain | control | `SpeechRetired` (queued output) | `run`, logical `output`, `segment`, cumulative `retired`, `heard`, `final_segment` |
 | Shell to brain | control | `AudioOutput` | `rate`, `generation` |
-| Shell to brain | control | `QueuedAudioOutput` (internal) | `rate`, `generation`, narration (`Plain` or `Conducted`); selects retirement receipts before a run is admitted |
+| Shell to brain | control | `QueuedAudioOutput` | `rate`, `generation`, narration (`Plain` or `Conducted`); selects retirement receipts before a run is admitted |
 | Shell to brain | control | `SpeechDecision` (dormant) | `run`, logical `output`, `segment`, Allow or Discard |
 | Brain to shell | control | `SpeechDecisionTaken` (dormant) | the same run, output and segment, after consumption or terminal |
 | Shell to brain | control | `AudioOutputUnavailable` | `generation` |
@@ -1057,8 +1057,8 @@ records only their operation and length.
 - **Progress.** `SpeechProgress` goes out at most every 250 ms. `SpeechStopped` confirms that
   output for the run is quiet; `cursor` is `None` when nothing of it played.
 - **Out of bounds.** A `MicPcm` or an `AudioOutput` rate out of bounds ends the connection as
-  broken. A stock Legacy connection announces no audio output; unexpected speech PCM is
-  wiped, credited and dropped. On a registered queued pair the worker handles PCM and revoke
+  broken. Kumochi's shell announces no audio output on a Legacy connection, and it wipes,
+  credits and drops unexpected speech PCM there. On a registered queued pair the worker handles PCM and revoke
   ([speaker.md](speaker.md)).
 
 ## GitHub and issue wire contract
@@ -1323,7 +1323,7 @@ existing metadata-only Stop replay on the authenticated pair.
 If the user quits before publication, a fully authenticated queued pair sends held deletes in
 order (with no turns on that pair), then Quitting. It starts no session or playback, and it
 doesn't replay or settle microphone Stop debt. A partial or unauthenticated pair never carries
-these shutdown frames. Stock selection remains Legacy.
+these shutdown frames.
 
 ## How a connection ends
 

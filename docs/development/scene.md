@@ -887,7 +887,7 @@ doesn't scan past an uninstalled authored head to reach a later Speech step.
 Presence attaches the authenticated pair's bridge after resetting its presenter on Connect.
 The bridge supplies the pair clock and assignment lookup; unresolved isn't the same as
 unassigned. Only a queued pair prepared as `Conducted` owns the bridge; the ordinary launcher
-prepares `Plain`, so normal launches are unchanged.
+prepares its queued pair as `Plain`, so ordinary launches never attach the bridge.
 
 The presenter schedules the keyed onset once, acknowledges only an accepted paint of the
 installed epoch and fences locally on Stop, cut, replacement or session loss. An older stamped
