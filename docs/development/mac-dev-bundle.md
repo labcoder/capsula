@@ -5,15 +5,17 @@ on macOS: an unsigned or ad-hoc Cargo build can't hold them, so it stays refused
 mac-bundle` builds that bundle for the Dev edition. It's for development on a Mac you've
 provisioned. With `--beta` it signs the same Dev edition with a Developer ID identity and
 Developer ID profiles instead, for beta artifacts; notarization is separate and not done yet.
+With `--first-light` it builds the Dev bundle with the brain's and the shell's default-off
+`first-light` features; that flag is for first light only, and it's refused with `--beta`.
 
 ```text
-cargo xtask mac-bundle [--beta] --identity <sha1> --shell-profile <file> --brain-profile <file> --out <new-dir>
+cargo xtask mac-bundle [--beta | --first-light] --identity <sha1> --shell-profile <file> --brain-profile <file> --out <new-dir>
 ```
 
 ```mermaid
 flowchart LR
   P[two profiles: development, or Developer ID with --beta] --> C{checked}
-  C --> B[cargo build: Dev shell and brain]
+  C --> B[cargo build: Dev shell and brain, first-light features with --first-light]
   B --> S[stage the bundle]
   S --> SB[sign the brain helper] --> SS[sign the shell app]
   SS --> V[verify signatures]
@@ -56,11 +58,15 @@ flowchart LR
   signed App ID, team and keychain groups must be exactly that profile's prefixed App ID, team
   and granted groups, and nothing else may be signed in. These run in both modes,
   so a Dev bundle is held to the same rule.
-- **Launch check.** Every product entry on macOS still exits 69, so the signed brain is run once
-  with no arguments and must exit 69 within 10 s; it's killed and reaped if it doesn't. The system
+- **Launch check.** A bare launch is detached, which no Mac build supports, so the signed brain
+  is run once with no arguments and must exit 69 within 10 s, with or without `--first-light`
+  (first light admits only the parent-bound entry); it's killed and reaped if it doesn't. The system
   kills a binary whose signature or entitlements its profile doesn't authorize before `main`, so a
   69 shows the brain's were accepted. The shell isn't launched, so its signature is only checked
   statically.
+- **First-light mode.** `--first-light` changes only the build: `cargo build` gets
+  `--features kumochi-brain/first-light,kumochi-shell/first-light`, and the profiles, signing,
+  K-8 checks and launch check are the Dev mode's. It's for first light only, never a beta.
 - **Beta mode.** `--beta` changes only the identity and profile kind: `--identity` is a
   Developer ID Application certificate's hash, and each profile a macOS Developer ID profile
   for the same Dev App IDs. The bundle, entitlements and K-8 checks are the same. Shortcut:
