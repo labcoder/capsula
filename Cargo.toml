@@ -97,6 +97,12 @@ ring = { opt-level = 2 }
 memchr = { opt-level = 2 }
 postcard = { opt-level = 2 }
 base64 = { opt-level = 2 }
+# Spoken replies: at opt-level 0, CPU synthesis takes about 2.4 s per second of audio.
+ptts = { opt-level = 2 }
+xn = { opt-level = 2 }
+xn-gemm = { opt-level = 2 }
+xn-gemm-common = { opt-level = 2 }
+xn-gemm-f32 = { opt-level = 2 }
 
 # The gpui-kit revision S1 built and measured, over registry gpui-pre 0.3.10. Upgrading it is a
 # deliberate change that reruns P1's window tests.

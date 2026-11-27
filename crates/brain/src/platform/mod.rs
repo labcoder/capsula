@@ -448,9 +448,9 @@ pub(crate) use windows::{
 #[cfg(windows)]
 pub use windows::{
     PipeServer, client_image, client_process, config_dir, create_owner_only, data_dir,
-    detached_command, free_space, has_exited, links_unsupported, model_free_space, process_image,
-    product_folder, quiet_failures, replace_file, server_image, session_id, session_lock_path,
-    trust_roots,
+    detached_command, exit_code, free_space, has_exited, links_unsupported, model_free_space,
+    process_image, product_folder, quiet_failures, replace_file, server_image, session_id,
+    session_lock_path, trust_roots,
 };
 #[cfg(all(test, windows))]
 pub(crate) use windows::{SpawnEdge, observe_next_spawn};
