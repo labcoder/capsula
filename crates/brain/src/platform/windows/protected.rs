@@ -41,7 +41,7 @@ mod models;
 pub(crate) use models::{
     check_model_final, create_model_dir, create_model_write, discard_model, hold_model_creation,
     keep_model_final, model_file, model_final, open_model_write, publish_model, remove_model_tree,
-    validate_model_path,
+    resume_model_write, validate_model_path,
 };
 
 /// The rights that read what's in a file or folder.

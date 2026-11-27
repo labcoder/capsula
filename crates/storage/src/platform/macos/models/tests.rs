@@ -550,9 +550,20 @@ fn native_a_file_at_the_removed_folder_survives_and_keep_needs_the_seal() {
     );
     assert_eq!(mode(&source), (0o400, 1), "a locked partial keeps its seal");
     drop(file);
-    let resumed = open_private_write(&support, &source).expect("the stranded partial resumes");
+    let opened = open_private_write(&support, &source).expect("the stranded partial opens");
+    assert_eq!(mode(&source), (0o400, 1), "opening changes nothing");
+    assert_eq!(
+        open_private_write(&support, &source).err(),
+        Some(Untrusted::Io),
+        "the opened partial's lock"
+    );
+    let resumed =
+        resume_private_write(&support, opened, &source).expect("the stranded partial resumes");
     assert_eq!(mode(&source), (0o600, 1));
     assert_eq!(read_all(&resumed), b"bytes");
+    let resumed =
+        resume_private_write(&support, resumed, &source).expect("a writable partial is kept");
+    assert_eq!(mode(&source), (0o600, 1));
     let target = part.join("model.bin");
     assert_eq!(
         seal_and_publish(
@@ -575,4 +586,44 @@ fn native_a_file_at_the_removed_folder_survives_and_keep_needs_the_seal() {
     scratch
         .cleanup()
         .expect("identity-checked cleanup; uncertainty leaves reported residual");
+}
+
+#[test]
+#[ignore = "requires a commissioned volume fixture: an anchor whose product/part is another mounted volume"]
+fn other_volume_native_a_model_folder_on_another_volume_refuses_and_survives() {
+    let support = PathBuf::from(
+        std::env::var_os("STORAGE_VOLUME_ANCHOR")
+            .expect("an explicitly commissioned volume anchor"),
+    );
+    let part = support.join("product/part");
+    let kept = part.join("kept.part");
+    assert_eq!(mode(&part).0, 0o700, "the mount root passes the mode check");
+    assert_eq!(mode(&kept), (0o600, 1));
+    assert_eq!(
+        hold_private_chain(&support, &support.join("product")).map(|held| held.len()),
+        Ok(support.components().count() + 1),
+        "the folder above the mount is admitted"
+    );
+    assert_eq!(
+        hold_private_chain(&support, &part).err(),
+        Some(Untrusted::Unsafe)
+    );
+    assert_eq!(
+        create_private_dir(&support, &part).err(),
+        Some(Untrusted::Unsafe)
+    );
+    assert_eq!(
+        open_private_write(&support, &kept).err(),
+        Some(Untrusted::Unsafe)
+    );
+    assert_eq!(
+        create_private_file(&support, &part.join("model.bin.part")).err(),
+        Some(Untrusted::Unsafe)
+    );
+    assert_eq!(
+        remove_private_tree(&support, &support.join("product")),
+        Err(Untrusted::Unsafe)
+    );
+    assert_eq!(fs::read(&kept).expect("kept"), b"kept");
+    assert!(absent(&part.join("model.bin.part")));
 }

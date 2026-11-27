@@ -94,6 +94,10 @@ mod unsupported {
         Err(Untrusted::Unsupported)
     }
 
+    pub(crate) fn resume_model_write(_: File, _: &Path) -> Result<File, Untrusted> {
+        Err(Untrusted::Unsupported)
+    }
+
     #[cfg(not(target_os = "macos"))]
     pub(crate) fn hold_chain(_: &Path) -> Result<Vec<File>, Untrusted> {
         Err(Untrusted::Unsupported)
@@ -190,6 +194,10 @@ mod unsupported {
             assert_eq!(marker(&absent).err(), Some(Untrusted::Unsupported));
             assert_eq!(open_model_write(&kept).err(), Some(Untrusted::Unsupported));
             assert_eq!(
+                resume_model_write(file(), &kept).err(),
+                Some(Untrusted::Unsupported)
+            );
+            assert_eq!(
                 create_model_write(&absent).err(),
                 Some(Untrusted::Unsupported)
             );
@@ -220,7 +228,7 @@ mod unsupported {
 pub(crate) use unsupported::{
     check_model_final, create_model_dir, create_model_write, discard_model, hold_model_chain,
     hold_model_creation, keep_model_final, mark, marker, model_file, model_final, open_model_write,
-    publish_model, remove_model_tree, remove_tree, unmark, validate_model_path,
+    publish_model, remove_model_tree, remove_tree, resume_model_write, unmark, validate_model_path,
 };
 
 #[cfg(target_os = "macos")]

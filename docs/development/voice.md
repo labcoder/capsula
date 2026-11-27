@@ -523,8 +523,8 @@ somewhere else:
   the folder and the file. A failed rename puts the partial back at 0600 only when its name still
   gives it with one link and the final name is shown not to; otherwise it stays sealed. Every
   partial's name ends `.part` and no sealed file's does, in any ASCII case, since APFS compares
-  names that way. So `open_private_write` resumes a sealed `.part` file, a publish stopped
-  between seal and rename, and only once it holds the lock.
+  names that way. So `open_private_write` opens a sealed `.part` file, a publish stopped
+  between seal and rename, read-only and locked, and `resume_private_write` unseals it later.
   `open_sealed` accepts only the exact sealed mode with one link.
 - **Two-pass removal.** `remove_private_tree` checks the whole tree before it unlinks anything:
   private folders, files this user owns at 0400, 0500 or 0600, one volume, within 32 levels and
@@ -538,8 +538,9 @@ the held handle guards the name; the Mac forward re-checks the seal and the name
 folder and file flush. `discard_model` takes the held part folder and the entry's path, so the Mac
 can delete by name only after checking identity. `model_free_space` measures the held models
 folder: by path on Windows, through the descriptor (`fstatfs`) on the Mac. Once activated, the
-Mac refuses a hard-linked final. Resuming there unseals a sealed `.part` left by a stopped
-publish during the installer's preflight, before later files are checked; its bytes don't change.
+Mac refuses a hard-linked final. A sealed `.part` left by a stopped publish opens read-only and
+locked in the installer's preflight, and `resume_model_write` unseals it only after every final
+and partial is checked and every missing partial is created, so a refusal changes nothing.
 
 This assumes one cooperating writer. A rename by this user between two calls isn't detected,
 and neither is a replacement made between a removal's last look and its unlink.
