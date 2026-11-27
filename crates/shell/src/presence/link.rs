@@ -324,6 +324,9 @@ impl Presence {
                     }
                 }
                 LinkEvent::KeyStage { generation, reply } => self.key_reply(generation, &reply, cx),
+                LinkEvent::ModelChoice { reply, .. } => {
+                    self.runs.apply_model(&reply, std::time::Instant::now());
+                }
                 LinkEvent::Error { generation, error } => {
                     if self
                         .session

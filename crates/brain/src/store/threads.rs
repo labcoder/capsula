@@ -1,8 +1,11 @@
 //! The main thread, and what the shell may change about a thread: a task's title and a thread's
 //! model choice. Neither change moves a thread in the list.
 
-use kumochi_protocol::message::{ConnectionKind, ModelChoice, ThreadId, ThreadKind, ThreadTitle};
-use rusqlite::{OptionalExtension as _, params};
+use kumochi_protocol::message::{
+    ChoiceRead, ChoiceRev, ConnectionKind, ModelChoice, SavedChoice, ThreadId, ThreadKind,
+    ThreadTitle,
+};
+use rusqlite::{OptionalExtension as _, TransactionBehavior, params};
 
 use super::choice::{StoredChoice, connection_text, effort_text};
 use super::{Generation, Store, StoreError, now_ms, row_id, sql_id};
@@ -74,33 +77,64 @@ impl Store {
         Ok(changed > 0)
     }
 
-    /// Stores a live thread's model and effort, returning whether a live row matched.
-    /// A missing, hidden or unrepresentable thread returns false without changing anything, and so
-    /// does one whose saved route is the local server: no build serves it yet, so it stays, and a
-    /// turn typed under it never meets another route at the store.
+    /// Stores a live thread's model and effort, or clears them with `None` so each later run
+    /// uses the global default, and advances its revision in the same transaction. Kumo's main
+    /// chat takes this write like any task. Answers what was committed: `Missing` for a missing,
+    /// hidden or unrepresentable thread, and `Failed` with nothing written once the revision
+    /// can't advance, or for a thread whose saved route is the local server: no build serves it
+    /// yet, so it stays, and a turn typed under it never meets another route at the store.
     ///
     /// # Errors
     /// Fails when SQLite fails.
     pub fn set_model(
         &mut self,
         thread: ThreadId,
-        choice: &ModelChoice,
-    ) -> Result<bool, StoreError> {
+        choice: Option<&ModelChoice>,
+    ) -> Result<ChoiceRead, StoreError> {
         let Ok(thread) = sql_id(thread.0, StoreError::NoThread) else {
-            return Ok(false);
+            return Ok(ChoiceRead::Missing);
         };
-        let changed = self.conn.execute(
-            "UPDATE threads SET model = ?2, effort = ?3, connection = ?4
-             WHERE id = ?1 AND state = 'live' AND connection IS NOT ?5",
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let row: Option<(i64, Option<String>)> = tx
+            .query_row(
+                "SELECT model_choice_rev, connection FROM threads WHERE id = ?1 AND state = 'live'",
+                params![thread],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((revision, connection)) = row else {
+            return Ok(ChoiceRead::Missing);
+        };
+        if connection.as_deref() == Some(connection_text(ConnectionKind::LocalChat)) {
+            return Ok(ChoiceRead::Failed);
+        }
+        let Some((next, rev)) = revision
+            .checked_add(1)
+            .and_then(|next| Some((next, u64::try_from(next).ok()?)))
+        else {
+            tracing::warn!("a model choice's revision can't advance");
+            return Ok(ChoiceRead::Failed);
+        };
+        tx.execute(
+            "UPDATE threads SET model = ?2, effort = ?3, connection = ?4, model_choice_rev = ?5
+             WHERE id = ?1",
             params![
                 thread,
-                choice.model.as_str(),
-                effort_text(choice.effort),
-                connection_text(choice.connection),
-                connection_text(ConnectionKind::LocalChat)
+                choice.map(|choice| choice.model.as_str()),
+                choice.map(|choice| effort_text(choice.effort)),
+                choice.map(|choice| connection_text(choice.connection)),
+                next
             ],
         )?;
-        Ok(changed > 0)
+        tx.commit()?;
+        Ok(ChoiceRead::Found {
+            choice: choice.map_or(SavedChoice::Inherit, |choice| {
+                SavedChoice::Chosen(choice.clone())
+            }),
+            revision: ChoiceRev(rev),
+        })
     }
 
     /// The route a thread's own saved choice names; `None` for a thread with none, a spelling no

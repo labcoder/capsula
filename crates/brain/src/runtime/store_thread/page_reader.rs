@@ -217,11 +217,18 @@ pub(super) fn spawn_reader(
                     StoreOp::ReadJob(read) => &read.control,
                     StoreOp::ReadPage { key, .. } => &key.control,
                     StoreOp::ReadCards { cards } => &cards.key.control,
+                    StoreOp::ReadModel(read) => &read.control,
                     _ => unreachable!("only reads reach the reader"),
                 };
                 let admitted = barrier.wait_until(stamp, control);
                 let open = admitted.is_ok();
                 let reply = match op {
+                    StoreOp::ReadModel(read) => context::read_model(
+                        open.then_some(&*side),
+                        read,
+                        #[cfg(test)]
+                        || wait_at(gate, hooks.observed.as_ref()),
+                    ),
                     StoreOp::ReadHold(read) => Input::HoldPrepared {
                         key: read.snapshot.key,
                         result: context::read_hold(

@@ -94,7 +94,10 @@ fn seed(scratch: &Scratch, [label, info, alt]: [&str; 3], choice: &ModelChoice) 
     store
         .end_run(T, RunId(1), &[], RunEnd::Done)
         .expect("outcome");
-    assert!(store.set_model(T, choice).expect("model"));
+    assert!(matches!(
+        store.set_model(T, Some(choice)).expect("model"),
+        kumochi_protocol::message::ChoiceRead::Found { .. }
+    ));
     store
         .begin_turn(U, Some("other"), RunId(2), "U-SENTINEL")
         .expect("other turn");

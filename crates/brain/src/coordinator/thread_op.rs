@@ -1,6 +1,6 @@
 //! A task's rename and a thread's model choice: each goes to the store as one write, except a
 //! rename of the main thread, whose name is the assistant's setting and whose stored title stays
-//! empty.
+//! empty. The main thread's model choice is written like a task's.
 
 use kumochi_protocol::message::ThreadOp;
 
@@ -20,22 +20,14 @@ impl Coordinator {
                 source: TitleSource::User,
                 job: None,
             },
-            // No build serves a local server yet, so none is saved as a thread's route, and while a
-            // local default is saved no thread's route changes: one that inherits it stays local.
-            ThreadOp::SetModel { thread, choice }
-                if choice.connection == kumochi_protocol::message::ConnectionKind::LocalChat
-                    || self.local_default =>
-            {
-                effects.push(Effect::Control(
-                    kumochi_protocol::message::ControlToShell::ThreadModelSet {
-                        thread,
-                        choice,
-                        applied: false,
-                    },
-                ));
+            ThreadOp::SetModel {
+                request,
+                thread,
+                choice,
+            } => {
+                self.set_model(request, thread, choice, effects);
                 return;
             }
-            ThreadOp::SetModel { thread, choice } => StoreOp::SetModel { thread, choice },
         };
         effects.push(Effect::Store(op));
     }

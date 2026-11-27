@@ -18,6 +18,7 @@ use crate::test_support::Scratch;
 
 mod history;
 mod hold;
+mod model_choice;
 
 #[test]
 fn card_reads_keep_the_original_cancel_deadline_and_fixed_failure() {
@@ -485,7 +486,7 @@ fn a_saved_route_reaches_the_build_and_the_jobs_read() {
             connection,
             ..choice("same-slug")
         };
-        store.set_model(ThreadId(12), &picked).expect("save");
+        store.set_model(ThreadId(12), Some(&picked)).expect("save");
         let running = run(store, None);
         let request = build(12, 1, Some(choice("chatgpt-default")));
         let StoreOp::BuildContext(context) = &request else {
@@ -640,16 +641,22 @@ fn a_first_build_takes_the_threads_model_and_a_delete_sent_before_a_build_fails_
         .expect("turn");
     let running = run(store, None);
     let picked = StoreOp::SetModel {
+        session: 1,
+        request: 1,
         thread: ThreadId(2),
-        choice: choice("thread-model"),
+        choice: Some(choice("thread-model")),
     };
     assert!(running.thread.send(picked));
     assert_eq!(
         running.ack(),
         Input::ModelSet {
+            session: 1,
+            request: 1,
             thread: ThreadId(2),
-            choice: choice("thread-model"),
-            applied: true,
+            result: kumochi_protocol::message::ChoiceRead::Found {
+                choice: kumochi_protocol::message::SavedChoice::Chosen(choice("thread-model")),
+                revision: kumochi_protocol::message::ChoiceRev(1),
+            },
         }
     );
     let mut first = build(2, 1, Some(choice("default-model")));

@@ -1570,13 +1570,14 @@ impl crate::engines::Engine for CountStarts {
     }
 }
 
+/// The by-id read calls an unknown effort unavailable, so a run refuses it rather than guess one.
 #[tokio::test]
-async fn a_legacy_effort_sends_low_without_rewriting_the_task_choice() {
+async fn a_legacy_effort_refuses_the_run_without_rewriting_the_task_choice() {
     Box::pin(stored_effort(
         "legacy-effort-execution",
         "ultra",
         Effort::Medium,
-        "low",
+        None,
     ))
     .await;
 }
@@ -1587,7 +1588,7 @@ async fn a_known_unsupported_effort_changes_the_body_not_the_task_choice() {
         "known-effort-execution",
         "max",
         Effort::Max,
-        "medium",
+        Some("medium"),
     ))
     .await;
 }
@@ -1626,7 +1627,7 @@ impl crate::engines::Engine for CaptureModelBody {
     }
 }
 
-async fn stored_effort(name: &str, stored: &str, displayed: Effort, sent_effort: &str) {
+async fn stored_effort(name: &str, stored: &str, displayed: Effort, sent_effort: Option<&str>) {
     use kumochi_protocol::message::{RunId, ThreadId};
 
     let scratch = Scratch::new(name);
@@ -1686,11 +1687,18 @@ async fn stored_effort(name: &str, stored: &str, displayed: Effort, sent_effort:
             DataToShell::Models { .. }
         ));
         shell.submit_on(thread).await;
-        assert_eq!(
-            timeout(PATIENCE, bodies.recv()).await.unwrap(),
-            Some(("saved".to_owned(), sent_effort.to_owned())),
-        );
+        if let Some(effort) = sent_effort {
+            assert_eq!(
+                timeout(PATIENCE, bodies.recv()).await.unwrap(),
+                Some(("saved".to_owned(), effort.to_owned())),
+            );
+        }
         assert_eq!(failed_with(&mut shell).await, None);
+        assert_eq!(
+            bodies.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty),
+            "no other request was sent"
+        );
         drop(shell);
     };
     let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);

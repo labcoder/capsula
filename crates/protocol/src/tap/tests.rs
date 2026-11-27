@@ -240,18 +240,34 @@ fn a_data_pipe_hello_keeps_only_its_op_name_and_length() {
 
 #[test]
 fn a_model_result_round_trips_but_never_records_its_choice() {
-    use crate::message::{ConnectionKind, Effort, ModelChoice, ModelSlug};
+    use crate::message::{
+        ChoiceRead, ChoiceRev, ConnectionKind, Effort, ModelChoice, ModelSlug, SavedChoice,
+    };
 
     const MODEL: &str = "private-model-sentinel";
-    for applied in [false, true] {
-        let model_result = |slug| ControlToShell::ThreadModelSet {
-            thread: ThreadId(8),
-            choice: ModelChoice {
-                model: ModelSlug::new(slug).expect("valid"),
-                effort: Effort::XHigh,
-                connection: ConnectionKind::ChatGpt,
-            },
-            applied,
+    for (written, op) in [(true, "ThreadModelSet"), (false, "ThreadModelRead")] {
+        let model_result = |slug| {
+            let result = ChoiceRead::Found {
+                choice: SavedChoice::Chosen(ModelChoice {
+                    model: ModelSlug::new(slug).expect("valid"),
+                    effort: Effort::XHigh,
+                    connection: ConnectionKind::ChatGpt,
+                }),
+                revision: ChoiceRev(3),
+            };
+            if written {
+                ControlToShell::ThreadModelSet {
+                    request: 2,
+                    thread: ThreadId(8),
+                    result,
+                }
+            } else {
+                ControlToShell::ThreadModelRead {
+                    request: 2,
+                    thread: ThreadId(8),
+                    result,
+                }
+            }
         };
         let result = model_result(MODEL);
         let bytes = encode(&result, Pipe::Control).expect("encodes");
@@ -280,7 +296,7 @@ fn a_model_result_round_trips_but_never_records_its_choice() {
         assert_eq!(
             String::from_utf8(out).expect("utf-8"),
             format!(
-                "    0 Control brain -> shell  ThreadModelSet ({} bytes)\n1 frames\n",
+                "    0 Control brain -> shell  {op} ({} bytes)\n1 frames\n",
                 wire_len(&result, Pipe::Control)
             )
         );

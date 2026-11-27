@@ -520,6 +520,7 @@ impl StoreThread {
         if matches!(
             op,
             StoreOp::ReadPage { .. }
+                | StoreOp::ReadModel(_)
                 | StoreOp::ReadCall(_)
                 | StoreOp::ReadHold(_)
                 | StoreOp::ReadCards { .. }
@@ -627,6 +628,7 @@ fn serve_op(
             purger.op_arrived(store);
         }
         StoreOp::ReadPage { .. }
+        | StoreOp::ReadModel(_)
         | StoreOp::ReadCall(_)
         | StoreOp::ReadHold(_)
         | StoreOp::ReadCards { .. }
@@ -720,23 +722,27 @@ fn serve_op(
             );
             purger.op_arrived(store);
         }
-        StoreOp::SetModel { thread, choice } => {
+        StoreOp::SetModel {
+            session,
+            request,
+            thread,
+            choice,
+        } => {
             purger.op_arriving();
-            let applied = if let Ok(applied) = store
+            let result = store
                 .reconnect()
-                .and_then(|()| store.set_model(thread, &choice))
-            {
-                applied
-            } else {
-                tracing::warn!("a model choice wasn't stored");
-                false
-            };
+                .and_then(|()| store.set_model(thread, choice.as_ref()))
+                .unwrap_or_else(|_| {
+                    tracing::warn!("a model choice wasn't stored");
+                    kumochi_protocol::message::ChoiceRead::Failed
+                });
             answer(
                 acks,
                 Input::ModelSet {
+                    session,
+                    request,
                     thread,
-                    choice,
-                    applied,
+                    result,
                 },
             );
             purger.op_arrived(store);

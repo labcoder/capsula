@@ -105,6 +105,11 @@ pub enum LinkEvent {
         gesture: GestureId,
         outcome: kumochi_protocol::message::HeldScreen,
     },
+    /// A thread's committed model choice, read or written, from the control pipe.
+    ModelChoice {
+        generation: u64,
+        reply: ControlToShell,
+    },
     KeyStage {
         generation: u64,
         reply: ControlToShell,
@@ -2775,7 +2780,18 @@ fn watch(
                     return;
                 }
             }
-            Ok(Some(ControlToShell::ThreadModelSet { .. } | ControlToShell::NoVisual { .. })) => {}
+            Ok(Some(
+                reply @ (ControlToShell::ThreadModelSet { .. }
+                | ControlToShell::ThreadModelRead { .. }),
+            )) => {
+                if events
+                    .send_blocking(LinkEvent::ModelChoice { generation, reply })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            Ok(Some(ControlToShell::NoVisual { .. })) => {}
             Ok(Some(ControlToShell::FixtureEngineActive)) => {
                 #[cfg(debug_assertions)]
                 if events

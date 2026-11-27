@@ -23,6 +23,38 @@ fn closed(control: &crate::recall::control::Control) -> StoreError {
         .map_or(StoreError::Closed, StoreError::from)
 }
 
+/// A model choice by id, in one read transaction with the shared deadline; any failure answers
+/// `Failed`, never a guess.
+pub(super) fn read_model(
+    side: Option<&Side>,
+    read: crate::coordinator::ModelRead,
+    #[cfg(test)] hold: impl FnOnce(),
+) -> crate::coordinator::Input {
+    let result = side.map_or(Err(closed(&read.control)), |side| {
+        side.read_until(&read.control, |conn, control| {
+            control
+                .with_handler(conn, |conn, scope| {
+                    scope
+                        .query(conn, || {
+                            let snapshot = Snapshot::begin(conn)?;
+                            #[cfg(test)]
+                            hold();
+                            let choice = snapshot.model_choice(read.thread)?;
+                            snapshot.end()?;
+                            Ok(choice)
+                        })
+                        .map_err(StoreError::from)
+                })
+                .map_err(StoreError::from)?
+        })
+    });
+    let result = result.unwrap_or_else(|error| {
+        tracing::warn!(%error, "a model choice read failed");
+        kumochi_protocol::message::ChoiceRead::Failed
+    });
+    crate::coordinator::Input::ModelRead { read, result }
+}
+
 pub(super) fn read_hold(
     side: Option<&Side>,
     job: crate::coordinator::HoldRead,

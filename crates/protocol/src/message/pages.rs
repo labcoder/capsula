@@ -402,8 +402,9 @@ mod tests {
                 connection: crate::message::ConnectionKind::ChatGpt,
             };
             let set_model = ThreadOp::SetModel {
+                request: 1,
                 thread: ThreadId(1),
-                choice: choice.clone(),
+                choice: Some(choice.clone()),
             };
             let page = PageOf::Threads {
                 search: Some(words.to_owned()),

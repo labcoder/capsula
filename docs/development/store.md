@@ -85,11 +85,11 @@ Later slices add assets, sends and cleanup jobs, each as a
 new migration. Migrations are numbered by `PRAGMA user_version` and run forward only, and a
 brain refuses a file whose version is newer than it knows.
 
-The ordinary open migrates to version 13, all pending migrations in one transaction, so a crash
-leaves the file at the version it had. Version 12 adds the `chatgpt_recovery_context` table, and
+The ordinary open migrates to version 14, all pending migrations in one transaction, so a crash
+leaves the file at the version it had. Version 14 adds `threads.model_choice_rev` (see below). Version 12 adds the `chatgpt_recovery_context` table, and
 13 changes no schema: builds from before the profile's writer lock know at most 12, so they
-refuse the file instead of writing history without the lock. A file already at 12 moves to 13
-alone. Nothing writes or reads that table, so it stays empty; a row an older file holds (a tag
+refuse the file instead of writing history without the lock. A file at 12 moves through 13 to 14
+in that one transaction. Nothing writes or reads that table, so it stays empty; a row an older file holds (a tag
 and two IDs, no conversation content) is kept and changes nothing. A compile-time assert keeps
 the current version above 12.
 
@@ -183,12 +183,11 @@ rows read as `thread` and `words` with no model:
 |---|---|
 | `kind` | `main` for Kumo's thread, `thread` for a task. A unique partial index allows one `main`. It keeps these two values for good: changing a `CHECK` rebuilds the table, so later facts (origin, parent, archive) get their own nullable columns |
 | `title_source` | Who wrote the title: `words` (the first turn's first line, from `BeginTurn`), `model` or `user` |
-| `model`, `effort`, `connection` | The saved route, model and effort. Version 9 adds `connection` and backfills selected older rows as ChatGPT. Only three unset fields mean no choice; a partial row, invalid slug or unknown connection fails the read rather than falling back to another model. Pages retain the saved route/model independently of sign-in and catalogs; an unknown effort displays Medium without changing the saved row. An unknown connection fails the whole thread list and search read, so a new connection kind needs a schema version that older builds refuse. The spellings `chatgpt`, `anthropic_key`, `claude_code` and `local_chat` come from the kind's [facts](runs.md#connection-facts), which round bodies' `kind` shares. No build writes `local_chat` yet: the brain refuses a local thread or default choice, and a turn whose route is local (a hand-edited choice) fails before its text, title or thread is stored, so no later route can replay it. A saved local route can't change in the app either: the store keeps a thread's `local_chat` route against every later model write, and a default naming the local server refuses every thread model edit, so a thread that inherits it stays local, and it (any `connection = "LocalChat"`, malformed or not) refuses every default edit. So the route a turn meets at the store is always the one it was typed under. Its schema version lands with its first writer |
+| `model`, `effort`, `connection` | The saved route, model and effort. Version 9 adds `connection` and backfills selected older rows as ChatGPT. Only three unset fields mean no choice; a partial row, invalid slug or unknown connection fails the read rather than falling back to another model. Pages retain the saved route/model independently of sign-in and catalogs; an unknown effort displays Medium without changing the saved row. An unknown connection fails the whole thread list and search read, so a new connection kind needs a schema version that older builds refuse. The spellings `chatgpt`, `anthropic_key`, `claude_code` and `local_chat` come from the kind's [facts](runs.md#connection-facts), which round bodies' `kind` shares. No build writes `local_chat` yet: the brain refuses a local thread or default choice, and a turn whose route is local (a hand-edited choice) fails before its text, title or thread is stored, so no later route can replay it. A saved local route can't change in the app either: the store answers `Failed` to every later set or clear of a thread whose route is `local_chat`, and a default naming the local server refuses every thread's set or clear before the store, so a thread that inherits it stays local, and it (any `connection = "LocalChat"`, malformed or not) refuses every default edit. So the route a turn meets at the store is always the one it was typed under. Its schema version lands with its first writer |
 
 `StoredChoice` separates structural decoding from admission. Page display never contacts a provider.
-An unknown effort is kept as unknown for execution, which uses the selected model's policy instead
-of the page's placeholder. For the currently supported ChatGPT route, the default remains Low;
-catalog membership is checked by the coordinator. Context, background-job and hold reads return the
+An unknown effort is refused for execution, as the by-id read calls it unavailable, rather than
+running the page's placeholder or a default; catalog membership is checked by the coordinator. Context, background-job and hold reads return the
 saved or default selection on any connection, and admission decides whether that connection can
 answer (runs.md, "Availability"), so nothing on another connection reaches the ChatGPT engine. A
 ChatGPT catalog refresh
@@ -208,12 +207,17 @@ not an unset selection. This replaces the old unknown-effort-to-default-model fa
   title job reads a task's first ask with `Snapshot::first_ask`, which finds nothing once the
   title isn't first words. A later `BeginTurn` on an existing thread never touches its title or
   source. Neither a rename nor a model choice moves the thread in the list.
-- **Model choice.** `SetModel` stores a live thread's `connection`, `model` and `effort`; a hidden or missing
-  thread changes nothing. The worker answers `ModelSet` only after the write, echoing the
-  thread and exact choice with `applied=true` when a live row matched. Hidden, missing or
-  unrepresentable ids, failed writes and operations refused before reaching the store answer
-  `applied=false`. The coordinator forwards that result as `ThreadModelSet`; a later write
-  cannot change an earlier result. Write failures log only fixed text.
+- **Model choice.** `SetModel` stores a live thread's `connection`, `model` and `effort`, or clears
+  all three to NULL so each later run uses the global default current when it starts, never a copy
+  of today's. Kumo's main chat takes it like a task. Version 14 adds `model_choice_rev`, 0 for every
+  older row, saved choices included; each Set or Clear reads it and writes the choice with the next
+  revision in one immediate transaction, refusing with nothing written once it can't advance. The
+  worker answers `ModelSet` with the committed `ChoiceRead` only after the write: `Found` with the
+  written choice and revision, `Missing` for a hidden, missing or unrepresentable id, `Failed` for a
+  failed write or an operation refused before the store. `Snapshot::model_choice` is the by-id read.
+  An unknown effort reads as `Unavailable` and a run refuses it, matching that read; a list row still
+  shows it as Medium. Neither write touches ordering, activity or history. Write failures log only
+  fixed text.
 - **Deletion and the purge.** The four columns live in the `threads` row, so deleting a task's row
   removes them with it, and the purge's `VACUUM INTO` copy carries the kept rows' columns over
   unchanged. No table is added, so `store::delete`'s table list and the remnants scan need nothing

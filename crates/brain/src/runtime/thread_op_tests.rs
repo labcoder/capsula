@@ -57,8 +57,9 @@ async fn a_tasks_rename_and_model_reach_the_list_and_kumos_rename_changes_nothin
             rename(main, SENTINEL),
             rename(task, "Renamed task"),
             ControlToBrain::ThreadOp(ThreadOp::SetModel {
+                request: 1,
                 thread: task,
-                choice: choice.clone(),
+                choice: Some(choice.clone()),
             }),
         ];
         for op in &ops {

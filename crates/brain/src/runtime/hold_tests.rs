@@ -538,12 +538,13 @@ async fn exact_ordered_pcm_and_independent_resampling_tail_reach_one_real_hold_r
                 effort: Effort::High,
                 connection: ConnectionKind::ChatGpt,
             };
-            assert!(
+            assert!(matches!(
                 Store::open(&scratch.db())
                     .unwrap()
-                    .set_model(ThreadId(1), &choice)
-                    .unwrap()
-            );
+                    .set_model(ThreadId(1), Some(&choice))
+                    .unwrap(),
+                kumochi_protocol::message::ChoiceRead::Found { .. }
+            ));
             let (seen, mut requests) = mpsc::unbounded_channel();
             brain.engine = Box::new(Requested(seen));
             let ((control, data), mut shell) = duplex();
@@ -844,16 +845,20 @@ async fn commit_hold_model(
 ) {
     shell
         .send(&ControlToBrain::ThreadOp(ThreadOp::SetModel {
+            request: 1,
             thread,
-            choice: choice.clone(),
+            choice: Some(choice.clone()),
         }))
         .await;
     assert_eq!(
         shell.control().await,
         Some(ControlToShell::ThreadModelSet {
+            request: 1,
             thread,
-            choice: choice.clone(),
-            applied: true,
+            result: kumochi_protocol::message::ChoiceRead::Found {
+                choice: kumochi_protocol::message::SavedChoice::Chosen(choice.clone()),
+                revision: kumochi_protocol::message::ChoiceRev(1),
+            },
         })
     );
 }

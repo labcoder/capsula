@@ -2,8 +2,8 @@
 //! reaches the store.
 
 use kumochi_protocol::message::{
-    ControlToShell, Deleted, Effort, ModelChoice, ModelSlug, Phase, RunId, ThreadId, ThreadOp,
-    ThreadTitle,
+    ChoiceRead, ChoiceRev, ControlToShell, Deleted, Effort, ModelChoice, ModelSlug, Phase, RunId,
+    SavedChoice, ThreadId, ThreadOp, ThreadTitle,
 };
 
 use super::{R, T, fresh, state};
@@ -13,51 +13,43 @@ use crate::store::{Interruption, RunEnd, TitleSource};
 /// `fresh`'s main thread.
 const MAIN: ThreadId = ThreadId(1);
 
-/// No build serves a local server yet, so a thread's local choice is answered unapplied and never
-/// reaches the store.
+/// No build serves a local server yet, so a thread's local choice is refused before the store,
+/// and while a local default is saved so is every set or clear: a thread that inherits it stays
+/// local.
 #[test]
-fn a_local_thread_model_is_refused_without_a_write() {
-    let mut core = fresh();
-    let choice = ModelChoice {
+fn local_routes_are_refused_before_the_store() {
+    let on = |connection| ModelChoice {
         model: ModelSlug::new("gpt-6.1-sol").expect("valid"),
         effort: Effort::Medium,
-        connection: kumochi_protocol::message::ConnectionKind::LocalChat,
+        connection,
     };
-    assert_eq!(
-        core.handle(Input::ThreadOp(ThreadOp::SetModel {
-            thread: T,
-            choice: choice.clone(),
-        })),
-        Ok(vec![Effect::Control(ControlToShell::ThreadModelSet {
-            thread: T,
-            choice,
-            applied: false,
-        })])
-    );
-}
-
-/// While a local default is saved, a cloud model for a thread is answered unapplied too, so a
-/// thread that inherits the local route keeps it.
-#[test]
-fn a_saved_local_default_keeps_every_thread_route() {
-    let mut core = fresh();
-    core.local_default = true;
-    let choice = ModelChoice {
-        model: ModelSlug::new("gpt-6.1-sol").expect("valid"),
-        effort: Effort::Medium,
-        connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
-    };
-    assert_eq!(
-        core.handle(Input::ThreadOp(ThreadOp::SetModel {
-            thread: T,
-            choice: choice.clone(),
-        })),
-        Ok(vec![Effect::Control(ControlToShell::ThreadModelSet {
-            thread: T,
-            choice,
-            applied: false,
-        })])
-    );
+    for (local_default, choice) in [
+        (
+            false,
+            Some(on(kumochi_protocol::message::ConnectionKind::LocalChat)),
+        ),
+        (
+            true,
+            Some(on(kumochi_protocol::message::ConnectionKind::ChatGpt)),
+        ),
+        (true, None),
+    ] {
+        let mut core = fresh();
+        core.local_default = local_default;
+        assert_eq!(
+            core.handle(Input::ThreadOp(ThreadOp::SetModel {
+                request: 7,
+                thread: T,
+                choice: choice.clone(),
+            })),
+            Ok(vec![Effect::Control(ControlToShell::ThreadModelSet {
+                request: 7,
+                thread: T,
+                result: kumochi_protocol::message::ChoiceRead::Failed,
+            })]),
+            "{local_default} {choice:?}"
+        );
+    }
 }
 
 #[test]
@@ -68,16 +60,20 @@ fn model_results_echo_the_exact_write_and_refusals_have_an_answer() {
         effort: Effort::XHigh,
         connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
     };
+    let session = core.model_session();
     let op = StoreOp::SetModel {
+        session,
+        request: 7,
         thread: T,
-        choice: choice.clone(),
+        choice: Some(choice.clone()),
     };
     assert_eq!(
         op.failed(),
         Some(Input::ModelSet {
+            session,
+            request: 7,
             thread: T,
-            choice: choice.clone(),
-            applied: false,
+            result: ChoiceRead::Failed,
         })
     );
     assert_eq!(
@@ -93,16 +89,21 @@ fn model_results_echo_the_exact_write_and_refusals_have_an_answer() {
         None,
         "a heard point that can't reach the store answers nothing"
     );
-    for applied in [false, true] {
+    let found = ChoiceRead::Found {
+        choice: SavedChoice::Chosen(choice),
+        revision: ChoiceRev(3),
+    };
+    for result in [ChoiceRead::Missing, ChoiceRead::Failed, found] {
         let input = Input::ModelSet {
+            session,
+            request: 7,
             thread: T,
-            choice: choice.clone(),
-            applied,
+            result: result.clone(),
         };
         let expected = vec![Effect::Control(ControlToShell::ThreadModelSet {
+            request: 7,
             thread: T,
-            choice: choice.clone(),
-            applied,
+            result,
         })];
         for debug in [
             format!("{input:?}"),
@@ -209,12 +210,15 @@ fn a_rename_of_the_main_thread_goes_nowhere_and_a_tasks_is_a_user_title() {
     };
     assert_eq!(
         core.handle(Input::ThreadOp(ThreadOp::SetModel {
+            request: 2,
             thread: MAIN,
-            choice: choice.clone(),
+            choice: Some(choice.clone()),
         })),
         Ok(vec![Effect::Store(StoreOp::SetModel {
+            session: core.model_session(),
+            request: 2,
             thread: MAIN,
-            choice,
+            choice: Some(choice),
         })])
     );
 }

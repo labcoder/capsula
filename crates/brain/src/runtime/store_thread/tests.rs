@@ -332,16 +332,15 @@ async fn a_turn_for_the_local_server_is_never_stored() {
     store
         .begin_turn(ThreadId(3), Some("cloud"), RunId(2), "first")
         .expect("turn");
-    assert!(
-        store
-            .set_model(ThreadId(2), &on(ConnectionKind::LocalChat))
-            .expect("set")
-    );
-    assert!(
-        store
-            .set_model(ThreadId(3), &on(ConnectionKind::ChatGpt))
-            .expect("set")
-    );
+    for (thread, connection) in [
+        (ThreadId(2), ConnectionKind::LocalChat),
+        (ThreadId(3), ConnectionKind::ChatGpt),
+    ] {
+        assert!(matches!(
+            store.set_model(thread, Some(&on(connection))).expect("set"),
+            kumochi_protocol::message::ChoiceRead::Found { .. }
+        ));
+    }
     let (acks, mut replies) = mpsc::unbounded_channel();
     let custody = crate::test_support::custody(&store);
     let thread = StoreThread::spawn(store, custody, acks, Schedule::default()).expect("thread");
@@ -442,8 +441,10 @@ async fn a_held_model_write_answers_only_after_release() {
     )
     .expect("worker");
     let op = StoreOp::SetModel {
+        session: 4,
+        request: 2,
         thread: id,
-        choice: choice.clone(),
+        choice: Some(choice.clone()),
     };
     assert!(worker.send(op.clone()));
     assert_eq!(
@@ -457,9 +458,13 @@ async fn a_held_model_write_answers_only_after_release() {
     assert_eq!(
         reply(&mut replies).await,
         Input::ModelSet {
+            session: 4,
+            request: 2,
             thread: id,
-            choice: choice.clone(),
-            applied: true,
+            result: kumochi_protocol::message::ChoiceRead::Found {
+                choice: kumochi_protocol::message::SavedChoice::Chosen(choice.clone()),
+                revision: kumochi_protocol::message::ChoiceRev(1),
+            },
         }
     );
     worker.close().await.expect("closed");
@@ -666,25 +671,32 @@ async fn a_failed_model_write_is_not_rescued_by_a_later_success() {
             &acks,
             &mut BTreeMap::new(),
             StoreOp::SetModel {
+                session: 1,
+                request: u32::try_from(id).expect("small"),
                 thread: ThreadId(id),
-                choice,
+                choice: Some(choice),
             },
         );
     }
     assert_eq!(
         reply(&mut replies).await,
         Input::ModelSet {
+            session: 1,
+            request: 1,
             thread: ThreadId(1),
-            choice: failed,
-            applied: false,
+            result: kumochi_protocol::message::ChoiceRead::Failed,
         }
     );
     assert_eq!(
         reply(&mut replies).await,
         Input::ModelSet {
+            session: 1,
+            request: 2,
             thread: ThreadId(2),
-            choice: later.clone(),
-            applied: true,
+            result: kumochi_protocol::message::ChoiceRead::Found {
+                choice: kumochi_protocol::message::SavedChoice::Chosen(later.clone()),
+                revision: kumochi_protocol::message::ChoiceRev(1),
+            },
         }
     );
     let logs = captured.text();

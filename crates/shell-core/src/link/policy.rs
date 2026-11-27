@@ -32,6 +32,7 @@ impl LinkEvent {
             | Self::ScreenHolds { generation, .. }
             | Self::HoldScreen { generation, .. }
             | Self::DrawingNotice { generation, .. }
+            | Self::ModelChoice { generation, .. }
             | Self::CaptureFailed { generation, .. } => current != Some(*generation),
             _ => false,
         }

@@ -9,16 +9,20 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
+use std::time::Instant;
 
+mod choice;
+pub use choice::{Choice, MODEL_READ_RETRY, MODEL_WRITE_TIME};
 mod hold;
 use hold::Hold;
 pub use hold::{HoldRelease, ScreenHold, ScreenLine, ScreenNotice};
 
 use kumochi_protocol::frame::Pipe;
 use kumochi_protocol::message::{
-    Action, AudioSession, Content, ControlToBrain, DataToBrain, DataToShell, Deleted, ErrorKey,
-    GestureId, Incarnation, MAX_PENDING_DELETES, MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, Phase,
-    RunId, RunOrigin, SceneDescriptor, SceneId, ThreadId, ThreadKind, ThreadRow, UserError,
+    Action, AudioSession, Content, ControlToBrain, ControlToShell, DataToBrain, DataToShell,
+    Deleted, ErrorKey, GestureId, Incarnation, MAX_PENDING_DELETES, MAX_PENDING_TURNS,
+    MAX_VISIBLE_SCENES, ModelChoice, Phase, RunId, RunOrigin, SceneDescriptor, SceneId, ThreadId,
+    ThreadKind, ThreadRow, UserError,
 };
 
 #[cfg(any(test, feature = "test-support"))]
@@ -222,6 +226,8 @@ pub struct Runs {
     /// Threads hidden or removed while turns sent before were unanswered, with how many still
     /// are. Each holds one of the slots `deleting` shares.
     gone: Vec<(ThreadId, usize)>,
+    /// The target's committed model choice, read by id.
+    choice: choice::Tracker,
 }
 
 impl fmt::Debug for Runs {
@@ -282,6 +288,45 @@ impl Runs {
 
     pub fn target(&self) -> Target {
         self.target
+    }
+
+    /// What the brain last answered about the target's model choice, Kumo's main chat included.
+    pub fn model_choice(&self) -> Choice {
+        if matches!(self.target, Target::Kumo) && self.main.is_none() {
+            // Kumo's chat exists and may have a saved choice; only its id hasn't arrived.
+            return Choice::Unknown;
+        }
+        self.choice.choice(self.revision, self.thread())
+    }
+
+    /// The read the target's choice is owed: after focus, promotion, Kumo's id arriving,
+    /// reconnect, or a write whose answer was lost. Send it on the control pipe.
+    pub fn model_read(&mut self, now: Instant) -> Option<ControlToBrain> {
+        self.choice.sync(self.revision, self.thread());
+        self.choice.read(now)
+    }
+
+    /// Sets the target's model and effort, or clears them with `None` so each later run uses
+    /// the global default. Nothing is sent unless the current answer names a live thread and no
+    /// write is unanswered; the choice stays unknown until the brain answers.
+    pub fn set_model(
+        &mut self,
+        choice: Option<ModelChoice>,
+        now: Instant,
+    ) -> Option<ControlToBrain> {
+        self.choice.sync(self.revision, self.thread());
+        self.choice.write(choice, now)
+    }
+
+    /// A model read or write wasn't sent.
+    pub fn model_unsent(&mut self, message: &ControlToBrain) {
+        self.choice.unsent(message);
+    }
+
+    /// A `ThreadModelSet` or `ThreadModelRead` from the current connection.
+    pub fn apply_model(&mut self, reply: &ControlToShell, now: Instant) {
+        self.choice.sync(self.revision, self.thread());
+        self.choice.apply(reply, now);
     }
 
     pub fn revision(&self) -> u64 {
@@ -826,6 +871,7 @@ impl Runs {
 
     /// The link connected, as connection `generation`.
     pub fn connected(&mut self, generation: u64) {
+        self.choice.connected(generation);
         self.connected = true;
         self.screen_holds = None;
         self.turns_sent = 0;
@@ -835,6 +881,7 @@ impl Runs {
     /// The link lost the brain: nothing of the runs it knew can arrive any more, and the turns
     /// it hadn't answered never will be.
     pub fn disconnected(&mut self) {
+        self.choice.disconnected();
         self.cancel_hold();
         self.hold_cancel = None;
         self.connected = false;
@@ -1212,6 +1259,9 @@ fn keep_end(text: &mut String, max: usize) -> bool {
     text.drain(..cut);
     true
 }
+
+#[cfg(test)]
+mod choice_tests;
 
 #[cfg(test)]
 mod delete_tests;
