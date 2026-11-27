@@ -365,3 +365,21 @@ fn a_typed_successor_keeps_the_stopped_runs_run_end_bound() {
         "its exact RunEnd clears the bound"
     );
 }
+
+#[test]
+fn an_unanswered_talk_back_save_is_overdue_until_its_answer() {
+    let owner = silent_owner();
+    let (off, _) = settings_modes();
+    let (out, _frames) = async_channel::bounded(1);
+    let late = || Instant::now() + HANDSHAKE_TIMEOUT + Duration::from_millis(1);
+    assert!(!owner.switch_overdue(7, late()), "nothing to answer");
+    assert_eq!(owner.switch_talk_back(7, true, || true), Ok(()));
+    assert!(!owner.switch_overdue(7, Instant::now()));
+    assert!(
+        owner.switch_overdue(7, late()),
+        "a save that never answers can't keep input closed"
+    );
+    assert!(!owner.switch_overdue(6, late()), "only its own pair");
+    assert_eq!(owner.register_queued(7, &off, true, &out), Ok(()));
+    assert!(!owner.switch_overdue(7, late()), "the answer settles it");
+}

@@ -2359,6 +2359,10 @@ fn watch(
                 if queued.is_some() && shared.output.run_end_overdue(generation, Instant::now()) {
                     return;
                 }
+                if queued.is_some() && shared.output.switch_overdue(generation, Instant::now()) {
+                    tracing::debug!("the queued pair's Talk-back answer is overdue");
+                    return;
+                }
                 if out.try_send(ControlToBrain::Pong).is_err() {
                     tracing::warn!("the control queue is full; the brain isn't reading");
                 }

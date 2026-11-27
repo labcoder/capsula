@@ -167,7 +167,9 @@ acknowledgement) is followed by another offer. A busy pair refuses it
 silently. The pair takes at most one accepted offer; its answer reconnects the pair in the
 saved mode, so the next reply speaks without a restart. Until then the pair speaks no new
 replies and the note stays, while the setting shows what was saved. The save closes turn and
-hold admission until its answer, as any Talk-back save does. That snapshot doesn't answer any
+hold admission until its answer, as any Talk-back save does. A Talk-back save still unanswered
+5 s after it was offered ends the pair at the next `Ping`, so a stalled write can't keep input
+closed; the replacement reads the saved value. That snapshot doesn't answer any
 queued preference write. An explicit Off still saves normally and clears the difference without re-registering.
 The registered mode still governs hold release. An explicit On racing the default only
 reconnects if its own write succeeds; an On snapshot after a refusal reflects the default.
