@@ -357,9 +357,9 @@ mod tests {
 
     #[test]
     fn shortcut_ops_keep_their_wire_shape_and_reject_unchecked_parts() {
-        use super::{ShortcutChord, ShortcutView};
+        use super::ShortcutChord;
         use crate::frame::{self, FrameError, Pipe};
-        use crate::message::ControlToShell;
+        use crate::message::ControlToBrain;
 
         let chord = ShortcutChord::new(2, Some(24)).expect("right Ctrl and F24");
         for (op, payload) in [
@@ -368,6 +368,13 @@ mod tests {
         ] {
             assert_eq!(postcard::to_allocvec(&op).expect("encodes"), payload);
             assert_eq!(frame::decode::<SettingsOp>(payload).expect("decodes"), op);
+            let message = ControlToBrain::Settings(op);
+            let actual = frame::encode(&message, Pipe::Control).unwrap();
+            assert_eq!(&actual[frame::HEADER_LEN..], [&[6][..], payload].concat());
+            assert_eq!(
+                frame::read(&mut actual.as_slice(), Pipe::Control).unwrap(),
+                Some(message)
+            );
         }
         for payload in [
             &[17, 1, 9, 0][..],
@@ -381,20 +388,84 @@ mod tests {
                 Err(FrameError::Malformed(_))
             ));
         }
-        for shortcut in [
-            ShortcutView::Default,
-            ShortcutView::Custom(chord),
-            ShortcutView::Invalid,
+    }
+
+    fn wire_view() -> SettingsView {
+        SettingsView {
+            assistant_name: AssistantName::new("K").unwrap(),
+            user_name: None,
+            talk_back: true,
+            hold_to_talk: true,
+            screen_holds: false,
+            show_screen: false,
+            ..view()
+        }
+    }
+
+    #[test]
+    fn settings_and_notices_append_the_same_shortcut_field_before_the_reply_flag() {
+        use super::{ShortcutChord, ShortcutView};
+        use crate::frame::{self, Pipe};
+        use crate::message::ControlToShell;
+
+        let chord = ShortcutChord::new(2, Some(24)).unwrap();
+        for (view, prefix, tail) in [
+            (
+                wire_view(),
+                [1, b'K', 0, 1, 1, 0, 0, 1, 0, 1, 0, 1, 0, 0, 0],
+                &[0][..],
+            ),
+            (
+                SettingsView {
+                    show_in_taskbar: true,
+                    hold_to_talk: false,
+                    screen_holds: true,
+                    shortcut: ShortcutView::Custom(chord),
+                    ..wire_view()
+                },
+                [1, b'K', 0, 1, 1, 0, 0, 1, 1, 1, 0, 0, 0, 1, 0],
+                &[1, 2, 1, 24],
+            ),
+            (
+                SettingsView {
+                    show_in_taskbar: true,
+                    talk_back: false,
+                    hold_to_talk: false,
+                    show_screen: true,
+                    shortcut: ShortcutView::Invalid,
+                    ..wire_view()
+                },
+                [1, b'K', 0, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 1],
+                &[2],
+            ),
         ] {
-            let message = ControlToShell::Settings {
-                view: SettingsView { shortcut, ..view() },
-                answer: true,
-            };
-            let bytes = frame::encode(&message, Pipe::Control).expect("encodes");
-            assert_eq!(
-                frame::decode::<ControlToShell>(&bytes[frame::HEADER_LEN..]).expect("decodes"),
-                message
-            );
+            for (tag, suffix, message) in [
+                (
+                    7,
+                    &[0][..],
+                    ControlToShell::Settings {
+                        view: view.clone(),
+                        answer: false,
+                    },
+                ),
+                (
+                    7,
+                    &[1][..],
+                    ControlToShell::Settings {
+                        view: view.clone(),
+                        answer: true,
+                    },
+                ),
+                (37, &[][..], ControlToShell::SpokenRepliesDefaulted(view)),
+            ] {
+                let expected = [&[tag][..], &prefix, tail, suffix].concat();
+                let bytes = frame::encode(&message, Pipe::Control).unwrap();
+                assert_eq!(&bytes[frame::HEADER_LEN..], expected);
+                assert_eq!(
+                    frame::read(&mut bytes.as_slice(), Pipe::Control).unwrap(),
+                    Some(message)
+                );
+            }
         }
     }
 
