@@ -359,6 +359,10 @@ pub(crate) fn connect(
 /// `Quitting` when Quit came first, `Launch` when no child started, `Busy` when the child
 /// exited as another session's brain holds this user's instance, or why the pair failed.
 #[cfg(target_os = "macos")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the pair attempt's brain, identity, deadline, metrics and first touch"
+)]
 pub(crate) fn connect_pair(
     brain: &Path,
     word: Arc<super::SpawnWord>,

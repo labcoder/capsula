@@ -94,29 +94,6 @@ impl InstanceLock {
         crate::platform::instance_lock_path().map(drop)
     }
 
-    /// First touch: takes this edition's lock in the product folder the brain made under the
-    /// `support` anchor, without waiting, and only then makes its `logs` folder. The product
-    /// folder is never created.
-    ///
-    /// # Errors
-    /// `Missing` when the product folder isn't there, `Busy` when another shell holds the lock,
-    /// `Refused` for anything not admitted.
-    #[cfg(target_os = "macos")]
-    pub fn try_acquire_existing(support: &Path) -> Result<Self, FirstTouchError> {
-        let (lock, storage) = crate::platform::macos::try_acquire_existing_lock(support)?;
-        Ok(Self {
-            _held: Held::Admitted { _lock: lock },
-            storage: Some(storage),
-        })
-    }
-
-    /// The admitted storage that holds this lock, for owners that must close before it is released.
-    #[cfg(target_os = "macos")]
-    #[must_use]
-    pub fn storage(&self) -> Option<&kumochi_storage::ShellStorage> {
-        self.storage.as_ref()
-    }
-
     /// Opens or creates the empty lock file at `path` and locks it without waiting, or returns
     /// `None` when another shell holds it.
     ///
@@ -142,6 +119,30 @@ impl InstanceLock {
             Err(TryLockError::WouldBlock) => Ok(None),
             Err(TryLockError::Error(error)) => Err(error),
         }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl InstanceLock {
+    /// First touch: takes this edition's lock in the product folder the brain made under the
+    /// `support` anchor, without waiting, and only then makes its `logs` folder. The product
+    /// folder is never created.
+    ///
+    /// # Errors
+    /// `Missing` when the product folder isn't there, `Busy` when another shell holds the lock,
+    /// `Refused` for anything not admitted.
+    pub fn try_acquire_existing(support: &Path) -> Result<Self, FirstTouchError> {
+        let (lock, storage) = crate::platform::macos::try_acquire_existing_lock(support)?;
+        Ok(Self {
+            _held: Held::Admitted { _lock: lock },
+            storage: Some(storage),
+        })
+    }
+
+    /// The admitted storage that holds this lock, for owners that must close before it is released.
+    #[must_use]
+    pub fn storage(&self) -> Option<&kumochi_storage::ShellStorage> {
+        self.storage.as_ref()
     }
 }
 
