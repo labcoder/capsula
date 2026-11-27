@@ -97,6 +97,13 @@ pub(crate) fn brain_path(exe: &std::path::Path) -> std::io::Result<std::path::Pa
     }
 }
 
+/// Whether first light may run as `identity`: only the macOS pair runs first touch at READY, and
+/// only the Dev edition's names keep it away from another edition's data.
+#[cfg(any(feature = "first-light", all(test, target_os = "macos")))]
+pub(crate) fn admits_first_light(identity: kumochi_protocol::constants::ProductIdentity) -> bool {
+    cfg!(target_os = "macos") && identity == kumochi_protocol::constants::ProductIdentity::DEV
+}
+
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn instance_lock_path() -> Result<std::path::PathBuf, crate::instance::SessionLockError>
 {

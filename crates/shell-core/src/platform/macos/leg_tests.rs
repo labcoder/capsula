@@ -1036,6 +1036,57 @@ fn a_refused_first_touch_reads_no_item_and_writes_nothing() {
     nothing_written(&mut brain_control, &mut brain_data);
 }
 
+#[test]
+fn a_refused_first_touch_counts_only_within_the_deadline_and_custody() {
+    let (shell, mut brain_control, mut brain_data) = ready_queued();
+    let deadline = Instant::now() + SHORT;
+    let late = after_ready(
+        shell,
+        Channel::Dev,
+        AudioSession::Legacy,
+        None,
+        deadline,
+        |_| DrawingText::default(),
+        || Ok(()),
+        || {
+            thread::sleep(deadline.saturating_duration_since(Instant::now()));
+            Err(FirstTouchError::Busy)
+        },
+        |_| panic!("no item read after first touch's deadline"),
+        || false,
+    );
+    assert!(
+        matches!(late, Err(LinkError::ConnectExpired)),
+        "{:?}",
+        late.map(drop)
+    );
+    nothing_written(&mut brain_control, &mut brain_data);
+
+    let (shell, mut brain_control, mut brain_data) = ready_queued();
+    let ended = std::cell::Cell::new(false);
+    let lost = after_ready(
+        shell,
+        Channel::Dev,
+        AudioSession::Legacy,
+        None,
+        by(),
+        |_| DrawingText::default(),
+        || Ok(()),
+        || {
+            ended.set(true);
+            Err(FirstTouchError::Busy)
+        },
+        |_| panic!("no item read once custody has ended"),
+        || ended.get(),
+    );
+    assert!(
+        matches!(lost, Err(LinkError::Custody)),
+        "{:?}",
+        lost.map(drop)
+    );
+    nothing_written(&mut brain_control, &mut brain_data);
+}
+
 const CORE_DUMPS_ENTRY: &str = "platform::macos::leg::tests::core_dumps_entry";
 
 /// The re-exec child's exact arguments. The entry does nothing under any others, so a plain

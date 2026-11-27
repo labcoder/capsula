@@ -458,12 +458,16 @@ what's left of the attempt's deadline, before the shell writes anything. A byte 
 READY, or the stream ending, is `Rejected`, and the deadline is `ConnectExpired`; none of them
 touch the Keychain. After READY the shell turns off its core dumps (K-7, session.md); a failure
 is `Harden`, with no read and no byte written. First light's link then runs its first touch (`AtReady`),
-checked against the clock and custody on each side: the shell takes its lock in the product
-folder the brain made, never creating that folder, and makes `logs` only once the lock is held
-(`InstanceLock::try_acquire_existing`). A refusal is `FirstTouch`, with no read and no byte
-written, and a busy exit from the child doesn't replace it. That link never relaunches: its first
-failed attempt or loss shows Failed, ends the link thread and keeps the kind as
-`LinkHandle::refusal`. Only then does the shell read the instance item, admitted as
+checked against the clock and custody on each side, so an answer past either doesn't count: the
+shell takes its lock in the product folder the brain made, never creating that folder, and makes
+`logs` only once the lock is held (`InstanceLock::try_acquire_existing`). When `logs` fails the
+lock stays held, with no storage, so its owner keeps it through settlement. A refusal is
+`FirstTouch`, with no read and no byte written, and a busy exit from the child doesn't replace it.
+That link never relaunches: its first failed attempt or loss offers Failed without waiting, ends
+the link thread and keeps the kind as `LinkHandle::refusal` (a child's busy exit is `BrainBusy`,
+a timeout at the deadline `Expired`), and a Quit after a refused first touch keeps that refusal
+beside its own receipt. `prepare_first_light` refuses as `Unsupported`, before any worker,
+outside the macOS Dev edition. After first touch the shell reads the instance item, admitted as
 `Role::Shell`, into a `Secret`: a boxed buffer, allocated before the read, that wipes itself when
 dropped, so a move copies only the pointer. The clock is checked before the read and again after
 it, before its answer counts, so a read that ends past the deadline is `ConnectExpired` whether it

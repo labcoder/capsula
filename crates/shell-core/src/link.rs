@@ -665,11 +665,14 @@ struct Shared {
     refusal: OnceLock<Refusal>,
 }
 
-/// Why a link that doesn't relaunch ended without Quit: the first refusal it met, by kind.
+/// Why a link that doesn't relaunch ended: the first refusal it met, by kind. A first touch
+/// refused before Quit is kept beside Quit's own receipt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refusal {
     /// First touch at the child's READY refused.
     FirstTouch(FirstTouchError),
+    /// The brain exited as another session's brain holds this user's instance.
+    BrainBusy,
     /// The attempt's deadline passed.
     Expired,
     /// Any other connection failure.
@@ -1729,12 +1732,16 @@ pub fn prepare(
 /// relaunching or waiting for Retry.
 ///
 /// # Errors
-/// As [`prepare`].
+/// `Unsupported`, before any worker, unless this is the Dev edition on a platform whose pair runs
+/// first touch; otherwise as [`prepare`].
 #[cfg(feature = "first-light")]
 pub fn prepare_first_light(
     events: Sender<LinkEvent>,
     at_ready: AtReady,
 ) -> std::io::Result<(LinkHandle, LinkStart)> {
+    if !platform::admits_first_light(kumochi_protocol::constants::ProductIdentity::ACTIVE) {
+        return Err(std::io::ErrorKind::Unsupported.into());
+    }
     prepare_with(
         events,
         AudioSession::Legacy,
@@ -1941,6 +1948,11 @@ impl Link {
             let (connection, child) = match connect(repair_of, reconnect_by) {
                 Ok(connected) => connected,
                 Err(failed) if self.quitting() => {
+                    if self.relaunch == Relaunch::Never
+                        && let refusal @ Refusal::FirstTouch(_) = failed.error.refusal()
+                    {
+                        let _first = self.shared.refusal.set(refusal);
+                    }
                     if let Some(child) = failed.child {
                         let _first = self.shared.quit_end.set(QuitEnd {
                             generation: None,
@@ -1952,8 +1964,7 @@ impl Link {
                 Err(platform::Failed { error, .. }) => {
                     tracing::error!(%error, "can't reach the brain");
                     if self.relaunch == Relaunch::Never {
-                        let _first = self.shared.refusal.set(error.refusal());
-                        let _notified = events.send_blocking(LinkEvent::State(LinkState::Failed));
+                        self.refuse(events, error.refusal());
                         return;
                     }
                     if !wait_for_retry(events, retries) {
@@ -1985,8 +1996,7 @@ impl Link {
                 tracing::warn!("lost the brain");
             }
             if self.relaunch == Relaunch::Never {
-                let _first = self.shared.refusal.set(Refusal::Lost);
-                let _notified = events.send_blocking(LinkEvent::State(LinkState::Failed));
+                self.refuse(events, Refusal::Lost);
                 return;
             }
             let Some(next) = self.after_loss(events, retries, attended, last_loss, previous) else {
@@ -2027,6 +2037,13 @@ impl Link {
             return wait_for_retry(events, retries).then_some((LinkState::Connecting, None, None));
         }
         Some((LinkState::Reconnecting, Some(now), None))
+    }
+
+    /// Ends a link that doesn't relaunch on `refusal`, first only. Failed is offered without
+    /// waiting: the refusal is already kept, and a full or unread channel can't hold the thread.
+    fn refuse(&self, events: &Sender<LinkEvent>, refusal: Refusal) {
+        let _first = self.shared.refusal.set(refusal);
+        let _offered = events.try_send(LinkEvent::State(LinkState::Failed));
     }
 
     fn quitting(&self) -> bool {

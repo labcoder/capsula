@@ -97,6 +97,7 @@ impl LinkError {
         match self {
             #[cfg(target_os = "macos")]
             Self::FirstTouch(error) => Refusal::FirstTouch(*error),
+            Self::Busy => Refusal::BrainBusy,
             Self::ConnectExpired => Refusal::Expired,
             _ => Refusal::Connect,
         }
@@ -390,7 +391,8 @@ pub(crate) fn connect_pair(
 /// [`connect_pair`] with its spawn, its core-dump limit, its first touch and its item read
 /// supplied. A failure after the spawn settles the child before it returns, so no later attempt
 /// starts beside it; an exit with [`BRAIN_EXIT_BUSY`](kumochi_protocol::constants::BRAIN_EXIT_BUSY)
-/// is `Busy`, unless first touch refused first. From the spawn on, custody ending shuts the ends
+/// is `Busy`, unless first touch refused first, and a transport timeout once the deadline has
+/// passed is `ConnectExpired`. From the spawn on, custody ending shuts the ends
 /// down, so every wait of the attempt returns at once, and once connected it aborts both legs: a
 /// peer that keeps its ends open can't hold either. No connection is handed over once custody has
 /// ended, and a failed attempt shuts its ends down before it settles.
@@ -474,6 +476,15 @@ pub(super) fn connect_pair_with(
     match connected {
         Ok(connection) => Ok((connection, owner)),
         Err(error) => {
+            let error = match error {
+                LinkError::Io(error)
+                    if error.kind() == std::io::ErrorKind::TimedOut
+                        && Instant::now() >= deadline =>
+                {
+                    LinkError::ConnectExpired
+                }
+                error => error,
+            };
             // The brain sees EOF now, so a child that exits on it is reaped, not killed.
             if let Some(ends) = &held {
                 shut_down(ends);
@@ -519,7 +530,7 @@ fn not_spawned(error: LinkError) -> Failed {
 /// [`over_pair`]. Nothing is written and the item isn't read until READY arrives, and a wrong byte
 /// or the stream ending is `Rejected`. A failed `harden` is `Harden` and a refused `at_ready` is
 /// `FirstTouch`; neither reads the item. The deadline and custody are checked on each side of
-/// first touch and of the item read.
+/// first touch and of the item read, so an answer from either past them doesn't count.
 #[cfg(target_os = "macos")]
 #[expect(
     clippy::too_many_arguments,
@@ -559,10 +570,12 @@ pub(super) fn after_ready(
     check_attempt(Some(deadline))?;
     in_custody()?;
     // The shell's own lock and log come before the item, so a refused first touch reads nothing.
-    at_ready().map_err(LinkError::FirstTouch)?;
-    let mut secret = super::macos::Secret::zeroed();
+    let touched = at_ready();
+    // First touch can outlast the attempt too, so its answer counts only within the fences.
     check_attempt(Some(deadline))?;
     in_custody()?;
+    touched.map_err(LinkError::FirstTouch)?;
+    let mut secret = super::macos::Secret::zeroed();
     let read = read_item(secret.bytes_mut());
     // The Keychain call can outlast the attempt, so its answer counts only within the deadline.
     check_attempt(Some(deadline))?;

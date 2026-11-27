@@ -1182,3 +1182,137 @@ fn a_link_that_doesnt_relaunch_ends_on_its_first_loss() {
     assert_eq!(link.refusal(), Some(LinkRefusal::Lost));
     assert_eq!(relaunches.load(Ordering::SeqCst), 0);
 }
+
+#[test]
+fn a_link_that_doesnt_relaunch_keeps_a_refused_first_touch_when_quit_comes_after_it() {
+    let child = Child::default();
+    // The child exits only on EOF, so no kill may come first.
+    child.script().grace = Some(BOUND);
+    let (entered, touching) = mpsc::channel();
+    let (release, released) = mpsc::channel::<()>();
+    let (events, _states) = async_channel::unbounded();
+    let link = {
+        let child = child.clone();
+        start_scripted_with(
+            events,
+            AudioSession::Legacy,
+            Relaunch::Never,
+            move |word, _, by| {
+                connect_pair_with(
+                    |_| {
+                        let owner = owned(&child, word).map_err(NotStarted::Refused)?;
+                        Ok((owner, brain(&child, Then::ExitsOnEof(0))))
+                    },
+                    || Ok(()),
+                    || {
+                        let _seen = entered.send(());
+                        let _released = released.recv_timeout(BOUND);
+                        Err(FirstTouchError::Busy)
+                    },
+                    |_| panic!("no item read after a refused first touch"),
+                    Channel::Dev,
+                    AudioSession::Legacy,
+                    None,
+                    by,
+                    |_| DrawingText::default(),
+                )
+                .map(|(connection, owner)| (connection, Some(owner)))
+            },
+        )
+    };
+    touching
+        .recv_timeout(BOUND)
+        .expect("first touch is running");
+    assert!(link.begin_quit());
+    drop(release);
+    link.finish_quit();
+    assert_eq!(
+        link.refusal(),
+        Some(LinkRefusal::FirstTouch(FirstTouchError::Busy))
+    );
+    assert_eq!(
+        link.quit_end(),
+        ended(None, QuitOutcome::Reaped(Exit::Code(0)))
+    );
+    assert_eq!(child.script().kills, 0, "it exited on EOF");
+}
+
+#[test]
+fn a_link_that_doesnt_relaunch_ends_on_a_busy_brain_with_its_own_kind() {
+    for (code, refusal) in [
+        (i32::from(BRAIN_EXIT_BUSY), LinkRefusal::BrainBusy),
+        (76, LinkRefusal::Connect),
+    ] {
+        let child = Child::default();
+        let relaunches = Arc::new(AtomicUsize::new(0));
+        let (link, states) = {
+            let relaunches = Arc::clone(&relaunches);
+            link_with(
+                Relaunch::Never,
+                &child,
+                Then::ExitsBeforeReady(code),
+                move |_, _| {
+                    relaunches.fetch_add(1, Ordering::SeqCst);
+                    Err(LinkError::Rejected.into())
+                },
+            )
+        };
+        until(&states, failed);
+        worker_ended(&link);
+        assert_eq!(link.refusal(), Some(refusal), "exit {code}");
+        assert_eq!(relaunches.load(Ordering::SeqCst), 0, "exit {code}");
+    }
+}
+
+#[test]
+fn a_link_that_doesnt_relaunch_ends_while_its_events_go_unread() {
+    let (events, unread) = async_channel::bounded(1);
+    let link = start_scripted_with(events, AudioSession::Legacy, Relaunch::Never, |_, _, _| {
+        Err(LinkError::Rejected.into())
+    });
+    worker_ended(&link);
+    assert_eq!(link.refusal(), Some(LinkRefusal::Connect));
+    assert!(
+        matches!(
+            unread.try_recv(),
+            Ok(LinkEvent::State(LinkState::Connecting))
+        ),
+        "the one slot still holds Connecting"
+    );
+}
+
+#[test]
+fn an_attempt_whose_brain_goes_silent_after_ready_expires_at_its_deadline() {
+    let child = Child::default();
+    let word = Arc::new(SpawnWord::default());
+    let result = attempt(
+        &word,
+        &child,
+        Then::HoldsInHandshake,
+        Instant::now() + WAIT,
+        honest,
+    );
+    let Err(Failed { error, child }) = result else {
+        panic!("the silent brain connected");
+    };
+    assert!(matches!(error, LinkError::ConnectExpired), "{error:?}");
+    assert_eq!(error.refusal(), LinkRefusal::Expired);
+    assert_eq!(
+        child,
+        Some(Unconnected::Settled(Settled::Reaped(Exit::Signal(9))))
+    );
+}
+
+#[test]
+fn first_light_admits_only_the_dev_edition() {
+    use kumochi_protocol::constants::ProductIdentity;
+    assert_eq!(
+        [
+            ProductIdentity::DEV,
+            ProductIdentity::GATE,
+            ProductIdentity::RELEASE
+        ]
+        .map(crate::platform::admits_first_light),
+        [true, false, false]
+    );
+}
