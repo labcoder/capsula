@@ -182,8 +182,17 @@ time. Teardown first revokes the collection gate, then closes the claim, and onl
 then scrubs every slot. While a cycle is paused
 inside the copy, closing fails and teardown retries rather than touch that slot, and
 the paused cycle fails its second authorization and zeroizes its own slot. A full
-ring refuses the cycle instead of growing. Nothing fills the ring yet: Mac capture
-adopts it in its own change.
+ring refuses the cycle instead of growing.
+
+The IO block fills it. Each cycle runs entirely under the producer claim, so a
+cycle that arrives after teardown closed the claim, or while another holds it,
+changes nothing. The block reads the buffer count from the list's header before
+it touches a buffer, and anything but one buffer of the pinned channels and
+cycle size sets a sticky `Format` fault. A valid cycle counts as progress; only
+while collecting is it copied, under both of the batch copy's authorization
+checks, and only then does a full ring set a sticky `Overflow` fault. The block
+is reachable only as a raw pointer for the device's IO-proc registration, which
+the HAL capture change adds; until then nothing registers it.
 
 ## Evidence
 
