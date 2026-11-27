@@ -130,7 +130,7 @@ fn keep(reply: &mut Reply, event: &SseEvent) {
 /// A call's outcome, as error codes and schema field paths only.
 #[derive(Debug, PartialEq, Eq)]
 enum Verdict {
-    /// Every record was accepted; the steps that were new.
+    /// Every record was accepted; the new steps that put something.
     Drawn(usize),
     /// The code and field that stopped it.
     Refused(String, String),
@@ -190,7 +190,7 @@ fn check(arguments: &[u8]) -> Verdict {
                         if scene.commit(candidate, &mut budget).is_err() {
                             return Verdict::Refused("scene.StaleAdmission".into(), "-".into());
                         }
-                        steps += 1;
+                        steps += usize::from(!next.put.is_empty());
                     }
                     Ok(Admission::Duplicate) => {}
                     Err(error) => return step(error),

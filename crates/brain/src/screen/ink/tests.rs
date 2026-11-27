@@ -270,16 +270,9 @@ fn points_off_the_image_never_decide_where_the_line_gathers() {
 }
 
 #[test]
-fn a_line_with_no_point_on_the_image_gathers_at_its_centre() {
-    let (mut rgb, region) = blank([20, 20]);
-    assert_eq!(
-        paint(&mut rgb, [20, 20], region, &points(&[[-10, 10], [30, 10]])),
-        Some(InkBounds {
-            left: 0,
-            top: 8,
-            right: 20,
-            bottom: 13,
-            focus: [10, 10],
-        })
-    );
+fn a_path_with_no_point_on_the_image_names_no_place() {
+    let (mut rgb, region) = blank([100, 100]);
+    let path = points(&[[-10, 10], [110, 10], [110, 90], [-10, 90]]);
+    assert_eq!(paint(&mut rgb, [100, 100], region, &path), None);
+    assert!(!coloured(&rgb, 100, PINK).is_empty());
 }

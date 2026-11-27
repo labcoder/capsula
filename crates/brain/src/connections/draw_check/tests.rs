@@ -56,14 +56,22 @@ fn a_step_after_the_end_is_refused_and_not_drawn() {
 }
 
 #[test]
-fn a_scene_with_no_step_is_not_counted_as_drawn() {
-    let arguments = r#"{"records":[{"begin":{"scene":"s","surface":"overlay","title":"t","alt":"a"}},{"end":{}}]}"#;
-    assert_eq!(check(arguments.as_bytes()), Verdict::Drawn(0));
-    let reply = Reply {
-        calls: 1,
-        draw: Some(Ok(arguments.to_owned())),
-    };
-    assert!(!line(1, "overlay-diagram", 10, Ok(()), &reply, 5).1);
+fn a_scene_that_puts_nothing_is_not_counted_as_drawn() {
+    for arguments in [
+        r#"{"records":[{"begin":{"scene":"s","surface":"overlay","title":"t","alt":"a"}},{"end":{}}]}"#,
+        r#"{"records":[{"begin":{"scene":"s","surface":"overlay","title":"t","alt":"a"}},{"step":{"id":"a","say":"Here it is.","put":[]}},{"end":{}}]}"#,
+    ] {
+        assert_eq!(
+            check(arguments.as_bytes()),
+            Verdict::Drawn(0),
+            "{arguments}"
+        );
+        let reply = Reply {
+            calls: 1,
+            draw: Some(Ok(arguments.to_owned())),
+        };
+        assert!(!line(1, "overlay-diagram", 10, Ok(()), &reply, 5).1);
+    }
 }
 
 #[test]

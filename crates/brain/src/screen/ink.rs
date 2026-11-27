@@ -37,7 +37,8 @@ impl fmt::Debug for InkBounds {
 
 /// Paints `path`, in physical desktop pixels, on `rgb`, an image of `size` showing `region`, and
 /// returns what it painted and where the path gathers. A segment that leaves the image is painted
-/// up to its edge; a path of fewer than two points paints nothing.
+/// up to its edge; a path of fewer than two points paints nothing, and one with no point on the
+/// image returns none, though it may paint.
 pub(crate) fn paint(
     rgb: &mut [u8],
     size: [u32; 2],
@@ -101,12 +102,9 @@ pub(crate) fn paint(
         .map(|&point| place(point))
         .filter(seen)
         .collect();
-    // shortcut: a line whose kept points all lie off the image gathers at its rectangle's centre;
-    // the shell keeps only points on the display the picture shows, so none reaches this yet.
-    let mean = gathered(&places, size).unwrap_or([
-        f64::midpoint(f64::from(left), f64::from(right)),
-        f64::midpoint(f64::from(top), f64::from(bottom)),
-    ]);
+    // A line with no kept point on the image has no place to name; the shell keeps only points
+    // on the display the picture shows, so it never sends one.
+    let mean = gathered(&places, size)?;
     let focus = [inside(mean[0], left, right), inside(mean[1], top, bottom)];
     Some(InkBounds {
         left,

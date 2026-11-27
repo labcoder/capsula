@@ -509,8 +509,8 @@ one over about 400 cells. The shell keeps a point at most every 16 ms while the 
 time spent moving over one place, such as circling a word many times after a long approach,
 crowds points there, and the model is told the thing there is the likeliest answer rather than
 everything in the rectangle. It's a density estimate, not proof of intent: along an evenly
-spaced line any square may win. A path with no point inside the image gathers at the
-rectangle's centre.
+spaced line any square may win. A path with no point inside the image names no place, so its
+picture goes without the pointed line; the shell keeps only points on the display it shows.
 The brain reads it through `ScreenContext::ink`, which returns it only when it is non-empty and
 lies inside the image, with `focus` inside the rectangle, so a bad worker answer reaches no model
 line.
