@@ -347,7 +347,7 @@ sequenceDiagram
   dispatched Speak, including plain text, from dispatch to its first nonempty PCM or terminal.
   The pump reads the registered narration at each Speak, so a pump loaded after the pair
   registered times the same way, and losing the shell drops back to untimed. Queued segments have no timer.
-  The provisional deadline is five seconds; it needs measuring on the current build before activation.
+  The provisional deadline is five seconds; it needs measuring on the current build before conducted output is switched on.
   At expiry the pump checks the receiver even if the data pipe has no room. A ready event keeps
   its normal credit and order; an unfinished send does not delay expiry. Silence at expiry fences
   the dispatch even if unload already moved its TTS generation, and ends the reply's remaining
