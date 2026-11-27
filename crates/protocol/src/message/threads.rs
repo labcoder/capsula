@@ -103,8 +103,9 @@ impl From<ModelSlug> for String {
 }
 
 /// How hard the model is asked to think. The vocabulary doesn't say what a model accepts.
-/// A stored effort this build doesn't know keeps its model, shows Medium and wants Low at
-/// admission, so adding one needs no store migration.
+/// A stored effort this build doesn't know keeps its model and shows Medium in a list row, but
+/// reads as [`SavedChoice::Unavailable`] by id and is refused at admission, so adding one needs
+/// no store migration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Effort {
     /// Less than usual.
@@ -232,13 +233,50 @@ pub enum ThreadOp {
         /// Its new title.
         title: ThreadTitle,
     },
-    /// Store the model and effort a thread runs on.
+    /// Store the model and effort a thread runs on, or clear them so each later run uses the
+    /// global default current when it starts. Kumo's main chat takes the same write as a task.
+    /// Answered by exactly one [`super::ControlToShell::ThreadModelSet`] on the same connection.
     SetModel {
+        /// The shell's number for this write on this connection, echoed in its answer.
+        request: u32,
         /// The thread.
         thread: ThreadId,
-        /// The model and effort.
-        choice: ModelChoice,
+        /// The model and effort, or `None` to inherit the global default.
+        choice: Option<ModelChoice>,
     },
+}
+
+/// Advanced by each committed Set or Clear of one thread. 0 means no revisioned write yet, which
+/// includes a choice saved before revisions existed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ChoiceRev(pub u64);
+
+/// A thread's saved choice, as this build reads it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SavedChoice {
+    /// None saved: each run uses the global default current when it starts.
+    Inherit,
+    /// This model and effort.
+    Chosen(ModelChoice),
+    /// Saved, but this build can't run it: an effort it doesn't know or a malformed record. Runs
+    /// refuse it; a Set or Clear replaces it.
+    Unavailable,
+}
+
+/// The brain's committed answer about one thread's model choice.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChoiceRead {
+    /// The live thread's choice and the revision that wrote it.
+    Found {
+        /// The choice.
+        choice: SavedChoice,
+        /// Its revision.
+        revision: ChoiceRev,
+    },
+    /// No live thread has this id: never stored, hidden or being deleted. Final for the id.
+    Missing,
+    /// The store failed, the read ran out of time, or the write was refused; nothing is known.
+    Failed,
 }
 
 #[cfg(test)]

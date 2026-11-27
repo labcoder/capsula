@@ -304,8 +304,9 @@ fn cancellation_after_begin_turn_and_model_away_back_never_grant() {
             1 => {
                 for model in ["away", "captured"] {
                     core.handle(Input::ThreadOp(ThreadOp::SetModel {
+                        request: 1,
                         thread: T,
-                        choice: choice(model, Effort::High),
+                        choice: Some(choice(model, Effort::High)),
                     }))
                     .unwrap();
                 }
@@ -1586,8 +1587,15 @@ fn turning_screen_holds_off_before_any_send_is_granted_records_the_turn_withdraw
 }
 
 /// A `SetModel` that cancels a held run fails its bound launch's gate in that same transition.
+/// A Clear does the same, and its failed write revives nothing.
 #[test]
 fn a_set_model_that_cancels_a_held_run_fails_its_launchs_gate_at_once() {
+    for write in [Some(choice("away", Effort::High)), None] {
+        set_model_fails_the_gate(write);
+    }
+}
+
+fn set_model_fails_the_gate(write: Option<kumochi_protocol::message::ModelChoice>) {
     let mut core = fresh();
     let snapshot = prepared(&core, Some(T));
     core.submit_hold(snapshot, "words".into(), None).unwrap();
@@ -1604,9 +1612,18 @@ fn a_set_model_that_cancels_a_held_run_fails_its_launchs_gate_at_once() {
     };
     assert!(core.mcp_bound(&bind, T, gate.clone()).is_some());
     core.handle(Input::ThreadOp(ThreadOp::SetModel {
+        request: 1,
         thread: T,
-        choice: choice("away", Effort::High),
+        choice: write,
     }))
     .unwrap();
     assert!(!gate.may_call());
+    core.handle(Input::ModelSet {
+        session: core.model_session(),
+        request: 1,
+        thread: T,
+        result: kumochi_protocol::message::ChoiceRead::Failed,
+    })
+    .unwrap();
+    assert!(!gate.may_call(), "a failed write doesn't reopen the gate");
 }

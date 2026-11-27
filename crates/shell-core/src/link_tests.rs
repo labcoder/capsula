@@ -1158,7 +1158,9 @@ fn pings_are_answered_and_run_states_passed_on() {
 
 #[test]
 fn model_write_results_are_accepted_without_ending_the_link() {
-    use kumochi_protocol::message::{ConnectionKind, Effort, ModelChoice, ModelSlug};
+    use kumochi_protocol::message::{
+        ChoiceRead, ChoiceRev, ConnectionKind, Effort, ModelChoice, ModelSlug, SavedChoice,
+    };
 
     let link = attended("model-result");
     let events = patient(link.events);
@@ -1167,13 +1169,20 @@ fn model_write_results_are_accepted_without_ending_the_link() {
         frame::write(
             &mut &link.control,
             &ControlToShell::ThreadModelSet {
+                request: 1,
                 thread: ThreadId(3),
-                choice: ModelChoice {
-                    model: ModelSlug::new("private-model").expect("valid"),
-                    effort: Effort::High,
-                    connection: ConnectionKind::ChatGpt,
+                result: if applied {
+                    ChoiceRead::Found {
+                        choice: SavedChoice::Chosen(ModelChoice {
+                            model: ModelSlug::new("private-model").expect("valid"),
+                            effort: Effort::High,
+                            connection: ConnectionKind::ChatGpt,
+                        }),
+                        revision: ChoiceRev(1),
+                    }
+                } else {
+                    ChoiceRead::Missing
                 },
-                applied,
             },
             Pipe::Control,
         )

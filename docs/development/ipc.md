@@ -702,8 +702,10 @@ write, and these facts add no GPUI presentation.
 | Message | Pipe | Fields |
 |---|---|---|
 | `ThreadOp::Rename` | Control, shell to brain | `thread`, `title`: a `ThreadTitle`, trimmed, one line, 1–80 characters, checked on decode |
-| `ThreadOp::SetModel` | Control, shell to brain | `thread`, `choice`: a `ModelSlug` (1–64 bytes of `[a-z0-9._-]`) and an `Effort` (`Low` to `Max`, the documented vocabulary) |
-| `ThreadModelSet` | Control, brain to shell | `thread`, the unchanged requested `choice`, and `applied`: whether a live row matched and the write committed |
+| `ThreadOp::SetModel` | Control, shell to brain | `request`, `thread`, `choice`: a `ModelSlug` (1–64 bytes of `[a-z0-9._-]`) and an `Effort` (`Low` to `Max`, the documented vocabulary), or `None` to clear it so each later run uses the global default |
+| `ThreadModelSet` | Control, brain to shell | `request`, `thread`, and `result`: the committed `ChoiceRead` |
+| `ReadModel` | Control, shell to brain | `request`, `thread` |
+| `ThreadModelRead` | Control, brain to shell | `request`, `thread`, and `result`: the committed `ChoiceRead` |
 
 - Each thread op becomes one store write (see [store](store.md#the-main-thread-titles-and-model-choices)).
   A rename is stored as the user's title. A thread that's hidden or gone changes nothing.
@@ -712,12 +714,43 @@ write, and these facts add no GPUI presentation.
   list, and the shell reads its list again.
   The shell confirms a task's displayed title by an authoritative page reread, not by sending
   the op or taking an older in-flight page. Kumo's name waits for `SettingsView` instead.
-- A model write receives `ThreadModelSet` only after the store finishes, including `applied: false`
-  for a missing or hidden thread, an unrepresentable id, a failed write, or rejected store admission.
-  A successful result means the row matched, even when it already held the same choice. The tap
-  records only the operation and length, never the choice. The shell currently accepts and drops
-  this result: the 18b picker will match its pending `(thread, choice)` and reconcile its saved
-  cache against older in-flight list replies. No optimistic cache or pending picker state exists yet.
+- **A chat's model choice is read and written by id.** `ChoiceRead` is `Found { choice, revision }`
+  with `SavedChoice` `Inherit`, `Chosen` or `Unavailable` (an unknown effort or a malformed record,
+  which runs refuse), `Missing` for no live thread, or `Failed`. Kumo's main chat takes the same
+  read and write as a task. A write answers what the store committed, never the request echoed,
+  only after the store finishes; a read runs on the page reader after every write accepted before it.
+  The brain stamps both with the pair's session and drops an answer for an earlier session, so a
+  restarted shell reusing request numbers can't receive one. At most `MAX_PENDING_MODEL_READS`
+  reads hold slots, cancelled ones included until the reader answers; one more answers `Failed` at
+  once. A read of a New chat whose first turn's row is still waiting behind an older run's outcome
+  parks until that write is queued. Every read answers `Failed` once at its two-second deadline,
+  counted from admission, whether parked or held by a busy reader; a reader's late answer is
+  dropped. Losing the shell cancels its reads, and a read that arrives with no shell is ignored. The tap records only the
+  operation and length of both answers; `ReadModel` carries no content.
+
+  ```mermaid
+  sequenceDiagram
+    participant S as Shell (Runs)
+    participant C as Coordinator
+    participant W as Store writer
+    participant R as Page reader
+    S->>C: ReadModel(request 1, thread)
+    C->>R: ReadModel (stamped after accepted writes)
+    R-->>S: ThreadModelRead(1, Found{Inherit, rev 0})
+    S->>C: SetModel(request 2, thread, Some(choice) or None)
+    C->>W: SetModel (one transaction, revision + 1)
+    W-->>S: ThreadModelSet(2, Found{choice, rev 1})
+  ```
+
+  The shell's `Runs` keys the answer on the connection, the selection and the thread, so focus, a
+  New chat's promotion, Kumo's id arriving, a confirmed delete and a reconnect each forget the answer
+  and make a read due on the next `Runs::model_read` call, whether or not a panel is open. It keeps one read and one write outstanding, matches answers by request, kind and
+  thread, and takes a found choice only at a revision at least the newest it saw. It writes only over
+  a current found answer; a write that fails, isn't sent or goes unanswered for `MODEL_WRITE_TIME` leaves
+  the choice unknown until a read sent after it answers. A failed read is asked again after
+  `MODEL_READ_RETRY`. GPUI forwards both answers to `Runs`; nothing sends a read or a write
+  yet, because no view shows the choice. The view that does will send `Runs::model_read` at the
+  end of each link batch.
 - **The main thread's name isn't a title.** Generic `Rename` of the main thread is gone: the
   brain refuses it with no write, and logs that it did, never the title. The shell renames Kumo
   with `SettingsOp::SetAssistantName`, under the 24-character name rule. `SettingsView` carries

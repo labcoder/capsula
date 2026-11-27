@@ -157,6 +157,7 @@ pub(super) fn control_input(message: ControlToBrain) -> Result<Option<Input>, En
             resend,
         }),
         ControlToBrain::ThreadOp(op) => Some(Input::ThreadOp(op)),
+        ControlToBrain::ReadModel { request, thread } => Some(Input::ReadModel { request, thread }),
         ControlToBrain::StopScenes { run, cuts } => Some(Input::StopScenes { run, cuts }),
         ControlToBrain::StepShown { run, scene, index } => {
             Some(Input::Drawing(crate::drawing::Input::StepShown {
@@ -283,6 +284,10 @@ impl Brain {
                 self.apply(effects, None)
                     .expect("offline issue effects cannot fill a shell queue");
             }
+            return;
+        }
+        if matches!(message, ControlToBrain::ReadModel { .. }) {
+            // Nobody is left to answer, and an admitted read would hold a slot for the next pair.
             return;
         }
         if let ControlToBrain::AccountOp(op) = message {

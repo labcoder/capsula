@@ -1,6 +1,6 @@
 //! Saved model identity: structural decoding is independent of display and execution admission.
 
-use kumochi_protocol::message::{ConnectionKind, Effort, ModelChoice, ModelSlug};
+use kumochi_protocol::message::{ConnectionKind, Effort, ModelChoice, ModelSlug, SavedChoice};
 
 use super::StoreError;
 use crate::connections::facts;
@@ -59,23 +59,41 @@ impl StoredChoice {
         }
     }
 
+    /// The by-id answer: an unknown effort or a malformed record is unavailable, never a guess.
+    pub(crate) fn saved(self) -> SavedChoice {
+        match self {
+            Self::Absent => SavedChoice::Inherit,
+            Self::Valid {
+                connection,
+                model,
+                effort: Some(effort),
+            } => SavedChoice::Chosen(ModelChoice {
+                model,
+                effort,
+                connection,
+            }),
+            Self::Valid { effort: None, .. } | Self::Invalid => SavedChoice::Unavailable,
+        }
+    }
+
     /// The choice a run executes: the saved one on any connection, else `default`; admission
-    /// decides whether its connection can answer.
+    /// decides whether its connection can answer. An unknown effort is refused, as the by-id read
+    /// calls it unavailable.
     pub(crate) fn execution(
         self,
         default: Option<ModelChoice>,
     ) -> Result<Option<ModelChoice>, StoreError> {
         let choice = match self {
             Self::Absent => default,
-            Self::Invalid => return Err(StoreError::Read),
+            Self::Invalid | Self::Valid { effort: None, .. } => return Err(StoreError::Read),
             Self::Valid {
                 connection,
                 model,
-                effort,
+                effort: Some(effort),
             } => Some(ModelChoice {
                 connection,
                 model,
-                effort: effort.unwrap_or(Effort::Low),
+                effort,
             }),
         };
         Ok(choice)
@@ -117,6 +135,7 @@ mod tests {
             let choice = StoredChoice::decode(model, effort, connection);
             assert_eq!(choice, StoredChoice::Invalid);
             assert!(choice.clone().display().is_err());
+            assert_eq!(choice.clone().saved(), SavedChoice::Unavailable);
             assert!(matches!(
                 choice.execution(Some(default())),
                 Err(StoreError::Read)
@@ -128,6 +147,7 @@ mod tests {
                 .expect("default"),
             Some(default())
         );
+        assert_eq!(StoredChoice::Absent.saved(), SavedChoice::Inherit);
     }
 
     fn default() -> ModelChoice {
@@ -138,6 +158,8 @@ mod tests {
         }
     }
 
+    /// A list row still shows the model with an inert effort, but the by-id read calls it
+    /// unavailable and a run refuses it: neither the default nor a guessed effort runs instead.
     #[test]
     fn unknown_effort_never_selects_a_different_model() {
         for effort in ["minimal", "ultra", ""] {
@@ -155,30 +177,35 @@ mod tests {
                     effort: Effort::Medium,
                 }
             );
-            assert_eq!(
-                stored.execution(Some(default())).expect("execute"),
-                Some(ModelChoice {
-                    effort: Effort::Low,
-                    ..shown
-                })
-            );
+            assert_eq!(stored.clone().saved(), SavedChoice::Unavailable);
+            assert!(matches!(
+                stored.execution(Some(default())),
+                Err(StoreError::Read)
+            ));
         }
     }
 
     #[test]
     fn a_saved_route_is_shown_and_read_as_saved() {
         for connection in ["claude_code", "anthropic_key"] {
-            let stored = StoredChoice::decode(Some("same-slug"), Some("ultra"), Some(connection));
-            let shown = stored.clone().display().expect("page").expect("selected");
+            let unknown = StoredChoice::decode(Some("same-slug"), Some("ultra"), Some(connection));
+            let shown = unknown.clone().display().expect("page").expect("selected");
             assert_ne!(shown.connection, ConnectionKind::ChatGpt);
             assert_eq!(shown.model.as_str(), "same-slug");
             assert_eq!(shown.effort, Effort::Medium);
+            assert!(matches!(
+                unknown.execution(Some(default())),
+                Err(StoreError::Read)
+            ));
+            let stored = StoredChoice::decode(Some("same-slug"), Some("xhigh"), Some(connection));
+            let saved = ModelChoice {
+                effort: Effort::XHigh,
+                ..shown.clone()
+            };
+            assert_eq!(stored.clone().saved(), SavedChoice::Chosen(saved.clone()));
             assert_eq!(
                 stored.execution(Some(default())).expect("read"),
-                Some(ModelChoice {
-                    effort: Effort::Low,
-                    ..shown.clone()
-                })
+                Some(saved)
             );
             assert_eq!(
                 StoredChoice::Absent

@@ -86,6 +86,7 @@ impl Tapped for ControlToBrain {
             Self::ScreenRelease { .. } => "ScreenRelease",
             Self::SceneSkipped { .. } => "SceneSkipped",
             Self::StepReady { .. } => "StepReady",
+            Self::ReadModel { .. } => "ReadModel",
         }
     }
 
@@ -124,6 +125,10 @@ impl Tapped for ControlToBrain {
                         | ConnectionOp::FindClaudeCode
                 )
                 | Self::Warm { thread: _ }
+                | Self::ReadModel {
+                    request: _,
+                    thread: _
+                }
         )
     }
 }
@@ -161,6 +166,7 @@ impl Tapped for ControlToShell {
             Self::IssueRefused { .. } => "IssueRefused",
             Self::IssueUnavailable { .. } => "IssueUnavailable",
             Self::ThreadModelSet { .. } => "ThreadModelSet",
+            Self::ThreadModelRead { .. } => "ThreadModelRead",
             Self::Voice(_) => "Voice",
             Self::GitHubError(_) => "GitHubError",
             Self::DrawingReplacementFailed { .. } => "DrawingReplacementFailed",

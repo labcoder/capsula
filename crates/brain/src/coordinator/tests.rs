@@ -42,6 +42,8 @@ mod jobs;
 mod leases;
 #[path = "mcp_tests.rs"]
 pub(super) mod mcp;
+#[path = "model_choice_tests.rs"]
+mod model_choice;
 #[path = "route_tests.rs"]
 pub(super) mod routes;
 #[path = "scene_tests.rs"]

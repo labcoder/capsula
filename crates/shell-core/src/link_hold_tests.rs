@@ -432,8 +432,9 @@ fn recorded_choice_mutations_cancel_before_queueing_and_away_back_still_changes_
         ControlToBrain::Settings(SettingsOp::SetDefaultModel(choice("away"))),
         ControlToBrain::Settings(SettingsOp::SetDefaultModel(choice("original"))),
         ControlToBrain::ThreadOp(ThreadOp::SetModel {
+            request: 1,
             thread: ThreadId(1),
-            choice: choice("other"),
+            choice: Some(choice("other")),
         }),
         ControlToBrain::AccountOp(AccountOp::SignOut),
         ControlToBrain::Connection(ConnectionOp::RemoveAnthropicKey {

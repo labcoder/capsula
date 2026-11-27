@@ -173,6 +173,7 @@ impl Coordinator {
     pub fn begin_session(&mut self) {
         self.session_start = RunId(self.last_run.0 + 1);
         self.begin_deletes();
+        self.begin_model_session();
     }
 
     /// A Stop for a run that already ended, which the shell could still stop while it drew the

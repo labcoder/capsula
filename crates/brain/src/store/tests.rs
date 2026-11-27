@@ -246,7 +246,7 @@ fn a_newer_schema_is_refused() {
         Store::open(&scratch.db()),
         Err(StoreError::NewerSchema {
             found: 99,
-            known: 13
+            known: 14
         })
     ));
 }
@@ -263,7 +263,7 @@ fn a_v11_store_moves_past_every_version_a_pre_lock_build_knows() {
     let scratch = Scratch::new("schema-v11");
     let db = store_at(scratch.dir(), 11);
     drop(Store::open_existing(&db).expect("the existing store"));
-    assert_eq!(user_version(&db), 13);
+    assert_eq!(user_version(&db), 14);
     let cutoffs: i64 = Connection::open(&db)
         .expect("raw open")
         .query_row("SELECT count(*) FROM chatgpt_recovery_context", [], |row| {
@@ -311,7 +311,7 @@ fn a_recovered_v12_store_keeps_its_cutoff_at_v13() {
         )
         .expect("a store the recovery operation took to v12");
     let store = Store::open_existing(&db).expect("the recovered store");
-    assert_eq!(user_version(&db), 13);
+    assert_eq!(user_version(&db), 14);
     let row: (Vec<u8>, i64, i64) = store
         .conn
         .query_row("SELECT * FROM chatgpt_recovery_context", [], |row| {

@@ -34,6 +34,8 @@ mod purge;
 #[cfg(test)]
 mod rearm_tests;
 pub(crate) use purge::files as purge_files;
+#[cfg(test)]
+mod model_choice_tests;
 pub(crate) mod recall;
 mod rounds;
 mod scenes;

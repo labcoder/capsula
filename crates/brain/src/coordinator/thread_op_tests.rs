@@ -2,8 +2,8 @@
 //! reaches the store.
 
 use kumochi_protocol::message::{
-    ControlToShell, Deleted, Effort, ModelChoice, ModelSlug, Phase, RunId, ThreadId, ThreadOp,
-    ThreadTitle,
+    ChoiceRead, ChoiceRev, ControlToShell, Deleted, Effort, ModelChoice, ModelSlug, Phase, RunId,
+    SavedChoice, ThreadId, ThreadOp, ThreadTitle,
 };
 
 use super::{R, T, fresh, state};
@@ -21,16 +21,20 @@ fn model_results_echo_the_exact_write_and_refusals_have_an_answer() {
         effort: Effort::XHigh,
         connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
     };
+    let session = core.model_session();
     let op = StoreOp::SetModel {
+        session,
+        request: 7,
         thread: T,
-        choice: choice.clone(),
+        choice: Some(choice.clone()),
     };
     assert_eq!(
         op.failed(),
         Some(Input::ModelSet {
+            session,
+            request: 7,
             thread: T,
-            choice: choice.clone(),
-            applied: false,
+            result: ChoiceRead::Failed,
         })
     );
     assert_eq!(
@@ -46,16 +50,21 @@ fn model_results_echo_the_exact_write_and_refusals_have_an_answer() {
         None,
         "a heard point that can't reach the store answers nothing"
     );
-    for applied in [false, true] {
+    let found = ChoiceRead::Found {
+        choice: SavedChoice::Chosen(choice),
+        revision: ChoiceRev(3),
+    };
+    for result in [ChoiceRead::Missing, ChoiceRead::Failed, found] {
         let input = Input::ModelSet {
+            session,
+            request: 7,
             thread: T,
-            choice: choice.clone(),
-            applied,
+            result: result.clone(),
         };
         let expected = vec![Effect::Control(ControlToShell::ThreadModelSet {
+            request: 7,
             thread: T,
-            choice: choice.clone(),
-            applied,
+            result,
         })];
         for debug in [
             format!("{input:?}"),
@@ -161,12 +170,15 @@ fn a_rename_of_the_main_thread_goes_nowhere_and_a_tasks_is_a_user_title() {
     };
     assert_eq!(
         core.handle(Input::ThreadOp(ThreadOp::SetModel {
+            request: 2,
             thread: MAIN,
-            choice: choice.clone(),
+            choice: Some(choice.clone()),
         })),
         Ok(vec![Effect::Store(StoreOp::SetModel {
+            session: core.model_session(),
+            request: 2,
             thread: MAIN,
-            choice,
+            choice: Some(choice),
         })])
     );
 }

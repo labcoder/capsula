@@ -5,7 +5,7 @@ use std::fmt;
 
 #[cfg(test)]
 use kumochi_protocol::message::ModelChoice;
-use kumochi_protocol::message::{EventId, RunId, ThreadId, ThreadKind};
+use kumochi_protocol::message::{ChoiceRead, ChoiceRev, EventId, RunId, ThreadId, ThreadKind};
 use rusqlite::{Connection, OptionalExtension as _, Transaction, params};
 
 use super::choice::StoredChoice;
@@ -474,6 +474,41 @@ impl Snapshot<'_> {
     #[cfg(test)]
     pub(crate) fn choice(&self, thread: ThreadId) -> Result<Option<ModelChoice>, StoreError> {
         self.stored_choice(thread)?.display().map_err(Into::into)
+    }
+
+    /// `thread`'s committed model choice and its revision, by id; `Missing` unless it's live.
+    ///
+    /// # Errors
+    /// Fails when SQLite fails or the stored revision is negative.
+    pub(crate) fn model_choice(&self, thread: ThreadId) -> Result<ChoiceRead, StoreError> {
+        let Ok(id) = sql_id(thread.0, StoreError::NoThread) else {
+            return Ok(ChoiceRead::Missing);
+        };
+        let found = self
+            .0
+            .query_row(
+                "SELECT model, effort, connection, model_choice_rev FROM threads
+                 WHERE id = ?1 AND state = 'live'",
+                params![id],
+                |row| {
+                    Ok((
+                        StoredChoice::decode(
+                            row.get_ref(0)?.as_str_or_null()?,
+                            row.get_ref(1)?.as_str_or_null()?,
+                            row.get_ref(2)?.as_str_or_null()?,
+                        ),
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((choice, revision)) = found else {
+            return Ok(ChoiceRead::Missing);
+        };
+        Ok(ChoiceRead::Found {
+            choice: choice.saved(),
+            revision: ChoiceRev(u64::try_from(revision).map_err(|_| StoreError::Read)?),
+        })
     }
 
     pub(crate) fn stored_choice(&self, thread: ThreadId) -> Result<StoredChoice, StoreError> {
