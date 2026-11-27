@@ -39,7 +39,10 @@ impl Presence {
             match event {
                 LinkEvent::DrawingNotice {
                     key, thread, run, ..
-                } => self.show_error(&key.into(), Source::Drawing { thread, run }, cx),
+                } => {
+                    let error = self.runs.drawing_notice(key, thread, run);
+                    self.show_error(&error, Source::Drawing { thread, run }, cx);
+                }
                 LinkEvent::State(state) => {
                     self.recover_hold(cx);
                     self.cancel_voice(cx);

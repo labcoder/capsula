@@ -53,10 +53,10 @@ impl Notice {
     pub fn route(&self, action: Action) -> Option<Route> {
         Some(match action {
             Action::Retry => match self.source {
-                Source::Run(run) => Route::RunRetry(run),
+                Source::Run(run) | Source::Drawing { run, .. } => Route::RunRetry(run),
                 Source::Account => Route::Account(AccountOp::Retry),
                 Source::Settings(Some(field)) => Route::SettingsRetry(field),
-                Source::Settings(None) | Source::Drawing { .. } => return None,
+                Source::Settings(None) => return None,
             },
             Action::SignIn => match self.error.key() {
                 ErrorKey::ClaudeCodeSignedOut | ErrorKey::AnthropicKeyRejected => Route::Accounts,
@@ -361,6 +361,11 @@ mod tests {
         assert_eq!(notice.route(Action::OpenSettings), Some(Route::Settings));
         notice.source = Source::Settings(None);
         assert_eq!(notice.route(Action::Retry), None);
+        notice.source = Source::Drawing {
+            thread: kumochi_protocol::message::ThreadId(2),
+            run: RunId(8),
+        };
+        assert_eq!(notice.route(Action::Retry), Some(Route::RunRetry(RunId(8))));
         for key in [
             ErrorKey::ClaudeCodeSignedOut,
             ErrorKey::AnthropicKeyRejected,
