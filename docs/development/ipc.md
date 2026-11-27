@@ -748,7 +748,9 @@ write, and these facts add no GPUI presentation.
   thread, and takes a found choice only at a revision at least the newest it saw. It writes only over
   a current found answer; a write that fails, isn't sent or goes unanswered for `MODEL_WRITE_TIME` leaves
   the choice unknown until a read sent after it answers. A failed read is asked again after
-  `MODEL_READ_RETRY`. No picker sends a write yet.
+  `MODEL_READ_RETRY`. GPUI forwards both answers to `Runs`; nothing sends a read or a write
+  yet, because no view shows the choice. The view that does will send `Runs::model_read` at the
+  end of each link batch.
 - **The main thread's name isn't a title.** Generic `Rename` of the main thread is gone: the
   brain refuses it with no write, and logs that it did, never the title. The shell renames Kumo
   with `SettingsOp::SetAssistantName`, under the 24-character name rule. `SettingsView` carries
