@@ -516,6 +516,17 @@ async fn play(
                 Some(_) => {}
             }
         }
+        // Stop aborts the round's task, whose lease settles only once the runtime drops it,
+        // maybe after Interrupted; the settlement's tell comes with its queued sent mark.
+        if wire == Wire::FlushHeld {
+            while told.is_empty() {
+                match shell.control().await {
+                    Some(message @ ControlToShell::HoldScreen { .. }) => told.push(message),
+                    Some(_) => {}
+                    None => break,
+                }
+            }
+        }
         if let Some(lease) = lease {
             if late_unsent {
                 let thread = shell.thread.unwrap();
@@ -724,9 +735,16 @@ async fn a_hold_whose_send_may_have_written_keeps_its_picture_and_tells_once() {
 
 #[tokio::test]
 async fn a_hold_stopped_while_its_flush_waits_keeps_its_picture() {
-    let (told, screens) = Box::pin(played(Wire::FlushHeld)).await;
-    assert!(told.len() <= 1, "{told:?}");
-    assert_eq!(screens, [Some("screen".to_owned())]);
+    assert_eq!(
+        Box::pin(played(Wire::FlushHeld)).await,
+        (
+            vec![ControlToShell::HoldScreen {
+                gesture: G,
+                outcome: HeldScreen::Screen
+            }],
+            vec![Some("screen".to_owned())]
+        )
+    );
 }
 
 #[tokio::test]
