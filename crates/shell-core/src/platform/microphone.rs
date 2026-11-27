@@ -19,6 +19,11 @@
     )
 )]
 mod pcm;
+#[cfg_attr(
+    all(not(windows), not(test)),
+    expect(dead_code, reason = "only native capture and its tests drive a stream")
+)]
+pub(in crate::platform) mod stream;
 #[cfg(test)]
 mod tests;
 
@@ -162,7 +167,6 @@ pub(super) struct PacketBoundary {
     kept_frames: u64,
     missing_frames: u64,
     next_position: Option<u64>,
-    #[cfg(windows)]
     queue_high_water: usize,
     discarded_before_listening: u32,
 }
@@ -230,7 +234,6 @@ impl PacketBoundary {
         }
     }
 
-    #[cfg(windows)]
     pub(super) fn queued(&mut self, high_water: usize) {
         self.queue_high_water = self.queue_high_water.max(high_water);
     }

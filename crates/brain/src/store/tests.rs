@@ -16,6 +16,56 @@ use super::{
 
 const MARKER: &str = "zqxplantedmarker";
 
+#[test]
+fn sql_error_diagnostics_keep_only_an_extended_code() {
+    for error in [
+        rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(1811), Some("ZQX".into())),
+        rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(1811), Some("UVW".into())),
+    ] {
+        let store = StoreError::from(error);
+        let shown = "SQLite operation failed (code 1811)";
+        assert!(store.to_string() == shown, "Display must not quote SQLite");
+        let outer = Err::<(), _>(store);
+        assert!(
+            format!("{outer:?}") == format!("Err({shown})"),
+            "outer Debug must not quote SQLite"
+        );
+        assert!(matches!(
+            outer,
+            Err(StoreError::Sql(rusqlite::Error::SqliteFailure(_, Some(_))))
+        ));
+    }
+    let store = StoreError::from(rusqlite::Error::InvalidPath("ZQX-private".into()));
+    let shown = "SQLite operation failed";
+    assert!(store.to_string() == shown, "Display must not quote a path");
+    assert!(format!("{store:?}") == shown, "Debug must not quote a path");
+}
+
+#[test]
+fn sqlite_error_sources_are_not_exposed_through_brain_errors() {
+    use std::error::Error as _;
+
+    for error in [
+        rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(1811), Some("ZQX".into())),
+        rusqlite::Error::InvalidPath("ZQX-private".into()),
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::other("ZQX-private")),
+        ),
+    ] {
+        let brain = crate::BrainError::from(StoreError::from(error));
+        let classified = brain.source().expect("store classification");
+        assert!(
+            !format!("{brain:?} {brain} {classified:?} {classified}")
+                .to_ascii_lowercase()
+                .contains("zqx"),
+            "outer error diagnostics must not quote SQLite"
+        );
+        assert!(classified.source().is_none(), "raw SQLite cause is private");
+    }
+}
+
 /// A WAL store at `dir`, migrated to `version`, as an earlier build left it.
 pub(crate) fn store_at(dir: &Path, version: usize) -> PathBuf {
     std::fs::create_dir_all(dir).expect("store folder");

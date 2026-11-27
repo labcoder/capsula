@@ -226,9 +226,14 @@ async fn a_corrupt_scene_is_cleared_without_losing_the_other_three_or_stopping_t
     .expect("drawing corruption must not stop the brain");
     drop(guard);
     let warnings = captured.text();
-    for row in rows {
-        assert!(warnings.contains(&format!("stored scene row {row} doesn't decode")));
-    }
+    assert_eq!(
+        warnings.matches("stored scene row doesn't decode").count(),
+        rows.len()
+    );
+    assert!(
+        rows.iter()
+            .all(|row| !warnings.contains(&format!("stored scene row {row}")))
+    );
     assert!(warnings.contains(&format!("row={}", scenes[0].0)));
     assert!(!warnings.contains("private drawing"));
     let reply = tokio::time::timeout(super::PATIENCE, brain.inputs.recv())

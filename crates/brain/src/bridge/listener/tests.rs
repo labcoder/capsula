@@ -1046,29 +1046,45 @@ async fn a_second_request_while_one_is_unsettled_never_reaches_the_brain() {
 #[test]
 fn a_call_and_its_reply_debug_no_arguments_text_or_request_id() {
     const PLANTED: &str = "zq-mcp-planted";
-    let (reply, _answer) = oneshot::channel();
-    let call = McpCall {
-        origin: McpOrigin {
-            build: BUILD,
-            launch: LAUNCH,
-            key: CallKey(PLANTED.to_owned()),
-        },
-        tool: ToolName::Probe,
-        args: Some(PLANTED.as_bytes().to_vec()),
-        reply,
+    const OTHER: &str = "jk-uvw-abcdefg";
+    let call_debug = |key: &str, args: &str| {
+        let (reply, _answer) = oneshot::channel();
+        format!(
+            "{:?}",
+            McpCall {
+                origin: McpOrigin {
+                    build: BUILD,
+                    launch: LAUNCH,
+                    key: CallKey(key.to_owned()),
+                },
+                tool: ToolName::Probe,
+                args: Some(args.as_bytes().to_vec()),
+                reply,
+            }
+        )
     };
-    let answer = McpReply {
-        text: PLANTED.to_owned(),
-        error: true,
+    let reply_debug = |text: &str| {
+        format!(
+            "{:?}",
+            McpReply {
+                text: text.to_owned(),
+                error: true,
+            }
+        )
     };
-    let bytes = format!("{:?}", PLANTED.as_bytes());
-    for printed in [format!("{call:?}"), format!("{answer:?}")] {
-        assert!(!printed.contains(PLANTED), "{printed}");
-        assert!(
-            !printed.contains(bytes.trim_matches(['[', ']'])),
-            "{printed}"
-        );
-    }
+    let printed = call_debug(PLANTED, PLANTED);
+    assert!(
+        printed == call_debug(OTHER, PLANTED),
+        "private request ID affected call Debug"
+    );
+    assert!(
+        printed == call_debug(PLANTED, OTHER),
+        "private arguments affected call Debug"
+    );
+    assert!(
+        reply_debug(PLANTED) == reply_debug(OTHER),
+        "private reply affected reply Debug"
+    );
 }
 
 #[tokio::test]

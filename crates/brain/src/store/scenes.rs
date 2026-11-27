@@ -300,7 +300,7 @@ impl Store {
     }
 }
 
-/// Logs a stored scene row that didn't decode, by its id only: its body holds user content.
+/// Logs a stored scene row that didn't decode without exposing it.
 fn skipped(row: i64) {
     let error = StoreError::SceneRow(row);
     tracing::warn!(%error, "skipped while recovering scenes");

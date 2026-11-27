@@ -394,6 +394,15 @@ creates no file. Both need a shell built with the `gate-recorder` feature (see
   - `voice failed reason=<kind>` when a begun hold ends before Listening: `microphone` when its
     microphone doesn't start, otherwise the brain's failure, `not-loaded`, `busy`, `unavailable`,
     `invalid-audio`, `too-long`, `timed-out`, `choice-changed`, `decode-failed` or `no-connection`
+  - `hold admitted` when presence applies the brain's admission of a hold, and
+    `microphone running` when presence first sees that hold's microphone report a running
+    stream. Gate builds only; no gate reads them yet. Each is stamped when the UI thread handles
+    it, so the intervals are what the UI observed, not isolated costs: recognition → admitted
+    also covers the shell's own handling before the send, admitted → running covers queueing the
+    start and the UI picking up the receipt, and running → `listening on` can include receipt
+    rechecks. An admitted hold can end without `microphone running`, and a receipt can be
+    logged for a hold that was cancelled meanwhile, so split only holds that reach
+    `listening on` with both lines in order
   - `listening on` and `listening off`, as the line takes and leaves the Listening colour
   - `speech input ready=true|false`, from each speech state the brain sends
   - `input opened focused=true|false` and `input dismissed`
