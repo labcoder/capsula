@@ -191,6 +191,13 @@ impl Keys {
                 let Some((event, physical)) = self.input(raw, &mut at, foreground_layout) else {
                     return false;
                 };
+                if at.reset_first {
+                    self.forward(hwnd, Event::Reset, None, EventTime::new(at.instant));
+                }
+                #[cfg(any(test, feature = "gate-recorder"))]
+                if at.queued_press.is_some() && event == Event::Reset {
+                    crate::platform::rearm_note("rearm skipped check=reset");
+                }
                 id = physical;
                 event
             }
@@ -258,6 +265,8 @@ impl Keys {
         // A rejected gesture make can still signal a foreign edit to the screen watch.
         super::screen_watch::heard(event, id);
         if at.repeated_modifier && id.is_none() {
+            #[cfg(any(test, feature = "gate-recorder"))]
+            crate::platform::rearm_note("rearm skipped check=break");
             return;
         }
         if self.overdue(event, at.instant) {
@@ -313,6 +322,27 @@ impl Keys {
         let (device, raw) = raw?;
         let event = key_event(raw.MakeCode, raw.Flags);
         let slot = raw.MakeCode | (u16::from(u32::from(raw.Flags) & RI_KEY_E0 != 0) << 8);
+        let left = matches!(
+            event,
+            Event::Key {
+                key: Key::LeftControl | Key::LeftAlt,
+                ..
+            }
+        );
+        let layout = left.then(layout).flatten();
+        // A make that arrives with a new layout was pressed under it: only keys already down
+        // need their own break, so the reset lands before this make is applied.
+        let fresh_make = matches!(
+            event,
+            Event::Key {
+                edge: Edge::Down,
+                ..
+            }
+        ) && layout.is_some()
+            && self.layout.get().is_some_and(|old| Some(old) != layout);
+        if fresh_make {
+            physical.reset();
+        }
         let classified = physical.key(
             device,
             slot,
@@ -324,14 +354,7 @@ impl Keys {
             self.mark_coverage_boundary();
             return Some((physical.lose(), None));
         }
-        let layout_changed = if matches!(
-            event,
-            Event::Key {
-                key: Key::LeftControl | Key::LeftAlt,
-                ..
-            }
-        ) {
-            let layout = layout();
+        let layout_changed = if left {
             let previous = self.layout.replace(layout);
             if layout.is_none() {
                 self.mark_coverage_boundary();
@@ -346,9 +369,10 @@ impl Keys {
         if event == Event::Reset {
             self.mark_coverage_boundary();
         }
-        if layout_changed {
+        if layout_changed && !fresh_make {
             return Some((physical.reset(), None));
         }
+        at.reset_first = fresh_make;
         if id.is_some() && matches!(event, Event::Key { edge: Edge::Up, .. }) {
             at.held = physical.held();
         }
@@ -1261,77 +1285,119 @@ mod tests {
         use crate::input::hold::{Fence, Intent};
         use crate::platform::microphone::CollectionGate;
 
-        let keys = super::Keys::default();
-        let mut gesture = Gesture::default();
-        let mut fence = Fence::new(CollectionGate::default());
-        let start = Instant::now();
-        let (mut ms, mut queued) = (0, 1_000);
-        let mut send = |key: Option<(u16, u32)>, layout: usize| {
-            ms += if key.is_some() { 10 } else { 300 };
-            queued += 10;
-            let now = start + Duration::from_millis(ms);
-            let (event, queued_press) = match key {
-                Some((make, flags)) => {
-                    let (event, time) = raw_at(&keys, 1, make, flags, layout, queued)?;
-                    (event, time.queued_press.filter(|_| !time.repeated_modifier))
-                }
-                None => (Event::Deadline, None),
-            };
-            let delivery = fence.reduce_with_keyboard_read(
-                &mut gesture,
-                event,
-                now,
-                queued_press,
-                || Some(1),
-                || Some(now),
-            );
-            let warm = delivery
-                .intents
-                .iter()
-                .filter(|intent| matches!(intent, Some(Intent::Warm(_))))
-                .count();
-            let recognized = delivery
-                .intents
-                .iter()
-                .filter(|intent| matches!(intent, Some(Intent::Recognized { .. })))
-                .count();
-            Some((event, warm, recognized))
-        };
         let (up, e0) = (super::RI_KEY_BREAK, super::RI_KEY_E0);
-        for (layout, typed) in [(1, 0x10), (2, 0x03)] {
-            let mut events = Vec::new();
-            for key in [
-                (0x1D, 0),
-                (0x38, e0),
-                (typed, 0),
-                (typed, up),
-                (0x12, 0),
-                (0x12, up),
-                (0x38, e0 | up),
-                (0x1D, up),
-            ] {
-                if let Some((event, warm, recognized)) = send(Some(key), layout) {
-                    assert_eq!((warm, recognized), (0, 0), "AltGr in layout {layout}");
-                    events.push(event);
+        // Raw input carries no synthetic left Ctrl for AltGr; the second pass models one anyway.
+        for synthetic_control in [false, true] {
+            let keys = super::Keys::default();
+            let mut gesture = Gesture::default();
+            let mut fence = Fence::new(CollectionGate::default());
+            let start = Instant::now();
+            fence.reduce_with_keyboard_read(
+                &mut gesture,
+                Event::Reset,
+                start,
+                None,
+                || Some(1),
+                || None,
+            );
+            let (mut ms, mut queued) = (0, 1_000);
+            let mut send = |key: Option<(u16, u32)>, layout: usize| {
+                ms += if key.is_some() { 10 } else { 300 };
+                queued += 10;
+                let now = start + Duration::from_millis(ms);
+                let mut intents = Vec::new();
+                let (event, queued_press) = match key {
+                    Some((make, flags)) => {
+                        let (event, time) = raw_at(&keys, 1, make, flags, layout, queued)?;
+                        if time.reset_first {
+                            let reset = fence.reduce_with_keyboard_read(
+                                &mut gesture,
+                                Event::Reset,
+                                now,
+                                None,
+                                || Some(1),
+                                || None,
+                            );
+                            intents.extend(reset.intents);
+                        }
+                        (event, time.queued_press.filter(|_| !time.repeated_modifier))
+                    }
+                    None => (Event::Deadline, None),
+                };
+                let delivery = fence.reduce_with_keyboard_read(
+                    &mut gesture,
+                    event,
+                    now,
+                    queued_press,
+                    || Some(1),
+                    || Some(now),
+                );
+                intents.extend(delivery.intents);
+                let warm = intents
+                    .iter()
+                    .filter(|intent| matches!(intent, Some(Intent::Warm(_))))
+                    .count();
+                let recognized = intents
+                    .iter()
+                    .filter(|intent| matches!(intent, Some(Intent::Recognized { .. })))
+                    .count();
+                Some((warm, recognized))
+            };
+            for (layout, typed) in [(1, 0x10), (2, 0x03)] {
+                let control = synthetic_control.then_some((0x1D, 0));
+                let release = synthetic_control.then_some((0x1D, up));
+                let altgr = control
+                    .into_iter()
+                    .chain([
+                        (0x38, e0),
+                        (typed, 0),
+                        (typed, up),
+                        (0x12, 0),
+                        (0x12, up),
+                        (0x38, e0 | up),
+                    ])
+                    .chain(release);
+                for key in altgr {
+                    if let Some(intents) = send(Some(key), layout) {
+                        assert_eq!(intents, (0, 0), "AltGr in layout {layout}");
+                    }
                 }
+                let held: Vec<_> = [Some((0x1D, 0)), Some((0x38, 0)), None]
+                    .into_iter()
+                    .map(|key| send(key, layout))
+                    .collect();
+                assert_eq!(
+                    held,
+                    [Some((0, 0)), Some((1, 0)), Some((0, 1))],
+                    "the hold after AltGr typing in layout {layout}, synthetic Ctrl {synthetic_control}"
+                );
+                send(Some((0x38, up)), layout);
+                send(Some((0x1D, up)), layout);
             }
-            assert_eq!(
-                events.first() == Some(&Event::Reset),
-                layout == 2,
-                "only the switched layout's first modifier resets: {events:?}"
-            );
-            let held: Vec<_> = [Some((0x1D, 0)), Some((0x38, 0)), None]
-                .into_iter()
-                .map(|key| send(key, layout).map(|(_, warm, recognized)| (warm, recognized)))
-                .collect();
-            assert_eq!(
-                held,
-                [Some((0, 0)), Some((1, 0)), Some((0, 1))],
-                "the hold after AltGr typing in layout {layout}"
-            );
-            send(Some((0x38, up)), layout);
-            send(Some((0x1D, up)), layout);
         }
+    }
+
+    #[test]
+    fn a_make_that_brings_a_new_layout_resets_first_and_still_counts() {
+        let keys = super::Keys::default();
+        let layout = |layout| move || Some(super::HKL(std::ptr::without_provenance_mut(layout)));
+        let press = |make, flags, at| raw_with_layout(&keys, 1, make, flags, u64::MAX, layout(at));
+        let control = press(0x1D, 0, 1).unwrap();
+        assert!(control.1.is_some() && !control.2.reset_first);
+        let alt = press(0x38, 0, 2).unwrap();
+        assert!(matches!(
+            alt.0,
+            Event::Key {
+                key: Key::LeftAlt,
+                edge: Edge::Down
+            }
+        ));
+        assert!(alt.1.is_some() && alt.2.reset_first && !alt.2.repeated_modifier);
+        let held = press(0x1D, 0, 2).unwrap();
+        assert!(held.1.is_none() && held.2.repeated_modifier && !held.2.reset_first);
+        assert!(press(0x1D, super::RI_KEY_BREAK, 2).unwrap().1.is_some());
+        let again = press(0x1D, 0, 2).unwrap();
+        assert!(again.1.is_some() && !again.2.repeated_modifier && !again.2.reset_first);
     }
 
     #[test]

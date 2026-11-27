@@ -6,6 +6,31 @@ use crate::input::{Event, TalkHeld};
 #[cfg(windows)]
 use windows::Win32::UI::Input::KeyboardAndMouse::HKL;
 
+#[cfg(any(test, feature = "gate-recorder"))]
+thread_local! {
+    static REARM: std::cell::RefCell<Option<async_channel::Sender<&'static str>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Where a gate run's re-arm lines go from this thread.
+#[cfg(any(test, feature = "gate-recorder"))]
+pub(crate) fn listen_rearm(lines: async_channel::Sender<&'static str>) {
+    REARM.with_borrow_mut(|sender| *sender = Some(lines));
+}
+
+/// Queues one fixed re-arm line for a gate run; it names no key.
+#[cfg(any(test, feature = "gate-recorder"))]
+pub(crate) fn rearm_note(line: &'static str) {
+    REARM.with_borrow(|sender| {
+        if sender
+            .as_ref()
+            .is_some_and(|sender| sender.try_send(line).is_err())
+        {
+            tracing::debug!("can't queue a rearm diagnostic");
+        }
+    });
+}
+
 /// Which check refused to re-arm a blocked shortcut.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Refusal {
@@ -48,6 +73,9 @@ pub(crate) struct EventTime {
     pub(super) read_chord: Option<fn(Instant) -> Result<Instant, Refusal>>,
     #[cfg(windows)]
     pub(super) layout: Option<HKL>,
+    /// A layout switch arrived with this make: the shortcut resets before the make counts.
+    #[cfg(windows)]
+    pub(super) reset_first: bool,
 }
 
 impl EventTime {
@@ -62,6 +90,8 @@ impl EventTime {
             read_chord: None,
             #[cfg(windows)]
             layout: None,
+            #[cfg(windows)]
+            reset_first: false,
         }
     }
 
