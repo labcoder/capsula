@@ -211,6 +211,7 @@ impl Keys {
             }
             WM_INPUTLANGCHANGE => {
                 self.layout.set(None);
+                self.mark_coverage_boundary();
                 self.physical.borrow_mut().reset()
             }
             WM_WTSSESSION_CHANGE | DESKTOP_SWITCHED | WM_NCDESTROY => {
@@ -374,14 +375,14 @@ impl Keys {
             }),
             _ => false,
         };
-        let (event, id, repeated) = classified?;
-        if event == Event::Reset {
-            self.mark_coverage_boundary();
-        }
         if layout_changed {
             // A left make queued before the switch was seen still needs its own break.
             self.mark_coverage_boundary();
             return Some((physical.reset(), None));
+        }
+        let (event, id, repeated) = classified?;
+        if event == Event::Reset {
+            self.mark_coverage_boundary();
         }
         if id.is_some() && matches!(event, Event::Key { edge: Edge::Up, .. }) {
             at.held = physical.held();
@@ -1373,6 +1374,39 @@ mod tests {
                 send(Some((0x1D, up)), layout);
             }
         }
+    }
+
+    #[test]
+    fn a_layout_notice_or_an_ignored_release_still_dates_the_makes_before_it() {
+        use kumochi_shell_core::platform::keyboard_ticks;
+
+        let layout = |at| move || Some(super::HKL(std::ptr::without_provenance_mut(at)));
+        let up = super::RI_KEY_BREAK;
+        let keys = super::Keys::default();
+        let before = keyboard_ticks();
+        assert!(raw_with_layout(&keys, 1, 0x1D, 0, u64::MAX, layout(1)).is_some());
+        assert!(raw_with_layout(&keys, 1, 0x1D, up, u64::MAX, layout(1)).is_some());
+        keys.on_message(
+            HWND::default(),
+            super::WM_INPUTLANGCHANGE,
+            WPARAM(0),
+            LPARAM(0),
+        );
+        let queued_before = raw_with_layout(&keys, 1, 0x1D, 0, before, layout(2)).unwrap();
+        assert!(queued_before.1.is_none() && queued_before.2.repeated_modifier);
+
+        let keys = super::Keys::default();
+        assert!(raw_with_layout(&keys, 1, 0x1D, 0, u64::MAX, layout(1)).is_some());
+        assert!(raw_with_layout(&keys, 2, 0x10, 0, u64::MAX, layout(1)).is_some());
+        let before = keyboard_ticks();
+        assert_eq!(
+            raw_with_layout(&keys, 3, 0x11, up, u64::MAX, layout(2))
+                .unwrap()
+                .0,
+            Event::Reset
+        );
+        let queued_before = raw_with_layout(&keys, 2, 0x38, 0, before, layout(2)).unwrap();
+        assert!(queued_before.1.is_none() && queued_before.2.repeated_modifier);
     }
 
     #[test]

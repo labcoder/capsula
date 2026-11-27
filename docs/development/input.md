@@ -125,7 +125,8 @@ sequenceDiagram
   key record (make, repeat, or break), the proxy calls `GetForegroundWindow`,
   `GetWindowThreadProcessId`, and `GetKeyboardLayout` for the foreground thread, if it can
   identify one; a left Ctrl or left Alt record whose foreground can't be identified loses
-  coverage. The first record to see a new layout resets the gesture and sets a coverage boundary,
+  coverage. The first record to see a new layout, even a release the adapter otherwise ignores,
+  and an explicit layout-change notice both reset the gesture and set a coverage boundary,
   so a left make queued before that moment still needs its own break, while one queued after it
   can re-arm. AltGr's right Alt, or the keys that switched the layout, usually see the switch
   first, so a Ctrl + Alt hold after them re-arms; a left make that is itself the first to see it
