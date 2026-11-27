@@ -670,7 +670,18 @@ struct Attempt {
     quit_written: AtomicBool,
 }
 
-/// How Quit ended the attempt it ended, read by [`LinkHandle::quit_end`].
+/// What [`LinkHandle::quit_end`] knows of how Quit ended the link.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum QuitEnding {
+    /// The link thread hasn't returned, so its attempt's end isn't known yet: a native item read
+    /// can outlast Quit's wait, and its settlement is read once the thread returns.
+    Pending,
+    /// The link thread has returned. None when the attempt Quit ended owned no child, as for a
+    /// detached brain, or when Quit came between attempts.
+    Ended(Option<QuitEnd>),
+}
+
+/// How Quit ended the attempt it ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct QuitEnd {
     /// The attempt's link generation, or None when Quit ended it before Connected.
@@ -1190,10 +1201,14 @@ impl LinkHandle {
     /// [`QUIT_TIMEOUT`], so call it off the UI thread; if the brain never takes them, the
     /// deletes and Quit aren't sent.
     pub fn finish_quit(&self) {
+        self.finish_quit_by(Instant::now() + CONNECT_TIMEOUT + QUIT_TIMEOUT);
+    }
+
+    /// [`Self::finish_quit`], waiting for the link to end only until `deadline`.
+    pub(crate) fn finish_quit_by(&self, deadline: Instant) {
         let Some(worker) = &self.worker else {
             return;
         };
-        let deadline = Instant::now() + CONNECT_TIMEOUT + QUIT_TIMEOUT;
         let mut told = false;
         // shortcut: polls for the link's end; a joinable handle would avoid it, once Quit
         // needs more than this one wait.
@@ -1222,14 +1237,20 @@ impl LinkHandle {
     }
 
     /// How the last Quit ended the attempt it ended, with that attempt's generation once it was
-    /// Connected. Read it after [`Self::finish_quit`]. None when that attempt owned no child, as
-    /// for a detached brain, or when Quit came between attempts.
+    /// Connected. Read it after [`Self::finish_quit`]; it's Pending while the link thread runs.
     #[cfg_attr(
         not(test),
         expect(dead_code, reason = "R2-D's first-turn route reads it")
     )]
-    pub(crate) fn quit_end(&self) -> Option<QuitEnd> {
-        self.shared.quit_end.get().copied()
+    pub(crate) fn quit_end(&self) -> QuitEnding {
+        if self
+            .worker
+            .as_ref()
+            .is_some_and(|worker| !worker.done.is_closed())
+        {
+            return QuitEnding::Pending;
+        }
+        QuitEnding::Ended(self.shared.quit_end.get().copied())
     }
 
     /// The control writer's test hold: set 1 and the writer parks unwritten at its next

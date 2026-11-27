@@ -279,8 +279,10 @@ the disconnected window, so no child starts.
   `QuitOutcome` of `Clean`, `Reaped` with the exit, `Lost` or `Unsettled`. An attempt that
   fails before Connected carries its child's state out with its error, so Quit there gives no
   generation and `NotSpawned`, `SpawnPending`, or the spawned child's own settlement.
-  `LinkHandle::quit_end` reads it after `finish_quit`; it's None when Quit came between attempts
-  or the attempt owned no child, as for a detached brain.
+  `LinkHandle::quit_end` reads it after `finish_quit`: `Pending` while the link thread still
+  runs, as when the native item read outlasts Quit's wait (socket shutdown can't release it, so it
+  isn't cancelled), and `Ended` once it returns, with the settlement that followed. `Ended` holds
+  None when Quit came between attempts or the attempt owned no child, as for a detached brain.
 - **Terminal custody ends the pair.** Once the owner reaps, loses or gives up on the child, the
   attempt's hook aborts both legs, so the link stops serving a pair whose peer may still hold
   its ends open, without waiting for EOF. A watchdog beside the owner bounds only a confirmed

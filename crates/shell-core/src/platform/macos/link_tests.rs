@@ -19,7 +19,7 @@ use kumochi_session::Channel;
 use super::leg::tests::{Commit, SECRET, ends, scripted};
 use super::{NotStarted, ShellEnds};
 use crate::link::{
-    DrawingText, LinkEvent, LinkHandle, LinkState, QuitEnd, QuitOutcome, start_scripted,
+    DrawingText, LinkEvent, LinkHandle, LinkState, QuitEnd, QuitEnding, QuitOutcome, start_scripted,
 };
 use crate::platform::Connection;
 use crate::platform::child::{
@@ -306,15 +306,11 @@ fn honest(item: &mut [u8; kumochi_session::SECRET_LEN]) -> Result<(), kumochi_st
 
 type Attempt = Result<(Connection, Option<ChildOwner>), Failed>;
 
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "it stands in for the accessor's own value"
-)]
-fn ended(generation: Option<u64>, outcome: QuitOutcome) -> Option<QuitEnd> {
-    Some(QuitEnd {
+fn ended(generation: Option<u64>, outcome: QuitOutcome) -> QuitEnding {
+    QuitEnding::Ended(Some(QuitEnd {
         generation,
         outcome,
-    })
+    }))
 }
 
 /// A link whose first attempt meets `child` scripted by `then`; later attempts come from `next`.
@@ -400,7 +396,7 @@ fn a_quit_between_attempts_after_a_child_exited_0_is_not_clean() {
     until(&states, failed);
     assert!(link.begin_quit());
     link.finish_quit();
-    assert_eq!(link.quit_end(), None);
+    assert_eq!(link.quit_end(), QuitEnding::Ended(None));
 }
 
 #[test]
