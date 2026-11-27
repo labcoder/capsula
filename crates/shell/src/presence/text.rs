@@ -11,6 +11,7 @@ use gpui_kit::{
     AnyWindowHandle, AppContext as _, InteractiveElement as _, IntoElement, ParentElement as _,
     Render, Styled as _, WeakEntity, Window, div,
 };
+use kumochi_protocol::message::Action;
 use kumochi_shell_core::presence::typing::{self, Admission, Submission};
 pub(super) use kumochi_shell_core::presence::typing::{Hide, Typing};
 
@@ -20,7 +21,7 @@ use super::{
     PresenceSurface, SharedString, configure_surface, constants, diagnostics, options, platform,
     send,
 };
-use crate::chat_notice::{Notice, Source};
+use crate::chat_notice::{Notice, Route};
 use crate::runs::Target;
 use crate::settings::Settings;
 use crate::strings::{Strings, Text};
@@ -442,9 +443,9 @@ impl Presence {
                 (status, None)
             }
         };
-        let retry = recovery.is_some_and(
-            |notice| matches!(notice.source, Source::Run(run) if self.runs.retry_ready(run)),
-        );
+        let retry = recovery.is_some_and(|notice| {
+            matches!(notice.route(Action::Retry), Some(Route::RunRetry(run)) if self.runs.retry_ready(run))
+        });
         let recovery_changed = view.recovery.as_ref().map(Rc::as_ptr) != recovery.map(Rc::as_ptr);
         if recovery_changed {
             view.recovery_text = recovery.map(|notice| strings.error(&notice.error).into());

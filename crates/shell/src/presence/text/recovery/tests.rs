@@ -331,6 +331,49 @@ fn click_recovery(
 }
 
 #[gpui::test]
+fn a_drawing_that_never_came_back_offers_a_retry_button_for_the_typed_turn(
+    cx: &mut TestAppContext,
+) {
+    let (owner, data, _control) = ready(cx);
+    let window = owner.update(cx, |owner, _| owner.text.as_ref().expect("typing fixture").window);
+    draft(&owner, "draw retry", cx);
+    owner.update(cx, |owner, cx| owner.submit(cx).expect("original turn"));
+    data.try_recv().expect("original turn");
+    let state = |phase| LinkEvent::RunState {
+        generation: 1,
+        origin: Some(RunOrigin::Typed { turn: 1 }),
+        run: RunId(1),
+        thread: ThreadId(1),
+        phase,
+        error: None,
+    };
+    receive(
+        &owner,
+        vec![
+            state(Phase::Thinking),
+            LinkEvent::DrawingNotice {
+                generation: 1,
+                key: ErrorKey::DrawingNotReturned,
+                thread: ThreadId(1),
+                run: RunId(1),
+            },
+            state(Phase::Done),
+        ],
+        cx,
+    );
+    click_recovery(window, "chat-recovery-action-0", cx);
+    assert_eq!(
+        data.try_recv().expect("drawing retry"),
+        DataToBrain::TextSubmit {
+            turn: 2,
+            screen: ScreenChoice::None,
+            thread: Some(ThreadId(1)),
+            text: "draw retry".into(),
+        }
+    );
+}
+
+#[gpui::test]
 fn recovery_buttons_follow_live_drafts_and_dispatch_then_dismiss_the_named_failure(
     cx: &mut TestAppContext,
 ) {
