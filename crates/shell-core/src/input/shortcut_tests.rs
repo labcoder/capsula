@@ -400,3 +400,85 @@ fn fixture_chord_shape_and_input_diagnostics_are_redacted() {
         }
     }
 }
+
+#[test]
+fn altgr_apparent_left_ctrl_cancels_when_right_alt_arrives() {
+    let t = Instant::now();
+    let chord = ShortcutChord::new(1 | 128, None).unwrap();
+    for right_alt in [key(Key::Other, 3, Edge::Down, &[1, 2, 3]), Event::Uncertain] {
+        let mut shortcut = armed(chord, t);
+        assert_eq!(
+            shortcut.reduce(1, key(WIN, 2, Edge::Down, &[2]), t).effects,
+            NO_EFFECTS
+        );
+        assert_eq!(
+            shortcut
+                .reduce(1, key(CTRL, 1, Edge::Down, &[1, 2]), at(t, 1))
+                .effects,
+            LISTENING
+        );
+        assert_eq!(
+            shortcut.reduce(1, right_alt, at(t, 2)),
+            Reduction {
+                effects: RESTING,
+                cancelled: true,
+                repeat: None
+            }
+        );
+        assert_eq!(shortcut.deadline(), None);
+        for event in [
+            key(CTRL, 1, Edge::Up, &[2]),
+            Event::Deadline {
+                due: at(t, 301),
+                held: held(&[1, 2]),
+            },
+            key(CTRL, 1, Edge::Down, &[1, 2]),
+            key(CTRL, 1, Edge::Up, &[2]),
+        ] {
+            assert_eq!(shortcut.reduce(1, event, at(t, 301)), Reduction::default());
+        }
+    }
+}
+
+#[test]
+fn esc_cancels_a_custom_tap_or_hold_and_its_releases_cannot_finish_it() {
+    let t = Instant::now();
+    let due = at(t, 300);
+    for esc in [key(Key::Other, 9, Edge::Down, &[1, 2, 9]), Event::Uncertain] {
+        for (holding, effects) in [(false, RESTING), (true, HOLD_END)] {
+            let mut shortcut = ctrl_f6(t);
+            if holding {
+                assert_eq!(
+                    shortcut
+                        .reduce(
+                            1,
+                            Event::Deadline {
+                                due,
+                                held: held(&[1, 2])
+                            },
+                            due
+                        )
+                        .effects,
+                    [Some(Effect::HoldStarted), None, None]
+                );
+            }
+            assert_eq!(
+                shortcut.reduce(1, esc, at(t, 301)),
+                Reduction {
+                    effects,
+                    cancelled: true,
+                    repeat: None
+                }
+            );
+            for event in [
+                key(F6, 2, Edge::Up, &[1]),
+                key(F6, 2, Edge::Down, &[1, 2]),
+                key(F6, 2, Edge::Up, &[1]),
+                key(CTRL, 1, Edge::Up, &[]),
+            ] {
+                assert_eq!(shortcut.reduce(1, event, at(t, 302)), Reduction::default());
+            }
+            assert_eq!(shortcut.deadline(), None);
+        }
+    }
+}
