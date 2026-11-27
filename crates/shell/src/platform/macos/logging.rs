@@ -18,16 +18,20 @@ pub(crate) struct Admitted {
 }
 
 impl Admitted {
-    /// Starts and installs the shell logger in the lock's admitted storage.
-    pub(crate) fn start(instance: InstanceLock) -> Option<Self> {
-        let storage = instance.storage()?.clone();
-        let logging = Logging::start(Backend::new(storage, constants::SHELL_LOG))
-            .and_then(Logging::install)
-            .ok()?;
-        Some(Self {
-            _logging: logging,
-            _instance: instance,
-        })
+    /// Starts and installs the shell logger in the lock's admitted storage, or hands the lock
+    /// back when it can't, so a refusal still holds it.
+    pub(crate) fn start(instance: InstanceLock) -> Result<Self, InstanceLock> {
+        let Some(storage) = instance.storage().cloned() else {
+            return Err(instance);
+        };
+        match Logging::start(Backend::new(storage, constants::SHELL_LOG)).and_then(Logging::install)
+        {
+            Ok(logging) => Ok(Self {
+                _logging: logging,
+                _instance: instance,
+            }),
+            Err(_) => Err(instance),
+        }
     }
 }
 
@@ -80,5 +84,80 @@ fn classify(error: AcquisitionError) -> Error {
     match error {
         AcquisitionError::Open(kind) => Error::Open(kind),
         AcquisitionError::Admission(_) => Error::SecurityRefused,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::DirBuilderExt as _;
+    use std::path::Path;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use kumochi_protocol::constants;
+    use kumochi_shell_core::instance::{FirstTouchError, InstanceLock};
+
+    use super::Admitted;
+
+    const SENTINEL: &[u8] = b"planted-path-sentinel";
+
+    #[test]
+    #[ignore = "requires exact-head review and a bounded native fixture-parent commission; sets the process's global subscriber"]
+    fn a_logger_that_fails_after_its_file_opens_hands_the_held_lock_back() {
+        let parent = std::env::var_os("STORAGE_ADMISSION_FIXTURE_PARENT")
+            .expect("an explicitly commissioned fixture parent");
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("after the epoch")
+            .as_nanos();
+        let support = Path::new(&parent).join(format!(
+            "first-touch-planted-path-sentinel-{}-{nanos}",
+            std::process::id()
+        ));
+        let product = support.join(constants::DATA_DIR);
+        for folder in [&support, &product] {
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(folder)
+                .expect("exclusive fixture folder");
+        }
+        // A subscriber is already global, so installing fails after the log file opened.
+        let _ours =
+            tracing::subscriber::set_global_default(tracing::subscriber::NoSubscriber::default());
+
+        let lock = InstanceLock::try_acquire_existing(&support).expect("first touch");
+        let refused = Admitted::start(lock);
+        let held = InstanceLock::try_acquire_existing(&support).map(drop);
+        drop(refused.err().expect("the logger couldn't install"));
+        let released = InstanceLock::try_acquire_existing(&support).map(drop);
+
+        let logs = product.join("logs");
+        let mut written = Vec::new();
+        for entry in std::fs::read_dir(&logs).expect("list the fixture logs") {
+            let path = entry.expect("a fixture log").path();
+            written.push(std::fs::read(&path).expect("read a fixture log"));
+            std::fs::remove_file(&path).expect("remove a fixture log");
+        }
+        std::fs::remove_dir(&logs).expect("remove the fixture logs folder");
+        std::fs::remove_file(product.join(format!("{}.lock", constants::SHELL_LOCK)))
+            .expect("remove the fixture lock");
+        std::fs::remove_dir(&product).expect("remove the fixture product folder");
+        std::fs::remove_dir(&support).expect("remove the fixture anchor");
+
+        assert_eq!(
+            held,
+            Err(FirstTouchError::Busy),
+            "the refused logger handed back the held lock"
+        );
+        assert_eq!(
+            released,
+            Ok(()),
+            "dropping the handed-back lock releases it"
+        );
+        assert!(
+            written
+                .iter()
+                .all(|log| !log.windows(SENTINEL.len()).any(|bytes| bytes == SENTINEL)),
+            "no log names the support path"
+        );
     }
 }

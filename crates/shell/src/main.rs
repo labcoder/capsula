@@ -75,7 +75,7 @@ fn main() -> ExitCode {
             Ok(lock) => lock,
             Err(code) => return code,
         };
-        let Some(admitted) = platform::Admitted::start(instance) else {
+        let Ok(admitted) = platform::Admitted::start(instance) else {
             return ExitCode::FAILURE;
         };
         let Some(flags) = launch_with_logging(launch, || Ok(())) else {
