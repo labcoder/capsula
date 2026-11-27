@@ -672,7 +672,9 @@ more than `MAX_REQUEST_BYTES` before anything connects.
 
 **What completes.** Each event is `[DONE]` or a chunk read with the duplicate-refusing JSON reader
 the Anthropic route uses. A chunk holds exactly one choice at index 0 with a `delta` object; its
-`content`, when it's a string, is handed to the sink, counted against `MAX_TEXT_BYTES`. A round
+`content`, when it's a string, is handed to the sink, counted against `MAX_TEXT_BYTES`. A `role`
+must be `assistant`, a thinking model's `reasoning_content` is dropped unread, and any other
+delta field (a refusal, audio, a tool call) must be null. A round
 completes only on one `finish_reason: "stop"`, then `[DONE]`, then the end of the HTTP body with
 no data event after it. These fail, and a failure stays failed:
 
@@ -680,21 +682,27 @@ no data event after it. These fail, and a failure stays failed:
 |---|---|
 | `finish_reason: "length"` | `Incomplete` |
 | an `error` chunk | `Provider`, with none of its text |
-| tool calls, a function call, any other finish reason, empty or extra choices, a second `stop`, text after it, `[DONE]` before it, data after `[DONE]`, bad JSON, a cap | `Protocol` |
+| a role other than `assistant`, any other non-null delta field, any other finish reason, empty or extra choices, a second `stop`, text after it, `[DONE]` before it, data after `[DONE]`, bad JSON, a cap | `Protocol` |
 | the body ending before `[DONE]` or its own framing | `Truncated` |
 | 401 or 403 | `AuthRequired`: a local connection never authenticates |
-| another 4xx or 5xx | `Refused { status }`; its body is never read |
+| another 4xx or 5xx | `Refused { status }`; its body is never waited for or read |
 | a redirect or another non-200 head, or a body that isn't an event stream | `Protocol`; no redirect is followed |
 
-Text handed out before a failure stays handed out and never counts as a completed answer.
+Text handed out before a failure stays handed out and never counts as a completed answer. A
+refusal head is classified by the shared head parser first, so one with no length, chunking or
+`Connection: close` is `Protocol`, not its status; the recordings each server needs before
+activation decide whether that matters.
 
 **Waits and stopping.** One absolute `ROUND_DEADLINE` (120 s, a guess) starts before the grant is
-asked for and covers the grant, connecting (at most `CONNECT_DEADLINE`, 3 s), the upload, the
+asked for and covers the grant (it's checked first on every poll, and again before the budget is
+spent), connecting (at most `CONNECT_DEADLINE`, 3 s), the upload, the
 head, the body and every wait on the sink, so trickled bytes can't stretch it. Within it the
-model tuning's send, idle and backpressure waits still apply. A refused grant or a spent budget
-connects to nothing. Esc, Stop and delete drop the round's future, which closes the connection
-before the send lease settles, as on the other routes; a lease whose request may have been
-written is told so, and nothing is retried or sent again.
+model tuning's send, idle and backpressure waits still apply; a read that fails doesn't wait for
+the sink to take its text first. A refused grant or a spent budget
+connects to nothing. Esc, Stop and delete drop the round's future, which closes the connection.
+A lease still held then (the request not yet flushed) settles after the close and is told when a
+write may have gone; a flushed request's lease has already settled. Nothing is retried or sent
+again.
 
 **Privacy.** The module logs nothing. `ChatMessage`, `ChatBody` and the reader print only kinds
 and lengths in `Debug`, and `Failure` holds at most a status. The request bytes are zeroed when
@@ -710,4 +718,3 @@ recordings from each supported server, and the owner's decision on trusting a se
 configured: loopback proves where Kumochi sends, not which process listens or what it forwards.
 That engine must keep each local task bound to its endpoint, filter history before it's read,
 keep the screen pipeline and jobs off the route, and never fall back to another engine.
-

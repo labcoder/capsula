@@ -16,7 +16,7 @@ use std::ops::ControlFlow;
 use std::time::Duration;
 
 use tokio::net::TcpStream;
-use tokio::time::{Instant, timeout, timeout_at};
+use tokio::time::{Instant, sleep_until, timeout, timeout_at};
 
 use self::endpoint::LoopbackEndpoint;
 use self::reader::Reader;
@@ -163,9 +163,13 @@ async fn stream_by<L: Lease>(
     out: impl Sink,
     deadline: Duration,
 ) -> Result<(), Failure> {
-    timeout(deadline, round(endpoint, body, ask, budget, out))
-        .await
-        .map_err(|_| Failure::Deadline)?
+    let by = Instant::now() + deadline;
+    // The deadline is polled first, so nothing ready after it passes can still run.
+    tokio::select! {
+        biased;
+        () = sleep_until(by) => Err(Failure::Deadline),
+        ended = round(endpoint, body, ask, budget, out, by) => ended,
+    }
 }
 
 async fn round<L: Lease>(
@@ -174,9 +178,13 @@ async fn round<L: Lease>(
     ask: impl Future<Output = Option<L>>,
     budget: &Budget,
     mut out: impl Sink,
+    by: Instant,
 ) -> Result<(), Failure> {
     let request = body.request(endpoint);
     let lease = ask.await.ok_or(Failure::Rebuild)?;
+    if Instant::now() >= by {
+        return Err(Failure::Deadline);
+    }
     if !budget.reserve() {
         return Err(Failure::Spent);
     }
@@ -218,20 +226,29 @@ async fn round<L: Lease>(
     let mut body = Body::new(head.framing);
     let mut reader = Reader::default();
     while let Some(length) = conn.next(&mut body, tuning.idle).await? {
-        let fed = reader.feed(&conn.buf[..length], &mut |text| out.text(text));
+        let mut emitted = false;
+        let fed = reader.feed(&conn.buf[..length], &mut |text| {
+            emitted = true;
+            out.text(text);
+        });
         conn.buf.drain(..length);
-        let taken = timeout(tuning.backpressure, out.taken())
-            .await
-            .map_err(|_| Failure::Backpressure)?;
-        if taken.is_break() {
+        // The sink already holds this read's text, so a failure in it needs no wait.
+        fed?;
+        if emitted
+            && timeout(tuning.backpressure, out.taken())
+                .await
+                .map_err(|_| Failure::Backpressure)?
+                .is_break()
+        {
             return Err(Failure::Protocol);
         }
-        fed?;
     }
     reader.finish()
 }
 
 /// What a final head other than 200 means. Its body is never read: only the status counts.
+// shortcut: a refusal head with no length, chunking or `Connection: close` fails the shared head
+// parser as Protocol before its status is seen; check against each server's recording in 8b.
 fn refused(status: u16) -> Failure {
     match status {
         401 | 403 => Failure::AuthRequired,

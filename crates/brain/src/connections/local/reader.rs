@@ -53,13 +53,17 @@ impl Reader {
     ///
     /// # Errors
     /// The first failure, for this call and every later one.
-    pub(super) fn feed(&mut self, bytes: &[u8], on_text: &mut impl FnMut(&str)) -> Result<(), Failure> {
+    pub(super) fn feed(
+        &mut self,
+        bytes: &[u8],
+        on_text: &mut impl FnMut(&str),
+    ) -> Result<(), Failure> {
         if let State::Failed(failure) = self.state {
             return Err(failure);
         }
-        let fed = self
-            .framer
-            .feed(bytes, &mut |data| event(&mut self.state, &mut self.text, data, on_text));
+        let fed = self.framer.feed(bytes, &mut |data| {
+            event(&mut self.state, &mut self.text, data, on_text)
+        });
         if let Err(failure) = fed {
             self.state = State::Failed(failure);
             return Err(failure);
@@ -81,7 +85,7 @@ impl Reader {
 }
 
 /// Reads one event's data. Each chunk is JSON with no repeated member, holding one choice at
-/// index 0 whose delta carries only text.
+/// index 0 whose delta carries only the assistant's text, and any reasoning, which is dropped.
 fn event(
     state: &mut State,
     text: &mut usize,
@@ -102,16 +106,28 @@ fn event(
     if chunk.get("error").is_some() {
         return Err(Failure::Provider);
     }
-    let [choice] = chunk["choices"].as_array().map(Vec::as_slice).unwrap_or_default() else {
+    let [choice] = chunk["choices"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+    else {
         return Err(Failure::Protocol);
     };
     let delta = choice["delta"].as_object().ok_or(Failure::Protocol)?;
-    if choice["index"].as_u64() != Some(0)
-        || ["tool_calls", "function_call"]
-            .iter()
-            .any(|key| delta.get(*key).is_some_and(|value| !value.is_null()))
-    {
+    if choice["index"].as_u64() != Some(0) {
         return Err(Failure::Protocol);
+    }
+    for (key, value) in delta {
+        let allowed = match key.as_str() {
+            "content" => true,
+            "role" => value.is_null() || value.as_str() == Some("assistant"),
+            // A thinking model's reasoning, which isn't part of the answer, is dropped unread.
+            "reasoning_content" => value.is_null() || value.is_string(),
+            _ => value.is_null(),
+        };
+        if !allowed {
+            return Err(Failure::Protocol);
+        }
     }
     match delta.get("content").unwrap_or(&Value::Null) {
         Value::Null => {}

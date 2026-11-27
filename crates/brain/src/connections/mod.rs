@@ -11,7 +11,6 @@ pub mod error;
 pub(crate) mod facts;
 pub mod github;
 pub mod http_client;
-#[cfg_attr(not(test), expect(dead_code, reason = "OSC-1134's 8b routes turns to it"))]
 pub mod local;
 #[cfg(debug_assertions)]
 pub mod image_check;

@@ -1,20 +1,26 @@
 //! The transport against real sockets on 127.0.0.1:0, the only address a test may use.
 
+use std::future::poll_fn;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::Poll;
 
 use kumochi_protocol::message::ModelSlug;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio::sync::{Notify, oneshot};
 use tokio::task::JoinHandle;
 
 use super::request::{ChatMessage, Role};
 use super::*;
 
 const TEXT: &[u8] = include_bytes!("../../../fixtures/local/synthetic-llama-server-text.sse");
-const EVENTS: &str = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+const EVENTS: &str =
+    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
 /// How long a test waits to be sure something didn't happen.
 const QUIET: Duration = Duration::from_millis(200);
+/// The most a test waits for its server, so a regression fails rather than hangs.
+const BOUND: Duration = Duration::from_secs(10);
 
 fn body() -> ChatBody {
     ChatBody::new(
@@ -30,7 +36,10 @@ fn body() -> ChatBody {
 async fn listener() -> (TcpListener, LoopbackEndpoint) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let port = listener.local_addr().expect("address").port();
-    (listener, LoopbackEndpoint::for_tests(&format!("127.0.0.1:{port}")))
+    (
+        listener,
+        LoopbackEndpoint::for_tests(&format!("127.0.0.1:{port}")),
+    )
 }
 
 /// The request's head and its Content-Length bytes of body.
@@ -65,6 +74,13 @@ fn serve(listener: TcpListener, response: Vec<u8>) -> JoinHandle<Vec<u8>> {
     })
 }
 
+async fn join<T>(server: JoinHandle<T>) -> T {
+    timeout(BOUND, server)
+        .await
+        .expect("the server finished")
+        .expect("server")
+}
+
 fn events(stream: &[u8]) -> Vec<u8> {
     [EVENTS.as_bytes(), stream].concat()
 }
@@ -87,14 +103,43 @@ async fn no_connection(listener: &TcpListener) -> bool {
 }
 
 #[tokio::test]
-async fn a_text_round_sends_the_exact_request_with_no_credential_and_streams_its_text() {
+async fn a_text_round_sends_one_uncredentialed_post_and_streams_its_text() {
     let (listener, endpoint) = listener().await;
     let server = serve(listener, events(TEXT));
-    assert_eq!(run(endpoint).await, ("Hello from loopback.".to_owned(), Ok(())));
-    let request = server.await.expect("server");
-    assert_eq!(request, *body().request(endpoint));
-    let head = String::from_utf8_lossy(&request).to_ascii_lowercase();
-    assert!(!head.contains("authorization") && !head.contains("cookie"), "{head}");
+    assert_eq!(
+        run(endpoint).await,
+        ("Hello from loopback.".to_owned(), Ok(()))
+    );
+    let request = String::from_utf8(join(server).await).expect("text");
+    let (head, json) = request.split_once("\r\n\r\n").expect("a head");
+    let mut lines = head.split("\r\n");
+    assert_eq!(lines.next(), Some("POST /v1/chat/completions HTTP/1.1"));
+    let mut names: Vec<String> = lines
+        .map(|line| {
+            line.split_once(": ")
+                .expect("a field")
+                .0
+                .to_ascii_lowercase()
+        })
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "accept",
+            "accept-encoding",
+            "connection",
+            "content-length",
+            "content-type",
+            "host"
+        ]
+    );
+    assert!(head.contains(&format!("\r\nHost: {}\r\n", endpoint.authority())));
+    let json: serde_json::Value = serde_json::from_str(json).expect("json");
+    assert_eq!(
+        json,
+        serde_json::json!({"model": "local-model", "messages": [{"role": "user", "content": "Hi"}], "stream": true})
+    );
 }
 
 #[tokio::test]
@@ -107,7 +152,7 @@ async fn a_redirect_is_refused_and_never_followed() {
     );
     let server = serve(listener, location.into_bytes());
     assert_eq!(run(endpoint).await, (String::new(), Err(Failure::Protocol)));
-    server.await.expect("server");
+    join(server).await;
     assert!(no_connection(&target).await);
 }
 
@@ -117,11 +162,14 @@ async fn a_refusal_is_its_status_alone_and_its_body_is_never_waited_for() {
         ("401 Unauthorized", Failure::AuthRequired),
         ("403 Forbidden", Failure::AuthRequired),
         ("404 Not Found", Failure::Refused { status: 404 }),
-        ("500 Internal Server Error", Failure::Refused { status: 500 }),
+        (
+            "500 Internal Server Error",
+            Failure::Refused { status: 500 },
+        ),
         ("204 No Content", Failure::Protocol),
     ] {
         let (listener, endpoint) = listener().await;
-        let hold = Arc::new(tokio::sync::Notify::new());
+        let hold = Arc::new(Notify::new());
         let release = Arc::clone(&hold);
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept");
@@ -130,9 +178,13 @@ async fn a_refusal_is_its_status_alone_and_its_body_is_never_waited_for() {
             stream.write_all(head.as_bytes()).await.expect("write");
             release.notified().await;
         });
-        assert_eq!(run(endpoint).await, (String::new(), Err(failure)), "{status}");
+        assert_eq!(
+            run(endpoint).await,
+            (String::new(), Err(failure)),
+            "{status}"
+        );
         hold.notify_one();
-        server.await.expect("server");
+        join(server).await;
     }
 }
 
@@ -148,7 +200,8 @@ async fn a_body_that_ends_short_of_its_framing_is_truncated() {
         ]
         .concat(),
         [
-            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n".as_slice(),
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n"
+                .as_slice(),
             format!("{done:x}\r\n").as_bytes(),
             TEXT,
             b"\r\n",
@@ -157,25 +210,40 @@ async fn a_body_that_ends_short_of_its_framing_is_truncated() {
     ] {
         let (listener, endpoint) = listener().await;
         let server = serve(listener, response);
-        assert_eq!(run(endpoint).await, ("Hello from loopback.".to_owned(), Err(Failure::Truncated)));
-        server.await.expect("server");
+        assert_eq!(
+            run(endpoint).await,
+            ("Hello from loopback.".to_owned(), Err(Failure::Truncated))
+        );
+        join(server).await;
     }
 }
 
 #[tokio::test]
 async fn a_body_that_is_not_an_event_stream_is_refused() {
     let (listener, endpoint) = listener().await;
-    let response = [b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n".as_slice(), TEXT].concat();
+    let response = [
+        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n"
+            .as_slice(),
+        TEXT,
+    ]
+    .concat();
     let server = serve(listener, response);
     assert_eq!(run(endpoint).await, (String::new(), Err(Failure::Protocol)));
-    server.await.expect("server");
+    join(server).await;
 }
 
 #[tokio::test]
 async fn no_grant_or_no_budget_connects_to_nothing() {
     let (listener, endpoint) = listener().await;
     let budget = Budget::limited(Some(1));
-    let refused = stream(endpoint, &body(), async { None::<()> }, &budget, |_: &str| {}).await;
+    let refused = stream(
+        endpoint,
+        &body(),
+        async { None::<()> },
+        &budget,
+        |_: &str| {},
+    )
+    .await;
     assert_eq!(refused, Err(Failure::Rebuild));
     assert_eq!(budget.spent(), 0);
     let spent = Budget::limited(Some(0));
@@ -184,21 +252,66 @@ async fn no_grant_or_no_budget_connects_to_nothing() {
     assert!(no_connection(&listener).await);
 }
 
+/// A lease that refuses every write it's asked to admit.
+struct Closed;
+
+impl Lease for Closed {
+    type Write = ();
+
+    fn admit(&self) -> Option<()> {
+        None
+    }
+
+    fn wrote(&mut self) {}
+}
+
+#[tokio::test]
+async fn a_lease_that_admits_no_write_sends_no_byte() {
+    let (listener, endpoint) = listener().await;
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        let mut bytes = Vec::new();
+        stream.read_to_end(&mut bytes).await.expect("read");
+        bytes
+    });
+    let ended = stream(
+        endpoint,
+        &body(),
+        async { Some(Closed) },
+        &Budget::default(),
+        |_: &str| {},
+    )
+    .await;
+    assert_eq!(ended, Err(Failure::Rebuild));
+    assert_eq!(join(server).await, b"");
+}
+
 #[tokio::test(start_paused = true)]
-async fn a_grant_that_never_comes_ends_at_the_round_deadline_with_nothing_spent() {
-    let endpoint = LoopbackEndpoint::for_tests("127.0.0.1:9");
+async fn a_grant_ready_only_after_the_deadline_spends_nothing() {
+    let (_listener, endpoint) = listener().await;
     let budget = Budget::limited(Some(1));
-    let ended = stream(endpoint, &body(), std::future::pending::<Option<()>>(), &budget, |_: &str| {}).await;
-    assert_eq!(ended, Err(Failure::Deadline));
+    let (grant, granted) = oneshot::channel::<()>();
+    let (body, ask) = (body(), async { granted.await.ok() });
+    let mut round = std::pin::pin!(stream(endpoint, &body, ask, &budget, |_: &str| {}));
+    poll_fn(|cx| {
+        assert!(round.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    tokio::time::advance(ROUND_DEADLINE + Duration::from_secs(1)).await;
+    grant.send(()).expect("the round waits for its grant");
+    assert_eq!(round.await, Err(Failure::Deadline));
     assert_eq!(budget.spent(), 0);
 }
 
-struct Stalled;
+/// A sink that never takes its text, and says when it's been asked to.
+struct Stalled(Arc<AtomicBool>);
 
 impl Sink for Stalled {
     fn text(&mut self, _: &str) {}
 
     fn taken(&mut self) -> impl Future<Output = ControlFlow<()>> + Send {
+        self.0.store(true, Ordering::SeqCst);
         std::future::pending()
     }
 }
@@ -207,9 +320,46 @@ impl Sink for Stalled {
 async fn text_that_is_never_taken_ends_the_round_by_its_deadline() {
     let (listener, endpoint) = listener().await;
     let server = serve(listener, events(TEXT));
-    let ended = stream_by(endpoint, &body(), async { Some(()) }, &Budget::default(), Stalled, QUIET).await;
+    let waited = Arc::new(AtomicBool::new(false));
+    let sink = Stalled(Arc::clone(&waited));
+    let ended = stream_by(
+        endpoint,
+        &body(),
+        async { Some(()) },
+        &Budget::default(),
+        sink,
+        BOUND / 4,
+    )
+    .await;
     assert_eq!(ended, Err(Failure::Deadline));
-    server.await.expect("server");
+    assert!(
+        waited.load(Ordering::SeqCst),
+        "the round waited on the sink"
+    );
+    join(server).await;
+}
+
+#[tokio::test]
+async fn a_server_error_beside_untaken_text_is_still_the_server_error() {
+    let (listener, endpoint) = listener().await;
+    let stream_bytes = b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n\ndata: {\"error\":{\"message\":\"x\"}}\n\n";
+    let server = serve(listener, events(stream_bytes));
+    let waited = Arc::new(AtomicBool::new(false));
+    let sink = Stalled(Arc::clone(&waited));
+    let ended = timeout(
+        BOUND,
+        stream(
+            endpoint,
+            &body(),
+            async { Some(()) },
+            &Budget::default(),
+            sink,
+        ),
+    )
+    .await;
+    assert_eq!(ended.expect("no wait on the sink"), Err(Failure::Provider));
+    assert!(!waited.load(Ordering::SeqCst));
+    join(server).await;
 }
 
 struct Probe(Arc<AtomicBool>);
@@ -227,20 +377,31 @@ impl Lease for Probe {
 }
 
 #[tokio::test]
-async fn stopping_a_round_closes_its_connection_and_settles_its_lease_as_written() {
+async fn stopping_a_round_closes_its_connection_after_its_request_was_written() {
     let (listener, endpoint) = listener().await;
+    let (answered, heard) = oneshot::channel();
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.expect("accept");
         read_request(&mut stream).await;
         stream.write_all(EVENTS.as_bytes()).await.expect("write");
+        answered.send(()).expect("the round is waiting");
         let mut rest = [0; 16];
         stream.read(&mut rest).await.expect("read")
     });
     let wrote = Arc::new(AtomicBool::new(false));
     let probe = Probe(Arc::clone(&wrote));
     let (body, budget) = (body(), Budget::default());
-    let round = stream(endpoint, &body, async { Some(probe) }, &budget, |_: &str| {});
-    assert!(timeout(QUIET, round).await.is_err(), "the round waits for text");
-    assert_eq!(server.await.expect("server"), 0, "the server sees the close");
+    let round = stream(
+        endpoint,
+        &body,
+        async { Some(probe) },
+        &budget,
+        |_: &str| {},
+    );
+    tokio::select! {
+        ended = round => panic!("the round ended on its own: {ended:?}"),
+        heard = heard => heard.expect("the server answered"),
+    }
+    assert_eq!(join(server).await, 0, "the server sees the close");
     assert!(wrote.load(Ordering::SeqCst));
 }

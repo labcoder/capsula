@@ -124,7 +124,10 @@ mod tests {
         )
         .expect("body");
         let json = br#"{"model":"qwen3-4b","messages":[{"role":"system","content":"Be brief."},{"role":"user","content":"Hi \"there\"\r\nHost: evil"}],"stream":true}"#;
-        for (endpoint, host) in [("127.0.0.1:8080", "127.0.0.1:8080"), ("[::1]:1234", "[::1]:1234")] {
+        for (endpoint, host) in [
+            ("127.0.0.1:8080", "127.0.0.1:8080"),
+            ("[::1]:1234", "[::1]:1234"),
+        ] {
             let mut expected = format!(
                 "POST /v1/chat/completions HTTP/1.1\r\nHost: {host}\r\n\
                  Content-Type: application/json\r\nAccept: text/event-stream\r\n\
@@ -142,7 +145,10 @@ mod tests {
 
     #[test]
     fn an_empty_or_oversized_request_is_refused_before_any_connection() {
-        assert!(matches!(ChatBody::new(&model(), &[]), Err(Failure::Request)));
+        assert!(matches!(
+            ChatBody::new(&model(), &[]),
+            Err(Failure::Request)
+        ));
         let model = model();
         let empty = Wire {
             model: model.as_str(),
@@ -162,7 +168,10 @@ mod tests {
                     text: &text,
                 }],
             );
-            assert_eq!(body.map(|body| body.0.expose().len()).ok(), fits.then_some(MAX_REQUEST_BYTES));
+            assert_eq!(
+                body.map(|body| body.0.expose().len()).ok(),
+                fits.then_some(MAX_REQUEST_BYTES)
+            );
         }
     }
 
@@ -174,9 +183,19 @@ mod tests {
             text: MARK,
         };
         let body = ChatBody::new(&model(), &[message]).expect("body");
-        for printed in [format!("{message:?}"), format!("{body:?}"), format!("{:?}", [message])] {
-            assert!(!printed.contains(MARK), "{printed}");
-            assert!(!printed.as_bytes().windows(MARK.len()).any(|w| w == MARK.as_bytes()));
+        let bytes = format!("{:?}", MARK.as_bytes());
+        let list = bytes.trim_matches(['[', ']']);
+        let request = body.request(LoopbackEndpoint::for_tests("127.0.0.1:8080"));
+        for printed in [
+            format!("{message:?}"),
+            format!("{body:?}"),
+            format!("{:?}", [message]),
+            format!("{request:?}"),
+        ] {
+            assert!(
+                !printed.contains(MARK) && !printed.contains(list),
+                "{printed}"
+            );
         }
     }
 }

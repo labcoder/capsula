@@ -63,16 +63,15 @@ impl LoopbackEndpoint {
         let stream = TcpStream::connect(self.address())
             .await
             .map_err(|_| Failure::Transport)?;
-        if !self.is_peer_of(&stream) {
+        self.checked(stream)
+    }
+
+    /// `stream`, once its peer is this endpoint; otherwise it's closed unwritten.
+    fn checked(self, stream: TcpStream) -> Result<TcpStream, Failure> {
+        if stream.peer_addr().ok() != Some(self.address()) {
             return Err(Failure::Transport);
         }
         Ok(stream)
-    }
-
-    fn is_peer_of(self, stream: &TcpStream) -> bool {
-        stream
-            .peer_addr()
-            .is_ok_and(|peer| peer == self.address())
     }
 }
 
@@ -104,7 +103,10 @@ mod tests {
             ("[::1]:11434", "[::1]:11434"),
             ("[::1]:65535", "[::1]:65535"),
         ] {
-            assert_eq!(parse(text).map(LoopbackEndpoint::authority).as_deref(), Some(authority));
+            assert_eq!(
+                parse(text).map(LoopbackEndpoint::authority).as_deref(),
+                Some(authority)
+            );
         }
         for text in [
             "",
@@ -149,18 +151,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_socket_connected_elsewhere_is_not_the_endpoint() {
+    async fn a_socket_connected_elsewhere_is_closed_before_anything_is_written() {
+        use tokio::io::AsyncReadExt;
+
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind");
         let port = listener.local_addr().expect("address").port();
-        let stream = TcpStream::connect(("127.0.0.1", port))
-            .await
-            .expect("connect");
         let here = LoopbackEndpoint::for_tests(&format!("127.0.0.1:{port}"));
         let other = port.checked_add(1).unwrap_or(1);
         let elsewhere = LoopbackEndpoint::for_tests(&format!("127.0.0.1:{other}"));
-        assert!(here.is_peer_of(&stream));
-        assert!(!elsewhere.is_peer_of(&stream));
+        let stream = TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("connect");
+        assert!(here.checked(stream).is_ok());
+        let stream = TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("connect");
+        assert_eq!(elsewhere.checked(stream).err(), Some(Failure::Transport));
+        let (_, _) = listener.accept().await.expect("first");
+        let (mut refused, _) = listener.accept().await.expect("second");
+        let mut byte = [0];
+        assert_eq!(refused.read(&mut byte).await.expect("read"), 0);
     }
 }
