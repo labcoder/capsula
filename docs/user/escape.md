@@ -1,6 +1,7 @@
 # Esc
 
-Desktop annotations are taken at the first press. If their answer is still running, that
+Desktop annotations are taken at the first press, except by an Esc from another app that stops a
+spoken reply (see below). If their answer is still running, that
 press also stops it. A press that cancels held input belongs to that hold and does not clear
 an unrelated ordinary drawing. Annotation expiry after 60 seconds does not apply to contained
 drawings.
@@ -25,7 +26,7 @@ only if the box still has it.
 
 Kumochi takes Esc from other apps while held speech is active or while a drawing is on screen,
 including steps shown in the open typing box. It also takes Esc while a spoken reply is playing, and
-that press stops the speech. Cancelling held speech consumes that press without also dismissing the
+that press stops only the speech, leaving annotations in place. Cancelling held speech consumes that press without also dismissing the
 typing box.
 If Windows won't give Kumochi the Esc key when it needs it, the dock's panel opens and stays open
 with a Stop button that does the same thing. The typing panel shows Stop too while it's open.
