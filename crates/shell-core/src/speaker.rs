@@ -7,7 +7,7 @@
 pub(crate) mod conductor;
 #[expect(
     dead_code,
-    reason = "Expect has no production sender, and Pause and Resume have none outside Windows"
+    reason = "the worker's Expect, Pause and Resume commands have no production sender yet"
 )]
 pub(crate) mod queued;
 mod tail;
