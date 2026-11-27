@@ -61,8 +61,10 @@ mermaid operation for labelled groups rather than fenced Mermaid in chat.
 Nodes may omit `in` for the scene root; edges may omit it to use their endpoints'
 nearest common diagram, while rows, series and Mermaid need a table, chart and diagram.
 On the overlay a diagram, and the scene root's nodes, flow right unless dir is down; a
-Mermaid flowchart flows down unless its header says LR. Set the direction you mean, and
-describe what you drew: name a direction, arrow or position only as your records set it.
+Mermaid flowchart flows down unless its header says LR. Nodes put in a step without the
+edges that join them stack across the flow and keep their places, so put each edge in the
+same step as its nodes. Set the direction you mean, and describe what you drew: name a
+direction, arrow or position only as your records set it.
 
 A small node diagram can use two steps:
 ```json
