@@ -476,7 +476,6 @@ fn an_idle_pair_opened_off_asks_to_speak_once_spoken_replies_set_the_default(
     owner.read_with(cx, |owner, cx| {
         let settings = owner.settings.read(cx);
         assert!(settings.talk_back_pending());
-        assert!(!settings.talk_back_restart_needed());
     });
     apply(vec![ready()], cx);
     assert!(

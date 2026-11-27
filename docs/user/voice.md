@@ -23,8 +23,9 @@ The tab shows each part's installation and load status separately. **Speak answe
 a preference and never downloads a model. The first spoken replies install turns the preference
 on only if you haven't already set it. **Installed · ready** describes the voice model.
 Spoken replies also need an available audio output and **Speak answers aloud** turned on.
-After the first install, answers are spoken without a restart. If a reply or a hold is still
-under way, the tab says so, and the answers after it are spoken.
+After the first install, answers are spoken without a restart, starting after the reply or
+hold that's under way. If the tab still says spoken replies start after a restart, restart
+Kumochi.
 
 For speech input, the tab lets you keep its model warm or unload it after 15 idle minutes or
 an idle hour. The policy takes effect only after

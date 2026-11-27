@@ -729,8 +729,19 @@ fn a_deferred_default_offers_on_until_one_send_is_accepted() {
     );
     assert!(offer(&mut state, Ok(())));
     assert!(state.talk_back_pending());
-    assert!(!state.talk_back_restart_needed());
+    assert!(
+        state.talk_back_restart_needed(),
+        "the note stays until the replacement pair opens"
+    );
     assert!(!offer(&mut state, Ok(())), "one accepted offer per pair");
+    let mut kept = saved(SttUnload::Kept);
+    kept.talk_back = true;
+    assert!(state.receive(Some(7), 7, kept, Update::Answer));
+    assert!(!state.talk_back_pending());
+    assert!(
+        !offer(&mut state, Ok(())),
+        "an answer that kept this pair doesn't offer again"
+    );
     assert_eq!(
         sent.len(),
         2,

@@ -109,10 +109,7 @@ impl Presence {
                     generation,
                     gesture,
                     status,
-                } => {
-                    self.voice_status(generation, gesture, status, cx);
-                    self.hear_deferred_talk_back(cx);
-                }
+                } => self.voice_status(generation, gesture, status, cx),
                 LinkEvent::SpokenRepliesDefaulted { generation, view } => {
                     self.settings_changed(generation, view, Update::SpokenRepliesDefaulted, cx);
                 }
@@ -125,7 +122,6 @@ impl Presence {
                             cx.notify();
                         }
                     });
-                    self.hear_deferred_talk_back(cx);
                 }
                 LinkEvent::CaptureDone {
                     generation,
@@ -328,6 +324,7 @@ impl Presence {
         }
         events.attribute(events.capacity() * size_of::<LinkEvent>());
         self.follow_voice_input(cx);
+        self.hear_deferred_talk_back(cx);
         if applied {
             self.screen_changed(cx);
             self.runs_changed(cx)
@@ -505,7 +502,6 @@ impl Presence {
         {
             if let DataToShell::RunEnd { run } = &message {
                 self.voice.state.input_ended(*run);
-                self.hear_deferred_talk_back(cx);
             }
             let credit = match message {
                 DataToShell::IssueReview { request, card } => {
@@ -643,11 +639,12 @@ impl Presence {
         if let Err(error) = self.onboarding_changed(cx) {
             tracing::error!(%error, "can't show onboarding");
         }
-        self.hear_deferred_talk_back(cx);
     }
 
     /// Replaces a pair that opened Off before Spoken Replies set the default, once it's idle.
-    fn hear_deferred_talk_back(&mut self, cx: &mut Context<'_, Self>) {
+    /// Every link batch and output change offers it again, so whichever edge frees the pair last
+    /// is enough.
+    pub(super) fn hear_deferred_talk_back(&mut self, cx: &mut Context<'_, Self>) {
         let Some(session) = &self.session else {
             return;
         };

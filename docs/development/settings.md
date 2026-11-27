@@ -159,13 +159,15 @@ Hiding or removing the exact active reply's thread ends its control side, but th
 waits for the reply's data end and any speaking quiet receipt before allowing a change.
 When successful Spoken Replies setup supplies the default (On for an unset preference),
 a queued pair opened Off gets the tagged `SpokenRepliesDefaulted` snapshot instead of an
-ordinary Settings change. While the Voice tab shows the restart note, presence offers that pair
-an explicit On save whenever the pair may be idle: after the snapshot, a voice view, a hold
-status or a `RunEnd`. A busy pair refuses the offer silently and the next of those offers it
-again; once accepted, its answer reconnects the pair in the saved mode, so the next reply speaks
-without a restart. Until then the pair speaks no new replies, while the setting shows what was
-saved. Presence offers this save at most once per pair. That snapshot doesn't answer any queued
-preference write. An explicit Off still saves normally and clears the difference without re-registering.
+ordinary Settings change. While the Voice tab shows the install note, presence offers that pair
+an explicit On save after every link batch and every output-owner change, so whichever edge
+frees the pair last (a terminal `RunState`, `RunEnd`, a thread deletion, a refused turn, a hold
+status or the microphone's retirement) is followed by another offer. A busy pair refuses it
+silently. The pair takes at most one accepted offer; its answer reconnects the pair in the
+saved mode, so the next reply speaks without a restart. Until then the pair speaks no new
+replies and the note stays, while the setting shows what was saved. The save closes turn and
+hold admission until its answer, as any Talk-back save does. That snapshot doesn't answer any
+queued preference write. An explicit Off still saves normally and clears the difference without re-registering.
 The registered mode still governs hold release. An explicit On racing the default only
 reconnects if its own write succeeds; an On snapshot after a refusal reflects the default.
 If the pair drops with an Off save pending, its replacement waits for that save before
