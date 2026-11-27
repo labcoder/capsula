@@ -73,9 +73,6 @@ pub(crate) struct EventTime {
     pub(super) read_chord: Option<fn(Instant) -> Result<Instant, Refusal>>,
     #[cfg(windows)]
     pub(super) layout: Option<HKL>,
-    /// A layout switch arrived with this make: the shortcut resets before the make counts.
-    #[cfg(windows)]
-    pub(super) reset_first: bool,
 }
 
 impl EventTime {
@@ -90,8 +87,6 @@ impl EventTime {
             read_chord: None,
             #[cfg(windows)]
             layout: None,
-            #[cfg(windows)]
-            reset_first: false,
         }
     }
 

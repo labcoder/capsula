@@ -122,12 +122,14 @@ sequenceDiagram
 - **Resets.** An unreadable Raw Input record resets the gesture; a record known to be
   non-keyboard input does not. Device changes, observed keyboard-layout changes, session
   changes, desktop switches, suspend, overruns and Pause also reset it. On every decoded
-  left Ctrl or left Alt record (make, repeat, or break), the proxy calls
-  `GetForegroundWindow`, `GetWindowThreadProcessId`, and `GetKeyboardLayout` for the
-  foreground thread, if it can identify one. A left make that is the first to see a new layout
-  was pressed under it: the adapter resets the gesture first and then delivers that make, so only
-  modifiers already down need their own break, and a Ctrl + Alt hold right after a switch still
-  re-arms. A break that sees a new layout only resets. The deferred release checks sample again,
+  key record (make, repeat, or break), the proxy calls `GetForegroundWindow`,
+  `GetWindowThreadProcessId`, and `GetKeyboardLayout` for the foreground thread, if it can
+  identify one; a left Ctrl or left Alt record whose foreground can't be identified loses
+  coverage. The first record to see a new layout resets the gesture and sets a coverage boundary,
+  so a left make queued before that moment still needs its own break, while one queued after it
+  can re-arm. AltGr's right Alt, or the keys that switched the layout, usually see the switch
+  first, so a Ctrl + Alt hold after them re-arms; a left make that is itself the first to see it
+  resets and needs its own break. The deferred release checks sample again,
   so a layout change that changes back between samples can escape detection. The decoded
   tracker uses fixed storage; that doesn't bound the cost of the native queries. After coverage loss,
   overflow or registered Escape, shell-core cancels the chord. A modifier known down at reset

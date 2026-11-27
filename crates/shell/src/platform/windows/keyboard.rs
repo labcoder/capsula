@@ -191,13 +191,6 @@ impl Keys {
                 let Some((event, physical)) = self.input(raw, &mut at, foreground_layout) else {
                     return false;
                 };
-                if at.reset_first {
-                    self.forward(hwnd, Event::Reset, None, EventTime::new(at.instant));
-                }
-                #[cfg(any(test, feature = "gate-recorder"))]
-                if at.queued_press.is_some() && event == Event::Reset {
-                    crate::platform::rearm_note("rearm skipped check=reset");
-                }
                 id = physical;
                 event
             }
@@ -265,8 +258,6 @@ impl Keys {
         // A rejected gesture make can still signal a foreign edit to the screen watch.
         super::screen_watch::heard(event, id);
         if at.repeated_modifier && id.is_none() {
-            #[cfg(any(test, feature = "gate-recorder"))]
-            crate::platform::rearm_note("rearm skipped check=break");
             return;
         }
         if self.overdue(event, at.instant) {
@@ -314,6 +305,34 @@ impl Keys {
         at: &mut EventTime,
         layout: impl FnOnce() -> Option<HKL>,
     ) -> Option<(Event, Option<PhysicalKey>)> {
+        #[cfg(any(test, feature = "gate-recorder"))]
+        let left_make = matches!(&raw, Ok(Some((_, key))) if matches!(
+            key_event(key.MakeCode, key.Flags),
+            Event::Key {
+                key: Key::LeftControl | Key::LeftAlt,
+                edge: Edge::Down
+            }
+        ));
+        let decoded = self.decode(raw, at, layout);
+        #[cfg(any(test, feature = "gate-recorder"))]
+        if left_make {
+            match decoded {
+                Some((Event::Reset, _)) => crate::platform::rearm_note("rearm skipped check=reset"),
+                Some((_, None)) if at.repeated_modifier => {
+                    crate::platform::rearm_note("rearm skipped check=break");
+                }
+                _ => {}
+            }
+        }
+        decoded
+    }
+
+    fn decode(
+        &self,
+        raw: Result<Option<RawKey>, ()>,
+        at: &mut EventTime,
+        layout: impl FnOnce() -> Option<HKL>,
+    ) -> Option<(Event, Option<PhysicalKey>)> {
         let mut physical = self.physical.borrow_mut();
         let Ok(raw) = raw else {
             self.mark_coverage_boundary();
@@ -322,27 +341,6 @@ impl Keys {
         let (device, raw) = raw?;
         let event = key_event(raw.MakeCode, raw.Flags);
         let slot = raw.MakeCode | (u16::from(u32::from(raw.Flags) & RI_KEY_E0 != 0) << 8);
-        let left = matches!(
-            event,
-            Event::Key {
-                key: Key::LeftControl | Key::LeftAlt,
-                ..
-            }
-        );
-        let layout = left.then(layout).flatten();
-        // A make that arrives with a new layout was pressed under it: only keys already down
-        // need their own break, so the reset lands before this make is applied.
-        let fresh_make = matches!(
-            event,
-            Event::Key {
-                edge: Edge::Down,
-                ..
-            }
-        ) && layout.is_some()
-            && self.layout.get().is_some_and(|old| Some(old) != layout);
-        if fresh_make {
-            physical.reset();
-        }
         let classified = physical.key(
             device,
             slot,
@@ -354,25 +352,37 @@ impl Keys {
             self.mark_coverage_boundary();
             return Some((physical.lose(), None));
         }
-        let layout_changed = if left {
-            let previous = self.layout.replace(layout);
-            if layout.is_none() {
-                self.mark_coverage_boundary();
-                return Some((physical.lose(), None));
+        let layout_changed = match event {
+            Event::Key {
+                key: Key::LeftControl | Key::LeftAlt,
+                ..
+            } => {
+                let layout = layout();
+                let previous = self.layout.replace(layout);
+                if layout.is_none() {
+                    self.mark_coverage_boundary();
+                    return Some((physical.lose(), None));
+                }
+                at.layout = layout;
+                previous.is_some_and(|old| Some(old) != layout)
             }
-            at.layout = layout;
-            previous.is_some_and(|old| Some(old) != layout)
-        } else {
-            false
+            // Any key can be the first to see a switch, such as AltGr's right Alt.
+            Event::Key { .. } => layout().is_some_and(|layout| {
+                self.layout
+                    .replace(Some(layout))
+                    .is_some_and(|old| old != layout)
+            }),
+            _ => false,
         };
         let (event, id, repeated) = classified?;
         if event == Event::Reset {
             self.mark_coverage_boundary();
         }
-        if layout_changed && !fresh_make {
+        if layout_changed {
+            // A left make queued before the switch was seen still needs its own break.
+            self.mark_coverage_boundary();
             return Some((physical.reset(), None));
         }
-        at.reset_first = fresh_make;
         if id.is_some() && matches!(event, Event::Key { edge: Edge::Up, .. }) {
             at.held = physical.held();
         }
@@ -1300,26 +1310,14 @@ mod tests {
                 || Some(1),
                 || None,
             );
-            let (mut ms, mut queued) = (0, 1_000);
+            let (mut ms, mut queued) = (0, kumochi_shell_core::platform::keyboard_ticks() + 10_000);
             let mut send = |key: Option<(u16, u32)>, layout: usize| {
                 ms += if key.is_some() { 10 } else { 300 };
                 queued += 10;
                 let now = start + Duration::from_millis(ms);
-                let mut intents = Vec::new();
                 let (event, queued_press) = match key {
                     Some((make, flags)) => {
                         let (event, time) = raw_at(&keys, 1, make, flags, layout, queued)?;
-                        if time.reset_first {
-                            let reset = fence.reduce_with_keyboard_read(
-                                &mut gesture,
-                                Event::Reset,
-                                now,
-                                None,
-                                || Some(1),
-                                || None,
-                            );
-                            intents.extend(reset.intents);
-                        }
                         (event, time.queued_press.filter(|_| !time.repeated_modifier))
                     }
                     None => (Event::Deadline, None),
@@ -1332,7 +1330,7 @@ mod tests {
                     || Some(1),
                     || Some(now),
                 );
-                intents.extend(delivery.intents);
+                let intents = delivery.intents;
                 let warm = intents
                     .iter()
                     .filter(|intent| matches!(intent, Some(Intent::Warm(_))))
@@ -1378,26 +1376,42 @@ mod tests {
     }
 
     #[test]
-    fn a_make_that_brings_a_new_layout_resets_first_and_still_counts() {
+    fn a_key_that_first_sees_a_new_layout_dates_the_makes_before_it() {
+        use kumochi_shell_core::platform::keyboard_ticks;
+
+        let (lines, recorded) = async_channel::unbounded();
+        crate::platform::listen_rearm(lines);
         let keys = super::Keys::default();
-        let layout = |layout| move || Some(super::HKL(std::ptr::without_provenance_mut(layout)));
-        let press = |make, flags, at| raw_with_layout(&keys, 1, make, flags, u64::MAX, layout(at));
-        let control = press(0x1D, 0, 1).unwrap();
-        assert!(control.1.is_some() && !control.2.reset_first);
-        let alt = press(0x38, 0, 2).unwrap();
-        assert!(matches!(
-            alt.0,
-            Event::Key {
-                key: Key::LeftAlt,
-                edge: Edge::Down
-            }
-        ));
-        assert!(alt.1.is_some() && alt.2.reset_first && !alt.2.repeated_modifier);
-        let held = press(0x1D, 0, 2).unwrap();
-        assert!(held.1.is_none() && held.2.repeated_modifier && !held.2.reset_first);
-        assert!(press(0x1D, super::RI_KEY_BREAK, 2).unwrap().1.is_some());
-        let again = press(0x1D, 0, 2).unwrap();
-        assert!(again.1.is_some() && !again.2.repeated_modifier && !again.2.reset_first);
+        let up = super::RI_KEY_BREAK;
+        let press = |make, flags, queued, at| {
+            raw_with_layout(&keys, 1, make, flags, queued, move || {
+                Some(super::HKL(std::ptr::without_provenance_mut(at)))
+            })
+        };
+        let before = keyboard_ticks();
+        assert!(press(0x10, 0, u64::MAX, 1).unwrap().1.is_none());
+        assert!(press(0x10, up, u64::MAX, 1).is_some());
+        assert_eq!(press(0x10, 0, u64::MAX, 2).unwrap().0, Event::Reset);
+        assert!(press(0x10, up, u64::MAX, 2).is_some());
+        let queued_before = press(0x1D, 0, before, 2).unwrap();
+        assert!(queued_before.1.is_none() && queued_before.2.repeated_modifier);
+        assert!(press(0x1D, up, u64::MAX, 2).unwrap().1.is_some());
+        let queued_after = press(0x1D, 0, keyboard_ticks() + 10_000, 2).unwrap();
+        assert!(queued_after.1.is_some() && !queued_after.2.repeated_modifier);
+        assert_eq!(
+            press(0x38, 0, keyboard_ticks() + 10_000, 3).unwrap().0,
+            Event::Reset
+        );
+        let held = press(0x1D, 0, keyboard_ticks() + 10_000, 3).unwrap();
+        assert!(held.1.is_none() && held.2.repeated_modifier);
+        assert_eq!(
+            std::iter::from_fn(|| recorded.try_recv().ok()).collect::<Vec<_>>(),
+            [
+                "rearm skipped check=break",
+                "rearm skipped check=reset",
+                "rearm skipped check=break",
+            ]
+        );
     }
 
     #[test]
