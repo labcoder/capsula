@@ -244,8 +244,8 @@ stateDiagram-v2
   until a keyed Allow or Discard joins it at the normal synthesis window. An early decision sticks
   to its announced segment; a duplicate cannot dispatch it again. Discard still owes the ordered
   final. A closed reply waiting only on eligibility invalidates its drain timer; resolving that
-  wait immediately checks completion or resumes ordinary drain. The future shell adapter owns
-  the eligibility deadline.
+  wait immediately checks completion or resumes ordinary drain. The shell's narration
+  adapter sends the eligibility decision.
   Authoritative whole-scene removal cancels only its queued Speech assignments, settling their
   existing decisions and ordered finals without stopping other narration.
 - **Chunks.** Audio goes out as it's made, in chunks of at most 100 ms. Every queued segment ends with one empty chunk whose `last` carries the samples sent. TTS reaching `Done`, a failure, a zero-output segment and a failed scene all end a segment that way. Final chunks go out in segment order, so a dropped segment's waits for every earlier one's.
@@ -353,7 +353,8 @@ sequenceDiagram
   the dispatch even if unload already moved its TTS generation, and ends the reply's remaining
   narration with ordered empty finals. Earlier audio and the text reply continue.
   An empty final releases its own picture to authored timing without claiming it was heard.
-  This fences late output but does not interrupt a blocked native call. Conducted output stays off.
+  This fences late output but does not interrupt a blocked native call. The ordinary launcher
+  prepares `Plain`, so conducted output stays off.
 - **Draining.** When the engine finishes, the reply closes. The run ends `done` only once its
   speech is final, so it can sit finished with its speech still playing; see
   [runs.md](runs.md#draining-a-spoken-run).

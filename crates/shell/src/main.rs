@@ -28,7 +28,7 @@ mod screen_access;
 use std::process::ExitCode;
 
 use kumochi_protocol::constants;
-use kumochi_protocol::message::AudioSession;
+use kumochi_protocol::message::{AudioSession, Narration};
 use kumochi_shell::presence_platform::{Frontend, select_frontend};
 use kumochi_shell::{assets, strings, theme};
 use kumochi_shell_core::{
@@ -125,7 +125,7 @@ fn initialize_gpui(cx: &mut gpui_kit::App) {
 
 fn run_connected(flags: presence::Launch) -> ExitCode {
     let (events, link_events) = async_channel::unbounded();
-    let (link, start) = match link::prepare(events, AudioSession::Legacy) {
+    let (link, start) = match link::prepare(events, AudioSession::Legacy, Narration::Plain) {
         Ok(prepared) => prepared,
         Err(error) => {
             tracing::error!(%error, "can't prepare the link to the brain");

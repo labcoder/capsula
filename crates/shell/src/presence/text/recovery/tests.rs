@@ -2033,8 +2033,12 @@ fn queued_pre_ack_send_preserves_the_composer_and_older_recovery(cx: &mut TestAp
             .submit("older", |_| true)
             .expect("older turn saved for recovery");
         let (events, _receiver) = async_channel::unbounded();
-        let (queued, _not_started) = crate::link::prepare(events, AudioSession::QueuedRequired)
-            .expect("prepare without opening IPC");
+        let (queued, _not_started) = crate::link::prepare(
+            events,
+            AudioSession::QueuedRequired,
+            kumochi_protocol::message::Narration::Plain,
+        )
+        .expect("prepare without opening IPC");
         owner.link = queued;
         owner.voice.state.lost = Some(Text::VoiceRestartRequired);
         owner.submit(cx).expect("early intent is ignored");

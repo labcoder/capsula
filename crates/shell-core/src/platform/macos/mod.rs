@@ -108,8 +108,11 @@ mod tests {
     fn the_session_is_0_and_a_link_outside_a_bundle_has_no_brain() {
         assert_eq!(super::session_id().expect("no session to read"), 0);
         let (events, _) = async_channel::unbounded();
-        let prepared =
-            crate::link::prepare(events, kumochi_protocol::message::AudioSession::Legacy);
+        let prepared = crate::link::prepare(
+            events,
+            kumochi_protocol::message::AudioSession::Legacy,
+            kumochi_protocol::message::Narration::Plain,
+        );
         assert_eq!(
             prepared.map(drop).map_err(|error| error.kind()),
             Err(std::io::ErrorKind::NotFound)
