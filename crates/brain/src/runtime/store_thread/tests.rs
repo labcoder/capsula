@@ -475,6 +475,67 @@ pub(super) fn after_close(gate: Option<(std_mpsc::Sender<()>, std_mpsc::Receiver
 }
 
 #[tokio::test]
+async fn a_failed_title_write_does_not_log_a_title_preview() {
+    use kumochi_protocol::message::ThreadTitle;
+
+    let scratch = Scratch::new("title-failed");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    let task = ThreadId(1);
+    store
+        .begin_turn(task, Some("task"), RunId(1), "ask")
+        .expect("turn");
+    store
+        .conn_for_tests()
+        .execute_batch(
+            "CREATE TRIGGER refuse_title BEFORE UPDATE OF title ON threads
+             BEGIN SELECT RAISE(ABORT, upper(substr(new.title, 1, 3))); END;",
+        )
+        .expect("trigger");
+    let (acks, mut replies) = mpsc::unbounded_channel();
+    let captured = crate::test_support::Captured::default();
+    let _logs = captured.install();
+    let mut purger = Purger::new(Schedule::default(), &store);
+    super::serve_op(
+        &mut store,
+        &mut purger,
+        &acks,
+        &mut BTreeMap::new(),
+        StoreOp::SetTitle {
+            thread: task,
+            title: ThreadTitle::new(crate::test_support::SENTINEL).expect("synthetic title"),
+            source: crate::store::TitleSource::User,
+            job: None,
+        },
+    );
+    assert_eq!(
+        reply(&mut replies).await,
+        Input::TitleSet {
+            job: None,
+            applied: false,
+        }
+    );
+    let logs = captured.text();
+    assert!(logs.contains("a title wasn't stored"), "capture active");
+    assert!(
+        !logs.contains(crate::test_support::SENTINEL),
+        "the full title is absent in this fixture"
+    );
+    assert!(
+        !logs.to_ascii_lowercase().contains("zqx"),
+        "title prefix reached the warning"
+    );
+    let fields = logs
+        .lines()
+        .find_map(|line| line.split_once("a title wasn't stored"))
+        .expect("title warning")
+        .1;
+    assert!(
+        fields == " error=SQLite operation failed (code 1811)",
+        "only the fixed classification and SQLite code reach the warning"
+    );
+}
+
+#[tokio::test]
 async fn a_failed_model_write_is_not_rescued_by_a_later_success() {
     use kumochi_protocol::message::{ConnectionKind, Effort, ModelChoice, ModelSlug};
 

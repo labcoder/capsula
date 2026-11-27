@@ -68,7 +68,7 @@ pub use side::Side;
 pub use threads::TitleSource;
 
 /// Why the store failed.
-#[derive(Debug, thiserror::Error)]
+#[derive(thiserror::Error)]
 pub enum StoreError {
     /// No absolute data root: `%LOCALAPPDATA%` on Windows or OS Application Support on macOS.
     #[error("{}", crate::platform::DATA_ROOT_ERROR)]
@@ -85,7 +85,7 @@ pub enum StoreError {
         known: usize,
     },
     /// SQLite kept a rollback journal instead of WAL, which would keep deleted pages around.
-    #[error("SQLite refused WAL and is in {0} mode")]
+    #[error("SQLite refused WAL")]
     NoWal(String),
     /// The thread doesn't exist or is being deleted, so it takes no new work.
     #[error("no such live thread")]
@@ -131,14 +131,64 @@ pub enum StoreError {
     #[error("a purge file couldn't be written, moved or removed")]
     Purge(#[source] io::Error),
     /// SQLite failed.
-    #[error(transparent)]
-    Sql(#[from] rusqlite::Error),
-    /// A stored scene row didn't decode; it's skipped. Only its id is named, never its content.
-    #[error("stored scene row {0} doesn't decode")]
+    #[error("{}", SqlDiagnostic(.0))]
+    Sql(rusqlite::Error),
+    /// A stored scene row didn't decode and is skipped.
+    #[error("stored scene row doesn't decode")]
     SceneRow(i64),
     /// A round's native item or result doesn't decode or is over its bound.
     #[error("a stored round record doesn't decode")]
     RoundRecord,
+}
+
+impl std::fmt::Debug for StoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            Self::NoLocalAppData => "NoLocalAppData",
+            Self::Folder(_) => "Folder",
+            Self::NewerSchema { found, known } => {
+                return f
+                    .debug_struct("NewerSchema")
+                    .field("found", found)
+                    .field("known", known)
+                    .finish();
+            }
+            Self::NoWal(_) => "NoWal",
+            Self::NoThread => "NoThread",
+            Self::NoRun => "NoRun",
+            Self::StaleId => "StaleId",
+            Self::Retired => "Retired",
+            Self::Read => "Read",
+            Self::RecallBudget => "RecallBudget",
+            Self::RecoveryContext => "RecoveryContext",
+            Self::Drawing => "Drawing",
+            Self::Call => "Call",
+            Self::Issue => "Issue",
+            Self::Closed => "Closed",
+            Self::Purge(_) => "Purge",
+            Self::Sql(_) => return std::fmt::Display::fmt(self, f),
+            Self::SceneRow(_) => "SceneRow",
+            Self::RoundRecord => "RoundRecord",
+        };
+        f.write_str(name)
+    }
+}
+
+impl From<rusqlite::Error> for StoreError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Sql(error)
+    }
+}
+
+struct SqlDiagnostic<'a>(&'a rusqlite::Error);
+
+impl std::fmt::Display for SqlDiagnostic<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0.sqlite_extended_error_code() {
+            Some(code) => write!(f, "SQLite operation failed (code {code})"),
+            None => f.write_str("SQLite operation failed"),
+        }
+    }
 }
 
 /// What an event records. Media are referenced by asset id once assets arrive.
@@ -411,7 +461,7 @@ impl Store {
             match self.remove(thread) {
                 Ok(()) => recovered.finished_deletions += 1,
                 Err(error) => {
-                    tracing::error!(thread, %error, "a pending deletion failed again");
+                    tracing::error!(%error, "a pending deletion failed again");
                     recovered.failed_deletions += 1;
                 }
             }

@@ -190,11 +190,11 @@ pub(super) fn read(
             Err(Unbuilt::TooLarge { room: None })
         }
         Ok(Err(error)) => {
-            tracing::warn!(%error, run = key.run.0, "a context build failed");
+            tracing::warn!(%error, "a context build failed");
             Err(Unbuilt::Failed)
         }
         Err(error) => {
-            tracing::warn!(%error, run = key.run.0, "a context read failed");
+            tracing::warn!(%error, "a context read failed");
             Err(Unbuilt::Failed)
         }
     };
@@ -257,11 +257,11 @@ pub(super) fn read_compact(
             )
         })),
         Ok(Err(error)) => {
-            tracing::warn!(%error, run = key.run.0, "an inline compaction's read failed");
+            tracing::warn!(%error, "an inline compaction's read failed");
             Err(Unbuilt::Failed)
         }
         Err(error) => {
-            tracing::warn!(%error, run = key.run.0, "an inline compaction's read failed");
+            tracing::warn!(%error, "an inline compaction's read failed");
             Err(Unbuilt::Failed)
         }
     };
@@ -336,11 +336,11 @@ pub(super) fn read_job(
         }
         Ok(Ok(ask)) => Ok(ask),
         Ok(Err(error)) => {
-            tracing::warn!(%error, thread = key.thread.0, ?kind, "a job's read failed");
+            tracing::warn!(%error, ?kind, "a job's read failed");
             Err(Unbuilt::Failed)
         }
         Err(error) => {
-            tracing::warn!(%error, thread = key.thread.0, ?kind, "a job's read failed");
+            tracing::warn!(%error, ?kind, "a job's read failed");
             Err(Unbuilt::Failed)
         }
     };

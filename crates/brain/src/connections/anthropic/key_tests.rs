@@ -28,10 +28,14 @@ fn keys_and_outer_carriers_redact_text_and_bytes() {
     let key = AnthropicKey::parse(Secret::new(Zeroizing::new(marker.as_bytes().to_vec())))
         .expect("synthetic API key");
     let outer = Some(Ok::<_, KeyRejection>(key.clone()));
+    let bytes = format!("{:?}", b"sk-");
     for printed in [format!("{:?}", key.expose()), format!("{outer:?}")] {
-        assert!(!printed.contains(marker), "key text is redacted");
         assert!(
-            !printed.contains(&format!("{:?}", marker.as_bytes())),
+            !printed.to_ascii_lowercase().contains("sk-"),
+            "key text is redacted"
+        );
+        assert!(
+            !printed.contains(bytes.trim_matches(['[', ']'])),
             "key byte list is redacted"
         );
     }

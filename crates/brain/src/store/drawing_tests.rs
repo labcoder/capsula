@@ -726,7 +726,8 @@ fn a_bad_scene_is_left_out_while_the_other_three_recover() {
         );
         drop(guard);
         let warning = captured.text();
-        assert!(warning.contains(&format!("stored scene row {row} doesn't decode")));
+        assert!(warning.contains("stored scene row doesn't decode"));
+        assert!(!warning.contains(&format!("stored scene row {row}")));
         assert!(warning.contains("skipped while recovering drawings"));
         assert!(!warning.contains("privatecontent"));
         assert!(!warning.contains("privatealt"));
