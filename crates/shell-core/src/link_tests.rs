@@ -30,7 +30,9 @@ impl Link {
         connect_with(
             deadline,
             || self.quitting(),
-            |control| self.quit_parked(control),
+            |control| {
+                self.quit_parked(control);
+            },
             handshake,
             || Err(std::io::Error::other("fixture connector cannot launch")),
         )
@@ -4114,8 +4116,7 @@ fn queued_report_refusal_closes_the_full_control_mailbox_and_parked_data_head() 
     }
     queued_pair_closed(link.link, &link.control, &link.data);
     link.handle
-        .shared
-        .hold_control_writer
+        .control_writer_hold()
         .store(0, Ordering::Release);
     assert_queued_retry_after_local_quiet(&link.handle, &session, "queued-report-refusal-retry");
 }
@@ -4124,7 +4125,7 @@ fn fill_queued_control_mailbox(link: &Attended, session: &Session) {
     use super::CONTROL_QUEUE;
     use std::sync::atomic::Ordering;
 
-    let hold = &link.handle.shared.hold_control_writer;
+    let hold = link.handle.control_writer_hold();
     hold.store(1, Ordering::Release);
     frame::write(&mut &link.control, &ControlToShell::Ping, Pipe::Control)
         .expect("trigger the exact control writer");
@@ -4358,8 +4359,7 @@ fn refused_queued_progress(label: &str) -> (LinkHandle, Session, FixturePlayback
         "the full mailbox refused non-final retirement for the original callback"
     );
     link.handle
-        .shared
-        .hold_control_writer
+        .control_writer_hold()
         .store(0, Ordering::Release);
     (link.handle, session, playback)
 }
@@ -4457,7 +4457,7 @@ fn queued_reconnect_waits_for_the_exact_microphone_retirement() {
     let worker = thread::spawn(move || {
         start
             .link
-            .attend_until(connection, &start.events, reconnect_by)
+            .attend_until(connection, &start.events, reconnect_by, &Arc::default())
     });
     control.set_timeout(Some(Duration::from_millis(500)));
     let early = frame::read::<ControlToBrain>(&mut &control, Pipe::Control);
@@ -4534,7 +4534,7 @@ fn queued_reconnect_expires_without_retiring_an_unproved_microphone() {
     let (events, received) = async_channel::unbounded();
     let deadline = Instant::now() + Duration::from_millis(100);
     assert_eq!(
-        link.attend_until(connection, &events, deadline),
+        link.attend_until(connection, &events, deadline, &Arc::default()),
         Attendance::Retry
     );
     assert!(Instant::now() >= deadline);
@@ -4589,7 +4589,7 @@ fn queued_reconnect_rejects_a_successful_late_handshake_or_late_attendance() {
                 connection.expect("the handshake completed before the attempt deadline");
             start
                 .link
-                .attend_until(connection, &start.events, Instant::now())
+                .attend_until(connection, &start.events, Instant::now(), &Arc::default())
         });
         let output = handle.output();
         drop(reserved);
@@ -4722,7 +4722,9 @@ fn queued_reconnect_can_be_observed_after_the_timely_admission_decision() {
                 queued_fixture_connector(shell_control, None, || Ok(shell_data)),
             )
             .unwrap();
-        let result = start.link.attend_until(connection, &start.events, end);
+        let result = start
+            .link
+            .attend_until(connection, &start.events, end, &Arc::default());
         drop(start.alive);
         result
     });
@@ -4803,7 +4805,9 @@ fn queued_reconnect_quits_its_authenticated_parked_pair_after_held_deletes() {
                 queued_fixture_connector(shell_control, None, || Ok(shell_data)),
             )
             .unwrap();
-        start.link.attend_until(connection, &start.events, end)
+        start
+            .link
+            .attend_until(connection, &start.events, end, &Arc::default())
     });
     read_queued_fixture_hello(&control, &data);
     control.set_timeout(Some(Duration::from_millis(250)));
