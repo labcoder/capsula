@@ -59,6 +59,15 @@ fn probe_legs(name: &str) -> [(PipeClient, PipeClient); 2] {
     })
 }
 
+fn hello() -> Hello {
+    Hello {
+        build_id: BUILD_ID.to_owned(),
+        capability: kumochi_protocol::message::Capability::new(
+            [0xa7; kumochi_protocol::message::CAPABILITY_LEN],
+        ),
+    }
+}
+
 fn probed(
     first: PipeClient,
     audio: AudioSession,
@@ -66,7 +75,7 @@ fn probed(
 ) -> LinkError {
     handshake_or_probe(
         first,
-        Hello::session(BUILD_ID.to_owned()),
+        hello(),
         audio,
         None,
         Some(Instant::now() + HANDSHAKE_TIMEOUT),
@@ -85,10 +94,10 @@ fn a_brain_that_cannot_read_the_queued_hello_is_asked_for_its_build() {
     let [(first_server, first), (probe_server, probe)] = probe_legs("older");
     let older = thread::spawn(move || {
         let greeting = frame::read::<ControlToBrain>(&mut &first_server, Pipe::Control).unwrap();
-        assert!(matches!(greeting, Some(ControlToBrain::QueuedHello(_))));
+        assert_eq!(greeting, Some(ControlToBrain::QueuedHello(hello())));
         drop(first_server);
         let probe = frame::read::<ControlToBrain>(&mut &probe_server, Pipe::Control).unwrap();
-        assert!(matches!(probe, Some(ControlToBrain::Hello(_))));
+        assert_eq!(probe, Some(ControlToBrain::Hello(hello())));
         let reply = ControlToShell::BuildMismatch {
             brain_build: "older".to_owned(),
         };
@@ -105,10 +114,10 @@ fn a_probe_welcomed_by_a_matching_brain_stays_a_refusal() {
     let [(first_server, first), (probe_server, probe)] = probe_legs("matching");
     let brain = thread::spawn(move || {
         let greeting = frame::read::<ControlToBrain>(&mut &first_server, Pipe::Control).unwrap();
-        assert!(matches!(greeting, Some(ControlToBrain::QueuedHello(_))));
+        assert_eq!(greeting, Some(ControlToBrain::QueuedHello(hello())));
         drop(first_server);
         let probe = frame::read::<ControlToBrain>(&mut &probe_server, Pipe::Control).unwrap();
-        assert!(matches!(probe, Some(ControlToBrain::Hello(_))));
+        assert_eq!(probe, Some(ControlToBrain::Hello(hello())));
         let welcome = ControlToShell::Welcome {
             incarnation: kumochi_protocol::message::Incarnation(1),
             issue_epoch: 1,
@@ -126,7 +135,7 @@ fn an_unanswered_legacy_hello_is_not_probed() {
     let [(first_server, first), _] = probe_legs("legacy");
     let brain = thread::spawn(move || {
         let greeting = frame::read::<ControlToBrain>(&mut &first_server, Pipe::Control).unwrap();
-        assert!(matches!(greeting, Some(ControlToBrain::Hello(_))));
+        assert_eq!(greeting, Some(ControlToBrain::Hello(hello())));
     });
     let result = probed(first, AudioSession::Legacy, || {
         panic!("only a queued greeting is probed")
