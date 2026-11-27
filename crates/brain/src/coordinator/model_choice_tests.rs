@@ -302,3 +302,28 @@ fn losing_the_shell_cancels_its_reads() {
         "nobody is left to tell"
     );
 }
+
+/// A read that finished in time but is taken after its deadline, before the timer fires, still
+/// answers the one `Failed` its deadline promised.
+#[tokio::test(start_paused = true)]
+async fn an_answer_taken_after_the_deadline_is_the_promised_failure() {
+    let mut core = fresh();
+    let reads = sent(&core.handle(read(1, T)).expect("sent"));
+    tokio::time::advance(READ_TIME).await;
+    let found = ChoiceRead::Found {
+        choice: SavedChoice::Inherit,
+        revision: ChoiceRev(0),
+    };
+    assert_eq!(
+        core.handle(Input::ModelRead {
+            read: reads[0].clone(),
+            result: found,
+        }),
+        Ok(vec![refused(1, T)])
+    );
+    assert_eq!(
+        core.handle(Input::ModelReadsDue),
+        Ok(Vec::new()),
+        "answered once"
+    );
+}

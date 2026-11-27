@@ -138,35 +138,35 @@ impl Coordinator {
         if self.model_choices.slots.is_empty() {
             return;
         }
-        let unborn: Vec<ThreadId> = self
-            .ending
-            .iter()
-            .chain(self.current.as_ref())
-            .filter_map(|run| match &run.begin {
-                Some(StoreOp::BeginTurn {
-                    thread,
-                    title: Some(_),
-                    ..
-                }) => Some(*thread),
-                _ => None,
-            })
-            .collect();
-        for slot in self
-            .model_choices
-            .slots
-            .iter_mut()
-            .filter(|slot| !slot.sent)
-        {
-            if unborn.contains(&slot.thread) {
-                continue;
+        if self.model_choices.slots.iter().any(|slot| !slot.sent) {
+            let unborn: Vec<ThreadId> = self
+                .ending
+                .iter()
+                .chain(self.current.as_ref())
+                .filter_map(|run| match &run.begin {
+                    Some(StoreOp::BeginTurn {
+                        thread,
+                        title: Some(_),
+                        ..
+                    }) => Some(*thread),
+                    _ => None,
+                })
+                .collect();
+            for slot in self
+                .model_choices
+                .slots
+                .iter_mut()
+                .filter(|slot| !slot.sent && !unborn.contains(&slot.thread))
+            {
+                slot.sent = true;
+                effects.push(Effect::Store(StoreOp::ReadModel(ModelRead {
+                    session: slot.session,
+                    request: slot.request,
+                    thread: slot.thread,
+                    control: Control::new(slot.deadline.into_std())
+                        .observe(Arc::clone(&slot.cancel)),
+                })));
             }
-            slot.sent = true;
-            effects.push(Effect::Store(StoreOp::ReadModel(ModelRead {
-                session: slot.session,
-                request: slot.request,
-                thread: slot.thread,
-                control: Control::new(slot.deadline.into_std()).observe(Arc::clone(&slot.cancel)),
-            })));
         }
         let choices = &mut self.model_choices;
         let next = choices
@@ -220,12 +220,19 @@ impl Coordinator {
             return;
         };
         let slot = choices.slots.swap_remove(at);
-        if !slot.expired && slot.session == choices.session {
-            effects.push(Effect::Control(ControlToShell::ThreadModelRead {
-                request: read.request,
-                thread: read.thread,
-                result,
-            }));
+        if slot.expired || slot.session != choices.session {
+            return;
         }
+        // Finished in time but taken after the deadline: still the one Failed it was promised.
+        let result = if slot.deadline > Instant::now() {
+            result
+        } else {
+            ChoiceRead::Failed
+        };
+        effects.push(Effect::Control(ControlToShell::ThreadModelRead {
+            request: read.request,
+            thread: read.thread,
+            result,
+        }));
     }
 }
