@@ -2372,6 +2372,7 @@ fn watch(
                         .output
                         .register_queued(generation, &view, answer, out)
                     {
+                        tracing::debug!(?reason, "the queued pair's settings ended its connection");
                         *attendance = reason;
                         return;
                     }
