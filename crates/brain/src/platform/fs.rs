@@ -83,11 +83,14 @@ pub fn replace_file(_: &Path, _: &Path) -> io::Result<()> {
     Err(io::ErrorKind::Unsupported.into())
 }
 
-/// The bytes available to the caller on the filesystem containing a Unix test path.
+/// The bytes available to the caller on the filesystem containing `dir`: on macOS for model
+/// storage, on Linux for tests.
 ///
 /// # Errors
 /// Fails when the path's filesystem can't be queried or the byte count overflows.
-#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+// shortcut: statfs ignores purgeable APFS space, so it can refuse while Finder shows room; switch to
+// the important-usage capacity if users hit NoSpace.
+#[cfg(any(target_os = "macos", all(test, target_os = "linux")))]
 pub fn free_space(dir: &Path) -> io::Result<u64> {
     #[cfg(target_os = "linux")]
     let stat = rustix::fs::statvfs(dir)?;
@@ -100,7 +103,7 @@ pub fn free_space(dir: &Path) -> io::Result<u64> {
     available_bytes(stat.f_bavail, block_size)
 }
 
-#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+#[cfg(any(target_os = "macos", all(test, target_os = "linux")))]
 fn available_bytes(blocks: u64, block_size: u64) -> io::Result<u64> {
     blocks
         .checked_mul(block_size)
@@ -111,7 +114,7 @@ fn available_bytes(blocks: u64, block_size: u64) -> io::Result<u64> {
 ///
 /// # Errors
 /// Returns `Unsupported`; the caller must not assume there is room.
-#[cfg(not(all(test, any(target_os = "linux", target_os = "macos"))))]
+#[cfg(not(any(target_os = "macos", all(test, target_os = "linux"))))]
 pub fn free_space(_: &Path) -> io::Result<u64> {
     Err(io::ErrorKind::Unsupported.into())
 }

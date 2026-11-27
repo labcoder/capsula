@@ -505,9 +505,10 @@ and routes explicit Install or Retry requests to this installer.
 
 ### Model files on macOS
 
-`kumochi-storage`'s `platform/macos/models.rs` holds the macOS model-file primitives. Nothing calls
-them yet: the brain still refuses model storage on macOS. Windows guards held names by refusing to
-share them. A POSIX descriptor holds an object, not its name, so the Mac guarantee comes from
+`kumochi-storage`'s `platform/macos/models.rs` holds the macOS model-file primitives, and the
+brain's `platform/protected/models.rs` forwards the shared model calls to them below the
+Application Support anchor. The forwards aren't re-exported yet, so the brain still refuses model
+storage on macOS. Windows guards held names by refusing to share them. A POSIX descriptor holds an object, not its name, so the Mac guarantee comes from
 somewhere else:
 
 - **One private anchor.** Every path must be below the Support anchor that `admit_support`
@@ -529,6 +530,13 @@ somewhere else:
   private folders, files this user owns at 0400, 0500 or 0600, one volume, within 32 levels and
   65,536 entries. It then deletes leaves first, each once its name still gives what the first pass
   saw, and flushes the folder above. A part already gone counts as removed.
+
+Three shared calls exist for this contract. `hold_model_chain` holds the folders the model calls
+work in: `hold_chain` on Windows, and the anchored private chain on the Mac. `keep_model_final`
+keeps a final that hashed valid: it does nothing on Windows, where the held handle guards the name;
+on the Mac it re-checks the seal and the name and redoes the folder and file flush. `discard_model`
+takes the held part folder and the entry's path, so the Mac can delete by name only after checking
+identity. On the Mac a hard-linked final refuses, and `free_space` reads `statfs`.
 
 This assumes one cooperating writer. A rename by this user between two calls isn't detected,
 and neither is a replacement made between a removal's last look and its unlink.

@@ -339,8 +339,9 @@ pub(crate) use protected::{Untrusted, is_unsupported};
 #[cfg(not(windows))]
 pub(crate) use protected::{
     check_model_final, create_model_dir, create_model_write, discard_model, hold_chain,
-    hold_model_creation, mark, marker, model_file, model_final, open_model_write, owner_only_dir,
-    private_tree, publish_model, remove_model_tree, remove_tree, unmark, validate_model_path,
+    hold_model_chain, hold_model_creation, keep_model_final, mark, marker, model_file, model_final,
+    open_model_write, owner_only_dir, private_tree, publish_model, remove_model_tree, remove_tree,
+    unmark, validate_model_path,
 };
 pub use runtime_admission::{Mode, supports};
 pub(crate) use runtime_admission::{require_mode, serve_speech};
@@ -450,9 +451,9 @@ pub(crate) use windows::{
 #[cfg(windows)]
 pub(crate) use windows::{
     check_model_final, create_model_dir, create_model_write, discard_model, hold_chain,
-    hold_model_creation, mark, marker, model_file, model_final, open_model_write, owner_only_dir,
-    private_tree, profile_dir, publish_model, remove_model_tree, remove_tree, unmark,
-    validate_model_path,
+    hold_model_chain, hold_model_creation, keep_model_final, mark, marker, model_file, model_final,
+    open_model_write, owner_only_dir, private_tree, profile_dir, publish_model, remove_model_tree,
+    remove_tree, unmark, validate_model_path,
 };
 
 /// Whether this platform captures one window alone. No platform but Windows does yet.
