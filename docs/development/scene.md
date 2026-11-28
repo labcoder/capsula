@@ -2205,6 +2205,31 @@ Clear intent made while scenes are mirrored survives brain restarts because scen
 durable event ids; membership
 that still names a locally cleared scene causes its idempotent clear to be sent again.
 
+### A shell that can't draw
+
+A shell with no drawing surface still receives scene traffic, because an empty text profile
+doesn't stop the brain drawing. It answers it with `presenter::Refuser` instead of a
+`Presenter`, so every shell disposes of scenes the same way. The link's `scene_naming` is
+the same test that tags `SceneData`, and says what a frame names:
+
+| Frame | Naming | Refuser answers |
+|---|---|---|
+| `SceneBegin`, `SceneStepCommit` | draws | credit, then `SceneFailed` the first time for that scene |
+| `SceneSnapshotV1` chunk | retained | credit only |
+| zero-activated `SceneCutApplied`, `ScenesRemoved`, `ScenesReplaced` victims | retires | credit; the scenes are forgotten |
+| `SceneEnd`, a nonzero cut, any other data frame (legacy `SceneSnapshot`, `StepCommit`) | other | credit only |
+
+Each frame of the open connection is credited exactly once, so the brain's data window never
+stalls; a stale generation or a closed connection gets nothing. `ScenesV1` and legacy
+`Scenes` are control lists: they owe no credit and are ignored, so the user's stored
+drawings survive the connect. `SceneFailed` ends the brain's whole scene, so a call that
+draws onto a retained scene clears it; only Dev and Gate data can see that, because
+`kumochi-nsh` refuses the release identity. Refusals are remembered until retirement, at most
+64 (the presenter's tombstone count); a late repeat for a forgotten scene is inert, since the
+brain ignores `SceneFailed` for a scene it no longer holds. `SceneFailed` takes no outbox
+lock on either audio mode, so a UI thread can send it. Route B's real presenter replaces the
+refuser.
+
 ### Screen scenes in the shell
 
 A screen scene's marks point at the screen as it was when a hold was released, so the

@@ -31,6 +31,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::platform::microphone::CollectionGate;
 use crate::platform::{self, Connection, HANDSHAKE_TIMEOUT, PipeClient, RETRY_DELAY};
+use crate::presenter::Naming;
 #[cfg(any(test, feature = "test-support"))]
 use crate::speaker;
 
@@ -1311,7 +1312,7 @@ impl LinkHandle {
     }
 
     /// Queues a control message for `session`'s brain. False when the connection ended or the
-    /// mailbox refused. Stop, drawing clears and queued scene refusals don't take the outbox lock.
+    /// mailbox refused. Stop, drawing clears and scene refusals don't take the outbox lock.
     /// shortcut: control Debug prints physical points for assertions; use only redacted kinds if adding diagnostics here.
     pub fn send_control(&self, session: &Session, message: ControlToBrain) -> bool {
         if self.worker.is_none()
@@ -1341,8 +1342,8 @@ impl LinkHandle {
             ControlToBrain::Stop { .. }
                 | ControlToBrain::StopScenes { .. }
                 | ControlToBrain::ClearDrawing { .. }
-        ) || session.io.queued && matches!(&message, ControlToBrain::SceneFailed { .. })
-        {
+                | ControlToBrain::SceneFailed { .. }
+        ) {
             #[cfg(any(test, feature = "test-support"))]
             if let Some(recording) = &self.control_recording {
                 return recording.try_send(message).is_ok();
@@ -2841,6 +2842,26 @@ impl<R: Read> Read for Counted<R> {
     }
 }
 
+/// The scene frames whose disposal is deferred, so they arrive as [`LinkEvent::SceneData`], and
+/// what each names for a shell that draws nothing; `None` for every other frame.
+#[must_use]
+pub fn scene_naming(message: &DataToShell) -> Option<Naming<'_>> {
+    Some(match message {
+        DataToShell::SceneBegin { scene, .. } | DataToShell::SceneStepCommit { scene, .. } => {
+            Naming::Draws(*scene)
+        }
+        DataToShell::SceneSnapshotV1 { chunk } => Naming::Retained(chunk.scene),
+        DataToShell::SceneCutApplied { scene, cut, .. } if cut.activated == 0 => {
+            Naming::Retires(std::slice::from_ref(scene))
+        }
+        DataToShell::ScenesRemoved { scenes } | DataToShell::ScenesReplaced { scenes, .. } => {
+            Naming::Retires(scenes)
+        }
+        DataToShell::SceneCutApplied { .. } | DataToShell::SceneEnd { .. } => Naming::Other,
+        _ => return None,
+    })
+}
+
 /// Reads data frames and passes them on until the pipe ends. A malformed frame, or the data pipe
 /// ending, ends the whole connection, so the link reconnects instead of leaving the shell
 /// connected with nothing arriving.
@@ -2882,16 +2903,7 @@ fn read_data(
                     }
                     message => message,
                 };
-                let event = if matches!(
-                    &message,
-                    DataToShell::SceneSnapshotV1 { .. }
-                        | DataToShell::SceneBegin { .. }
-                        | DataToShell::SceneStepCommit { .. }
-                        | DataToShell::SceneCutApplied { .. }
-                        | DataToShell::SceneEnd { .. }
-                        | DataToShell::ScenesRemoved { .. }
-                        | DataToShell::ScenesReplaced { .. }
-                ) {
+                let event = if scene_naming(&message).is_some() {
                     LinkEvent::SceneData {
                         generation,
                         frame: Deferred::new(message, reader.bytes),
