@@ -284,6 +284,9 @@ flowchart TD
 
 `scene` has no GPUI and no tokio. The shell gives it text measurement through a small trait.
 
+`shell-nsh` (bin `kumochi-nsh`) is the NativeShell shell that will replace `shell`. It doesn't
+ship yet, so the diagram leaves it out: [shell-nsh.md](shell-nsh.md).
+
 `shell-core` holds what the shell knows and decides, apart from how it is drawn. No UI
 framework is in its dependency tree, dev-dependencies included, so nothing in it can name
 GPUI; the shell is the crate that does. `cargo xtask check-core` holds that in CI: the core's
