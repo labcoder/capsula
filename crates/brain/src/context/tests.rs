@@ -2709,3 +2709,47 @@ fn grouping_runs_stops_once_its_read_is_cancelled_or_out_of_time() {
         );
     }
 }
+
+/// A call still open when its run ends is a bad cut, even when a later run answers it.
+#[test]
+fn a_call_answered_only_in_a_later_run_is_a_bad_cut() {
+    let conn = Connection::open_in_memory().expect("memory");
+    let snapshot = Snapshot::begin(&conn).expect("snapshot");
+    let item = |id, run, body| Item {
+        id: EventId(id),
+        run: RunId(run),
+        body,
+    };
+    let asked = |id, run| {
+        item(
+            id,
+            run,
+            Body::Call {
+                call: call("c1"),
+                name: "read_history".to_owned(),
+                arguments: "{}".to_owned(),
+            },
+        )
+    };
+    let answered = |id, run| {
+        item(
+            id,
+            run,
+            Body::History {
+                call: call("c1"),
+                refs: Vec::new(),
+            },
+        )
+    };
+    let user = |id, run| item(id, run, Body::User("hi".to_owned()));
+    let within = vec![user(1, 1), asked(2, 1), answered(3, 1), user(4, 2)];
+    assert!(matches!(
+        super::build::runs(&snapshot, within, RunId(2)).map(|runs| runs.len()),
+        Ok(2)
+    ));
+    let across = vec![user(1, 1), asked(2, 1), answered(3, 2), user(4, 2)];
+    assert!(matches!(
+        super::build::runs(&snapshot, across, RunId(2)),
+        Err(BuildError::InvalidCut)
+    ));
+}

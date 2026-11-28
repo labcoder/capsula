@@ -349,7 +349,10 @@ fn a_stopped_run_takes_no_build_result() {
 /// A build already bound to a local route gathers no drawings, picture models or key results,
 /// which that route never sends, while the same build bound to `ChatGPT` gathers all three.
 #[test]
-#[expect(clippy::too_many_lines, reason = "one scenario: a drawn scene, pictures, a key result and the build")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario: a drawn scene, pictures, a key result and the build"
+)]
 fn a_known_local_build_gathers_nothing_a_local_route_never_sends() {
     use std::sync::Arc;
 
