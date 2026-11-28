@@ -28,14 +28,18 @@ shell takes over.
 ## Staging it beside a brain
 
 The brain admits only the shell named `SHELL_EXE` (`kumochi.exe`) beside its own executable, and
-the shell checks the brain's full path too, so `kumochi-nsh` can't link from its build folder.
-`stage-nsh` makes a folder it can run from. As the gate identity only, it builds
-`kumochi-shell-nsh` and `kumochi-brain` as one debug Gate build, creates the new folder, copies
-the shell in as `kumochi.exe` and the brain as `kumochid.exe`, and checks each copy as the gate
-tools check their images ([gate identity](gate-identity.md#starting-a-gate-tool)). It refuses a
-folder that already exists, launches nothing, removes the folder after any failure and prints the
-folder. One build selects both packages, so the brain's dependencies resolve with NativeShell's
-feature requests.
+the shell checks the brain's full path too, so `kumochi-nsh` can't pair with a brain from its
+build folder. `stage-nsh`, on Windows only, prepares a folder with those names. This shell doesn't
+link to a brain yet; the folder is for the change that adds the link.
+
+As the gate identity only, it builds `kumochi-shell-nsh` and `kumochi-brain` as one debug Gate
+build, creates the new folder, copies the shell in as `kumochi.exe` and the brain as
+`kumochid.exe`, and checks each copy as the gate tools check their images
+([gate identity](gate-identity.md#starting-a-gate-tool)). Before building, it refuses a folder
+that already exists or whose parent doesn't. It launches neither image. After a failed stage it
+removes its two copies and then the folder, and says the folder is left behind when it can't, as
+when something else was put in it. On success it prints the folder. One build selects both
+packages, so the brain's dependencies resolve with NativeShell's feature requests.
 
 ```bash
 cargo run --release --package xtask --features kumochi-protocol/gate-identity -- stage-nsh <new-folder>

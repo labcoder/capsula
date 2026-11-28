@@ -151,8 +151,8 @@ tasks:
   stage-nsh <folder>
                     as the gate identity (the command above): build a debug Gate
                     kumochi-nsh and brain and copy them into the new folder as kumochi.exe
-                    and kumochid.exe, so they admit each other; launches nothing, and a
-                    failure removes the folder
+                    and kumochid.exe, the names the two admit each other by; launches
+                    neither, and a failed stage removes its copies and the folder
   check-core        fail if kumochi-shell-core has a dependency off its list, a UI framework in
                     its tree, test support in a shipped binary or a test gate the shell's tests
                     could miss, and lint kumochi-render's stage side; CI runs it

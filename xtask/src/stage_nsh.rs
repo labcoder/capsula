@@ -2,6 +2,7 @@
 //! names the brain and the shell admit each other by. See `docs/development/shell-nsh.md`.
 
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail, ensure};
@@ -23,22 +24,38 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
     Ok(())
 }
 
-/// The one argument, refused when it is missing, followed by another or already there.
+/// The one argument, refused before the long build when it is missing, followed by another,
+/// already there or without a folder to be made in.
 fn new_folder(mut args: impl Iterator<Item = String>) -> Result<PathBuf> {
     let (Some(folder), None) = (args.next(), args.next()) else {
         bail!("stage-nsh takes one folder, which must not exist yet");
     };
     let folder = PathBuf::from(folder);
+    // Not `try_exists`: a dangling link is an entry too.
+    match fs::symlink_metadata(&folder) {
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| format!("checking {}", folder.display()));
+        }
+        Ok(_) => bail!(
+            "{} already exists; stage-nsh makes a new folder",
+            folder.display()
+        ),
+    }
+    let parent = folder
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty());
     ensure!(
-        !folder.try_exists()?,
-        "{} already exists; stage-nsh makes a new folder",
+        parent.unwrap_or(Path::new(".")).is_dir(),
+        "{} has no folder to be made in",
         folder.display()
     );
     Ok(folder)
 }
 
 /// Creates `folder` and copies the built shell and brain in `images` into it as [`SHELL_EXE`]
-/// and [`BRAIN_EXE`], each copy checked for its role. A failure after the folder exists removes it.
+/// and [`BRAIN_EXE`], each copy checked for its role. A failure after the folder exists removes
+/// what this made of it.
 fn stage(images: &Path, folder: &Path) -> Result<()> {
     fs::create_dir(folder).with_context(|| format!("creating {}", folder.display()))?;
     let staged = [
@@ -52,10 +69,23 @@ fn stage(images: &Path, folder: &Path) -> Result<()> {
         hermetic::require_compatible(&copy, role)
     });
     staged.or_else(|error| {
-        fs::remove_dir_all(folder)
+        unstage(folder)
             .with_context(|| format!("{error:#}, and {} is left behind", folder.display()))?;
         Err(error)
     })
+}
+
+/// Removes what [`stage`] made and nothing else: its two copies, then the folder if that left it
+/// empty. Anything else in the folder by then isn't this task's to delete, so it stays and the
+/// removal fails.
+fn unstage(folder: &Path) -> std::io::Result<()> {
+    for name in [SHELL_EXE, BRAIN_EXE] {
+        match fs::remove_file(folder.join(name)) {
+            Err(error) if error.kind() != ErrorKind::NotFound => return Err(error),
+            _ => {}
+        }
+    }
+    fs::remove_dir(folder)
 }
 
 #[cfg(test)]
@@ -158,6 +188,26 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_stage_removes_its_copies_and_leaves_what_it_didnt_make() {
+        let root = scratch::dir("stage-nsh-unstage");
+        let folder = root.join("staged");
+        fs::create_dir(&folder).expect("the staged folder");
+        fs::write(folder.join(SHELL_EXE), "a copy").expect("copy");
+        fs::write(folder.join("theirs"), "someone else's file").expect("stranger");
+        let error = unstage(&folder).expect_err("the folder isn't empty");
+        assert_eq!(error.kind(), ErrorKind::DirectoryNotEmpty);
+        let names: Vec<_> = fs::read_dir(&folder)
+            .expect("the folder stays")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        assert_eq!(names, ["theirs"]);
+        assert_eq!(
+            fs::read(folder.join("theirs")).expect("stranger"),
+            b"someone else's file"
+        );
+    }
+
+    #[test]
     fn the_folder_is_one_argument_that_does_not_exist_yet() {
         let root = scratch::dir("stage-nsh-args");
         let new = root.join("new").display().to_string();
@@ -175,6 +225,12 @@ mod tests {
         assert_eq!(
             error.to_string(),
             format!("{taken} already exists; stage-nsh makes a new folder")
+        );
+        let orphan = root.join("missing").join("new").display().to_string();
+        let error = new_folder([orphan.clone()].into_iter()).expect_err("no parent folder");
+        assert_eq!(
+            error.to_string(),
+            format!("{orphan} has no folder to be made in")
         );
     }
 }

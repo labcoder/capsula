@@ -27,7 +27,7 @@ pub const SHELL_EXE: &str = if cfg!(windows) {
 };
 
 /// The `NativeShell` shell's Windows executable, which `cargo xtask stage-nsh` copies to
-/// [`SHELL_EXE`] beside a brain. `crates/shell-nsh`'s `[[bin]]` name must match.
+/// [`SHELL_EXE`] beside a brain. A test in `crates/shell-nsh` holds its `[[bin]]` name to this.
 pub const NSH_SHELL_EXE: &str = "kumochi-nsh.exe";
 
 /// The brain's executable stem, as a literal so [`BRAIN_HELPER`] can be built from it.
