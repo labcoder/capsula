@@ -288,9 +288,11 @@ flowchart TD
 ship yet, so the diagram leaves it out: [shell-nsh.md](shell-nsh.md).
 
 `render` (`kumochi-render`) is the drawing renderer that shell will host: it builds a view's
-mesh once and writes each frame as records. Nothing ships it yet either: [render.md](render.md).
-`cargo xtask check-core` lists its dependencies and keeps UI frameworks and GPU crates out of
-its tree, the way it holds `shell-core`. It also lints the renderer's stage side for paths to
+mesh once, writes each frame as records and uploads meshes with wgpu on Direct3D 12.
+Nothing ships it yet either: [render.md](render.md). `cargo xtask check-core` lists its
+dependencies and keeps UI frameworks out of its tree, the way it holds `shell-core`; its only
+GPU crates are wgpu's own with the features it lists, and `shell-core`'s tree has none. It also
+lints the renderer's stage side for paths to
 the scene, the presenter or the owner side; it reads spellings, so it catches a slip and
 proves nothing.
 

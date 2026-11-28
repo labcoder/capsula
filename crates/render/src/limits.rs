@@ -8,7 +8,7 @@ use kumochi_scene::limits::{
 };
 use lyon::tessellation::{FillOptions, LineCap, LineJoin, StrokeOptions};
 
-use crate::stage::{BuildInput, FrameBuf, Mesh};
+use crate::stage::{BuildInput, Built, FrameBuf, Mesh};
 
 /// Pictures in one frame, live and frozen together: main's combined limit.
 pub const PICTURES: usize = MAX_VISIBLE_SCENES;
@@ -17,6 +17,9 @@ pub const PICTURES: usize = MAX_VISIBLE_SCENES;
 pub const RECORDS: usize = 2 * MAX_GLOBAL_LIVE_OBJECTS;
 /// Frame buffers handed back and forth; with all of them out, the owner skips a sample.
 pub const FRAME_BUFFERS: usize = 3;
+/// Geometries uploaded at once: one per picture of a frame, and one more uploading in place of
+/// a picture's while that one still draws. Each slot's range tables hold a geometry at the caps.
+pub const UPLOADED: usize = PICTURES + 1;
 
 /// Objects in one batch: the global object cap holds across every listed picture.
 pub const INPUT_OBJECTS: usize = MAX_GLOBAL_LIVE_OBJECTS;
@@ -89,9 +92,12 @@ pub const STROKE_CAP: LineCap = StrokeOptions::DEFAULT_LINE_CAP;
 pub const MITER_LIMIT: f32 = StrokeOptions::DEFAULT_MITER_LIMIT;
 
 /// Everything the renderer holds on the CPU outside the presenter's per-scene charge: its
-/// reserved buffers and lyon's allowance.
-pub const FIXED_BYTES: usize =
-    FRAME_BUFFERS * FrameBuf::BYTES + BuildInput::BYTES + Mesh::BYTES + TESSELLATOR_BYTES;
+/// reserved buffers, the uploaded geometries' range tables and lyon's allowance.
+pub const FIXED_BYTES: usize = FRAME_BUFFERS * FrameBuf::BYTES
+    + BuildInput::BYTES
+    + Mesh::BYTES
+    + UPLOADED * Built::TABLE_BYTES
+    + TESSELLATOR_BYTES;
 /// The ceiling on [`FIXED_BYTES`] [proposal]: label raster scratch must fit beside it.
 pub const FIXED_CEILING_BYTES: usize = 16 * 1024 * 1024;
 const _: () = assert!(

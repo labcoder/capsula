@@ -82,6 +82,8 @@ pub struct Mesh {
     objects: Vec<u32>,
     /// The geometry being built and where its next batch starts; none once its last is in.
     building: Option<(GeometryId, Option<Cursor>)>,
+    /// The geometry its last finished build holds.
+    built: Option<GeometryId>,
     fill: FillTessellator,
     stroke: StrokeTessellator,
 }
@@ -104,6 +106,7 @@ impl Mesh {
             starts: Vec::with_capacity(INPUT_PRIMS + 1),
             objects: Vec::with_capacity(INPUT_OBJECTS),
             building: None,
+            built: None,
             fill: FillTessellator::new(),
             stroke: StrokeTessellator::new(),
         }
@@ -117,6 +120,7 @@ impl Mesh {
         self.starts.clear();
         self.objects.clear();
         self.building = Some((id, Some(Cursor::START)));
+        self.built = None;
     }
 
     /// Builds the part of the geometry being built that `input` holds. The batch isn't wiped
@@ -160,7 +164,7 @@ impl Mesh {
     /// [`Failure::Order`] when no build is open or a batch is still to come; the mesh is then
     /// as it was.
     pub fn finish(&mut self) -> Result<(), Failure> {
-        let Some((_, None)) = self.building else {
+        let Some((id, None)) = self.building else {
             return Err(Failure::Order);
         };
         push(
@@ -169,7 +173,14 @@ impl Mesh {
             index(self.indices.len())?,
         )?;
         self.building = None;
+        self.built = Some(id);
         Ok(())
+    }
+
+    /// The geometry its last finished build holds; none before one finishes and from the next
+    /// `begin` on.
+    pub fn geometry(&self) -> Option<GeometryId> {
+        self.built
     }
 
     /// Every vertex, in primitive space.
@@ -189,18 +200,12 @@ impl Mesh {
 
     /// The indices a record draws, if it names primitives of one object of this mesh.
     pub fn range(&self, record: &Record) -> Option<Range<u32>> {
-        let object = usize::try_from(record.object).ok()?;
-        let first = self.objects.get(object)?.checked_add(record.first)?;
-        let end = first.checked_add(record.count)?;
-        let next = match self.objects.get(object + 1) {
-            Some(next) => *next,
-            None => index(self.starts.len().checked_sub(1)?).ok()?,
-        };
-        if end > next {
-            return None;
-        }
-        let start = *self.starts.get(usize::try_from(first).ok()?)?;
-        Some(start..*self.starts.get(usize::try_from(end).ok()?)?)
+        range(&self.starts, &self.objects, record)
+    }
+
+    /// Each primitive's first index then the end, and each object's first primitive.
+    pub(super) fn tables(&self) -> [&[u32]; 2] {
+        [&self.starts, &self.objects]
     }
 
     fn part(&mut self, input: &BuildInput, part: Part<'_>) -> Result<(), Failure> {
@@ -428,6 +433,23 @@ impl fmt::Debug for Mesh {
             .field("objects", &self.objects.len())
             .finish_non_exhaustive()
     }
+}
+
+/// The indices `record` draws from a geometry's range tables, if it names primitives of one
+/// of its objects.
+pub(super) fn range(starts: &[u32], objects: &[u32], record: &Record) -> Option<Range<u32>> {
+    let object = usize::try_from(record.object).ok()?;
+    let first = objects.get(object)?.checked_add(record.first)?;
+    let end = first.checked_add(record.count)?;
+    let next = match objects.get(object + 1) {
+        Some(next) => *next,
+        None => index(starts.len().checked_sub(1)?).ok()?,
+    };
+    if end > next {
+        return None;
+    }
+    let start = *starts.get(usize::try_from(first).ok()?)?;
+    Some(start..*starts.get(usize::try_from(end).ok()?)?)
 }
 
 fn finished(result: &TessellationResult, sink: &Sink<'_, '_>) -> Result<(), Failure> {
