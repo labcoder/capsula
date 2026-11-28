@@ -185,7 +185,7 @@ fn append_drawings(
 
 /// Groups ordered items into whole runs, the current one last. Each call is followed by its
 /// result within its run, and no item repeats.
-fn runs(items: Vec<Item>, current: RunId) -> Result<Vec<Vec<Item>>, BuildError> {
+pub(super) fn runs(items: Vec<Item>, current: RunId) -> Result<Vec<Vec<Item>>, BuildError> {
     if items.windows(2).any(|pair| pair[0].id == pair[1].id) {
         return Err(BuildError::InvalidCut);
     }
@@ -568,7 +568,7 @@ fn quote(
 }
 
 /// The instructions for `run`: its names and role, read once when the run started.
-fn instructions(run: &RunSnapshot) -> String {
+pub(super) fn instructions(run: &RunSnapshot) -> String {
     let role = match run.origin {
         Origin::Kumo => KUMO_ROLE,
         Origin::Task(_) => TASK_ROLE,

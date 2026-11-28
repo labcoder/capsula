@@ -121,6 +121,18 @@ enum Refusal {
     Unreadable,
 }
 
+/// Whether the saved default names the local server.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DefaultIntent {
+    /// It names another connection or none, or there's no settings folder.
+    #[default]
+    Other,
+    /// It names the local server, however malformed the rest of it is.
+    Local,
+    /// The file exists but couldn't be read, so it may name the local server.
+    Unknown,
+}
+
 /// A change staged for writing. [`Pending::write`] blocks, so it runs off the core loop.
 pub(crate) struct Pending {
     path: PathBuf,
@@ -294,15 +306,22 @@ impl Config {
             .map_or(StoredChoice::Invalid, default_choice_of)
     }
 
-    /// Whether the saved default names the local server, however malformed the rest of it is.
-    pub(crate) fn local_intent(&self) -> bool {
-        self.table.as_ref().is_ok_and(|table| {
-            table
-                .get(DEFAULT_MODEL)
-                .and_then(|value| value.get("connection"))
-                .and_then(Value::as_str)
-                == Some("LocalChat")
-        })
+    /// What the saved default says about the local server. A file that couldn't be read may
+    /// name it, so it's [`DefaultIntent::Unknown`], never a guess.
+    pub(crate) fn local_intent(&self) -> DefaultIntent {
+        match &self.table {
+            Err(Refusal::Unreadable) => DefaultIntent::Unknown,
+            Ok(table)
+                if table
+                    .get(DEFAULT_MODEL)
+                    .and_then(|value| value.get("connection"))
+                    .and_then(Value::as_str)
+                    == Some("LocalChat") =>
+            {
+                DefaultIntent::Local
+            }
+            Err(Refusal::NoHome) | Ok(_) => DefaultIntent::Other,
+        }
     }
 
     /// `[claude_code] enabled`: on unless it's `false`. Anything else there, or a file that

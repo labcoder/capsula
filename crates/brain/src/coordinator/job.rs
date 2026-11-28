@@ -219,6 +219,7 @@ impl Coordinator {
         if self.current.is_some()
             || self.transport_failed
             || (route.kind == ConnectionKind::ChatGpt && self.account.is_none())
+            || route.kind == ConnectionKind::LocalChat
             || self.refusal(route).is_some()
         {
             return;

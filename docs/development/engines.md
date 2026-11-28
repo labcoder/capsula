@@ -519,6 +519,8 @@ the turn's. Known limits:
 | `NoTurn` | The run's turn isn't stored. |
 | `InvalidCut` | A tool call is apart from its result, or an item repeats. |
 | `TooLarge { room }` | The parts that can't be dropped are over the bound; `room` is what's left for a summary when the current run fits without one. |
+| `Unbound` | A local build's thread isn't a task whose own saved route is local. |
+| `LocalContent` | A local task holds more than plain turns and answers. |
 | `Store` | The read failed. |
 
 No error and no `Debug` output carries message text or names.
@@ -640,8 +642,8 @@ required. The fixture can't fall back to the account engine.
 `connections/local/` sends one streamed text request to a model server on this machine that
 speaks OpenAI's Chat Completions (llama.cpp's `llama-server`, Ollama and LM Studio all do). It's
 dormant: `LOCAL_CHAT` in `protocol::constants` is `false`, and `LoopbackEndpoint::configured`,
-the only way text becomes an endpoint, refuses every input while it is. No connection kind,
-setting, saved choice, engine or job reaches it yet.
+the only way text becomes an endpoint, refuses every input while it is. Only the
+[local engine](#the-local-engine) uses it, and nothing builds that engine yet.
 
 ```mermaid
 flowchart LR
@@ -717,9 +719,66 @@ they drop; response bytes pass through the shared `ModelConn` and framer buffers
 `llama-server` documents; it's not a recording and claims no server compatibility. Transport tests
 use real sockets on `127.0.0.1:0` only.
 
-**Before it can be switched on.** A connection kind with its facts row, an engine that maps text to
-`TurnEvent`s and `Failure` to fixed local errors, the model list check, a settings path, sanitized
-recordings from each supported server, and the owner's decision on trusting a server the user
-configured: loopback proves where Kumochi sends, not which process listens or what it forwards.
-That engine must keep each local task bound to its endpoint, filter history before it's read,
-keep the screen pipeline and jobs off the route, and never fall back to another engine.
+## The local engine
+
+`engines/local.rs` answers a local task's runs over the transport above. It's tests-only while
+`LOCAL_CHAT` is off: the dispatcher still answers the local kind with a refusal, and the store
+refuses every local turn before keeping it (see [store](store.md)), so no run reaches it.
+
+```mermaid
+flowchart LR
+    P["page reader: choice is local"] --> L["build_local: the task's plain text"]
+    L --> A["admission: no screen, no inline summary"]
+    A --> G["LocalEngine: pinned model, encoder"]
+    G --> S["stream"]
+    S --> D["pending text, then the outcome"]
+```
+
+**What it sends.** Right after a build resolves the run's choice, a local one takes
+`context::local::build_local` instead of the usual build, so it reads no local time, picture or
+summary; the drawing digests and key results admission gathered for the job are dropped unsent,
+and activation stops gathering them for a local route. The read runs under the reader's scope,
+so a cancel or its deadline ends it. It accepts only a live task (`Origin::Task` of that thread) whose own saved
+route is `local_chat` (`Unbound` otherwise; one that only inherits a local default isn't
+bound). It reads the task's stored `user` and `assistant_text` events, and any of them with
+stored metadata, a call, a result or a native item fails the build as `LocalContent`. The
+request is the app's instructions, those turns and answers, and no tools, keeping the newest
+whole runs that fit; nothing summarizes a local task, so a current run alone over the bound
+fails its budget. Its only source is the task.
+
+**What it refuses.** Admission fails a local run that carries a screen (`ScreenUnavailable`)
+rather than sending it without one, and fails an oversized one rather than compacting. No title
+or summary job starts on a local route, and the store-side job and compaction reads refuse one
+too. The engine sends only when the request's choice is the local kind and the engine's own
+model; it never changes endpoint or model. Its encoder takes the instructions as `system` and
+each user or assistant message as itself; a `Developer` message, any other item or a tool offer
+fails the round as `Request` before the gate is asked.
+
+**How it ends.** Text goes to the round's channel only once there's room for it, so the pump
+sets the pace. Each read's wait ends at the earlier of its own cutoff and the round's deadline,
+and the sink checks that cutoff before it hands text on, so room that opens as it passes takes
+nothing; text parsed after the deadline is cut with it. Text a failing read left, then the outcome, go out within one backpressure wait,
+checked against its deadline before each goes out; text whose wait for room was cut, by its
+own cutoff (`Backpressure`) or the round's deadline (`Deadline`), never gets a second. A round whose outcome can't be told in that time is
+reported by its pump as truncated, which a local route shows as unfinished. A `Rebuild` was never written, so it ends as
+`ReceiptOrdered`. Every other failure maps to fixed copy, and none offers a Retry, a sign-in or
+a cloud recovery:
+
+| `Failure` | Error |
+|---|---|
+| `Dormant` | `LocalOff` |
+| `Request` | `RequestRefused` |
+| `Spent` | `LiveBudgetSpent` |
+| `AuthRequired`, `Refused`, `Provider` | `LocalRefused` |
+| `Incomplete` | `LocalIncomplete` |
+| `Protocol` | `LocalUnreadable` |
+| `Endpoint`, `Transport`, `Withheld`, `Truncated`, `Backpressure`, `Deadline` | `LocalUnfinished` |
+
+**Before it can be switched on.** A Ready path from an explicit model-list check, a settings
+path, sanitized recordings from each supported server, and the owner's decision on trusting a
+server the user configured: loopback proves where Kumochi sends, not which process listens or
+what it forwards. The first build that writes `local_chat` must also stamp a fresh task's route
+with its first turn under a schema version older builds refuse, keep recall and restart from
+crossing routes, and refuse unbound rows. Before a Ready slot can send, each grant and write
+must check the live endpoint and model, and a replaced endpoint must end the old stream with
+nothing replayed.

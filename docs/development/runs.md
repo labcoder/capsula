@@ -28,7 +28,10 @@ connection's id cannot be reused before the new view arrives.
 The shell also retains the submitted text until its named run ends. A named Failed state
 with SessionEnded, AccountRefused, SignInNeeded, ConnectionNeeded, ClaudeCodeSignedOut,
 AnthropicKeyRejected or RenewalUnconfirmed returns that text once before Answering, only while its captured selection revision and
-thread still match the current input target. The typing view restores it only into an empty
+thread still match the current input target. So do ConfigUnreadable and LocalOff, which the brain
+answers before it keeps a turn; their run's thread was never made, so a New target it named is New
+again once no turn sent to that thread still waits for an answer. A run stopped before the
+refusal still gets the key, so New returns without the stopped text or a notice. The typing view restores it only into an empty
 input; even whitespace is a newer draft. No frame resends a turn automatically. General
 account errors and TurnRefused cannot restore text because neither identifies a failed run.
 Esc, a new submit attempt, a target change, disconnect, a new brain incarnation, confirmed
@@ -516,7 +519,7 @@ These classifications have no typed reader yet, so they stay here rather than in
 | `ChatGPT` | account sign-in and recovery | native Responses | switched on in its row; per model by its catalog | Kumochi's OAuth sign-in | fixed OpenAI HTTPS routes |
 | Anthropic key | the checked key and its catalog | native Messages | switched on in its row | the key in Credential Manager | fixed Anthropic HTTPS routes |
 | Claude Code | discovery, sign-in and policy | launch-scoped MCP | switched off in its row | Claude Code's own sign-in in Kumochi's folder | the contained child, bound to its provider |
-| Local server | nothing yet: always unavailable, and its engine is a refusal | none | off in its row, with no switch to turn it on | none | none yet; the [loopback transport](engines.md#the-local-chat-completions-transport) is unused |
+| Local server | nothing yet: always unavailable, and its dispatched engine is a refusal | none | off in its row, with no switch to turn it on | none | none yet; the [local engine](engines.md#the-local-engine) is built only in tests |
 
 The tools column is a ceiling, never an offer: each request's offer is built and admitted as in
 [the tool loop](#the-tool-loop). A picture switch never makes a model take pictures or skips its

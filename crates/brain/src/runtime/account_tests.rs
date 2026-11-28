@@ -1502,10 +1502,10 @@ fn refused_with(
     }
 }
 
-/// An unreadable config.toml refuses a run as it did before saved connections: no default, so
-/// the model check fails it with Open Settings, and the file is never written.
+/// An unreadable config.toml refuses a run that would inherit its default, saying the file
+/// can't be read, and the file is never written.
 #[tokio::test]
-async fn route_default_an_unreadable_config_still_refuses_with_open_settings() {
+async fn route_default_an_unreadable_config_refuses_the_turn_it_cant_place() {
     use kumochi_protocol::constants::CONFIG_FILE;
     let scratch = Scratch::new("unreadable-default");
     std::fs::create_dir_all(scratch.dir()).expect("folder");
@@ -1535,8 +1535,11 @@ async fn route_default_an_unreadable_config_still_refuses_with_open_settings() {
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
     let client = async {
-        shell.submit("hello").await;
-        assert_eq!(failed_with(&mut shell).await, Some(model_unavailable()));
+        shell.submit("unreadablemark").await;
+        assert_eq!(
+            failed_with(&mut shell).await,
+            Some(ErrorKey::ConfigUnreadable.into())
+        );
         drop(shell);
     };
     let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
@@ -1547,6 +1550,21 @@ async fn route_default_an_unreadable_config_still_refuses_with_open_settings() {
         "default_model = {"
     );
     brain.close().await;
+    // The default may name the local server, so the turn that inherits it keeps nothing.
+    let store = crate::store::Store::open(&scratch.db()).expect("reopen");
+    assert_eq!(
+        store.pages().search_ids("unreadablemark").expect("search"),
+        Vec::new()
+    );
+    let raw = rusqlite::Connection::open(scratch.db()).expect("raw");
+    for table in ["runs", "events"] {
+        let rows: i64 = raw
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .expect("count");
+        assert_eq!(rows, 0, "{table}");
+    }
 }
 
 #[derive(Debug)]

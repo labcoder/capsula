@@ -40,7 +40,7 @@ impl LoopbackEndpoint {
 
     /// The endpoint `text` names, bypassing the switch.
     #[cfg(test)]
-    pub(super) fn for_tests(text: &str) -> Self {
+    pub(crate) fn for_tests(text: &str) -> Self {
         parse(text).expect("a loopback endpoint")
     }
 
