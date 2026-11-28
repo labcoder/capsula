@@ -4339,6 +4339,7 @@ dependencies = [
  "kumochi-protocol",
  "kumochi-scene",
  "kumochi-shell-core",
+ "nsh-base",
  "nsh-core",
  "nsh-platform-windows",
  "thiserror 2.0.21",

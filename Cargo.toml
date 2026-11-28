@@ -26,6 +26,8 @@ keyring = { version = "3", features = ["windows-native", "apple-native"] }
 # nsh-core has no default features; the Windows backend's are all off, since the shell uses none yet.
 nsh-core = { git = "https://github.com/longbridge/nsh", rev = "2f51d8611677c8a6bbad937b39756e8d0cc45350" }
 nsh-platform-windows = { git = "https://github.com/longbridge/nsh", rev = "2f51d8611677c8a6bbad937b39756e8d0cc45350", default-features = false }
+# nsh-base reads the shell's theme; its default features are all off, since the shell uses none yet.
+nsh-base = { git = "https://github.com/longbridge/nsh", rev = "2f51d8611677c8a6bbad937b39756e8d0cc45350", default-features = false }
 serde = { version = "1", features = ["derive"] }
 smallvec = "=1.16.4"
 thiserror = "2"

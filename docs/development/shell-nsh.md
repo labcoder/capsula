@@ -92,6 +92,38 @@ This crate writes no log on the engine thread, since a log write can block and t
 still has work that frees the lock. Its two logs there, a link that couldn't start and a refused
 scene refusal, are written on the blocking pool.
 
+## Theme and tokens
+
+The theme is `crates/shell-nsh/theme.json`, compiled in, in the shadcn `cssVars` form NativeShell
+reads: `theme` holds what both looks share, `dark` is Dusk and `light` is Day. On the main
+thread, before `run_app`, `platform::run` reads it with `nsh-base`'s `Theme::from_json_lenient`
+(`ui::theme::tokens`) and gives the root its tokens and the appearance of `Look::default()`,
+Match system. If the file isn't JSON, the root keeps NativeShell's default tokens and the shell
+logs `can't read the theme; drawing with NativeShell's default`.
+
+Code names a token and never writes a raw colour, length or timing:
+
+- NativeShell's own tokens (`background`, `foreground`, `card`, `primary`, `border`, `radius`
+  and the rest of shadcn's names) are fields of `nsh_base::theme()`, with no wrapper.
+- The colours the theme adds are named by `ui::theme::Tone` and its lengths, in points, by
+  `ui::theme::Size`; each has its name in the file as `token()`. The first surface adds their
+  readers, and decides what a token the theme lacks reads as.
+- The look a person picks is `ui::theme::Look`: Match system, Dusk or Day.
+- The springs are `ui::motion`'s `open`, `expand`, `window` and `kumo`, each a response (how
+  long one swing would take undamped) and a damping ratio, made by NativeShell's
+  `Spring::new(response).damping_ratio(ratio)`.
+
+A token is named for its role, never its look or the component that first used it
+(`attention`, not `peach`). Dusk and Day define the same names. A new need adds its token to the
+file and to `Tone` or `Size` first, then uses it. Tests fail when NativeShell's reader reports
+leaving something out, when a value in the file isn't text, when the file and the code don't
+list the same names, or when Dusk and Day don't define the same names. They check a sample of
+values against the design, not every one.
+
+Not here yet: the type weights, Kumo's frame caps and the message width, any component or
+backdrop, keeping the person's look, and loading a custom theme. Nothing reads `Tone`, `Size`,
+Dusk, Day or the springs until the first surface lands.
+
 ## The link and the pump
 
 When it mounts, the root starts the scene dropper (`kumochi_scene::deferred`), then shell-core's
@@ -253,10 +285,10 @@ dependency `nsh-engine` always has. Neither is called on this path.
 
 The framework is consumed from upstream, `github.com/longbridge/nsh`, at one pinned revision:
 NativeShell v0.6.1, `2f51d8611677c8a6bbad937b39756e8d0cc45350`. No local copy or patch of it is
-kept. The pin is written in two `[workspace.dependencies]` entries in the root `Cargo.toml`,
-`nsh-core` and the Windows backend `nsh-platform-windows`, with the same revision; the
-backend's default features are off, and the update and network features are banned (above).
-`deny.toml` allows that one git source.
+kept. The pin is written in three `[workspace.dependencies]` entries in the root `Cargo.toml`,
+`nsh-core`, the Windows backend `nsh-platform-windows` and `nsh-base`, for the theme, with the
+same revision; the backend's and `nsh-base`'s default features are off, and the update and
+network features are banned (above). `deny.toml` allows that one git source.
 
 Moving the pin is its own change, made for a measured failure that a newer revision fixes or
 for a fix of ours that lands upstream, never to follow upstream by habit.

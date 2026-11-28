@@ -16,6 +16,7 @@ async-channel = "2"
 kumochi-protocol.workspace = true
 kumochi-scene.workspace = true
 kumochi-shell-core.workspace = true
+nsh-base.workspace = true
 nsh-core.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
