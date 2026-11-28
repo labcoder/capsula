@@ -183,55 +183,57 @@ fn append_drawings(
     }
 }
 
+/// How many items grouping handles between checks of its read's control.
+const CHECK_EVERY: usize = 256;
+
 /// Groups ordered items into whole runs, the current one last. Each call is followed by its
-/// result within its run, and no item repeats. Each new run checks `snapshot`'s read control, so
-/// a long history can't hold the reader past its deadline or a cancel.
+/// result within its run, and no item repeats. One pass does it all, checking `snapshot`'s read
+/// control every [`CHECK_EVERY`] items and once more at the end, so a cancel or the deadline stops
+/// it however long the history is.
 pub(super) fn runs(
     snapshot: &Snapshot<'_>,
     items: Vec<Item>,
     current: RunId,
 ) -> Result<Vec<Vec<Item>>, BuildError> {
-    if items.windows(2).any(|pair| pair[0].id == pair[1].id) {
-        return Err(BuildError::InvalidCut);
-    }
     let mut runs: Vec<Vec<Item>> = Vec::new();
     let mut seen = BTreeSet::new();
-    for item in items {
-        match runs.last_mut() {
-            Some(open) if open[0].run == item.run => open.push(item),
-            _ => {
-                snapshot.check()?;
-                if !seen.insert(item.run) {
-                    return Err(BuildError::InvalidCut);
-                }
-                runs.push(vec![item]);
-            }
+    let mut open: Option<CallId> = None;
+    let mut previous = None;
+    for (at, item) in items.into_iter().enumerate() {
+        if at % CHECK_EVERY == 0 {
+            snapshot.check()?;
         }
-    }
-    for run in &runs {
-        let mut open = None;
-        for item in run {
-            match &item.body {
-                Body::Call { call, .. } if open.is_none() => open = Some(call),
-                Body::History { call, .. } if open == Some(call) => open = None,
-                Body::Call { .. } | Body::History { .. } => return Err(BuildError::InvalidCut),
-                Body::User(_)
-                | Body::Assistant(_)
-                | Body::Narration { .. }
-                | Body::Native { .. }
-                | Body::Result { .. }
-                | Body::Recall { .. } => {}
-            }
-        }
-        if open.is_some() {
+        if previous.replace(item.id) == Some(item.id) {
             return Err(BuildError::InvalidCut);
         }
+        if runs.last().is_none_or(|run| run[0].run != item.run) {
+            if open.is_some() || !seen.insert(item.run) {
+                return Err(BuildError::InvalidCut);
+            }
+            runs.push(Vec::new());
+        }
+        match &item.body {
+            Body::Call { call, .. } if open.is_none() => open = Some(call.clone()),
+            Body::History { call, .. } if open.as_ref() == Some(call) => open = None,
+            Body::Call { .. } | Body::History { .. } => return Err(BuildError::InvalidCut),
+            Body::User(_)
+            | Body::Assistant(_)
+            | Body::Narration { .. }
+            | Body::Native { .. }
+            | Body::Result { .. }
+            | Body::Recall { .. } => {}
+        }
+        runs.last_mut().expect("a run was opened above").push(item);
+    }
+    snapshot.check()?;
+    if open.is_some() {
+        return Err(BuildError::InvalidCut);
     }
     let Some(last) = runs.last() else {
         return Err(BuildError::NoTurn);
     };
     if last[0].run != current {
-        return Err(if runs.iter().any(|run| run[0].run == current) {
+        return Err(if seen.contains(&current) {
             BuildError::InvalidCut
         } else {
             BuildError::NoTurn

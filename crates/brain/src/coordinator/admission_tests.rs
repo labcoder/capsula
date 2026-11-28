@@ -30,7 +30,6 @@ fn lifecycle_replacement_preserves_the_end_and_stop_cancels_before_store_ack() {
         .0
         .clone();
     let mut effects = Vec::new();
-    eprintln!("DIGEST {:?}", core.drawing.digest(T).as_str());
     core.build(R, 2, &mut effects);
     let second = core
         .current
@@ -350,6 +349,7 @@ fn a_stopped_run_takes_no_build_result() {
 /// A build already bound to a local route gathers no drawings, picture models or key results,
 /// which that route never sends, while the same build bound to `ChatGPT` gathers all three.
 #[test]
+#[expect(clippy::too_many_lines, reason = "one scenario: a drawn scene, pictures, a key result and the build")]
 fn a_known_local_build_gathers_nothing_a_local_route_never_sends() {
     use std::sync::Arc;
 
@@ -401,6 +401,10 @@ fn a_known_local_build_gathers_nothing_a_local_route_never_sends() {
             }),
         ))
         .expect("never stale");
+        let seeded = vec![(
+            CallId::new("call-1").expect("id"),
+            ToolOutput::Text("seen".to_owned()),
+        )];
         let run = RunId(R.0 + 1);
         core.handle(Input::Turn {
             turn: 1,
@@ -421,21 +425,39 @@ fn a_known_local_build_gathers_nothing_a_local_route_never_sends() {
             kind,
             tag: ConnectionTag(0),
         });
-        current.tools.key_results = vec![(
-            CallId::new("call-1").expect("id"),
-            ToolOutput::Text("seen".to_owned()),
-        )];
+        current.tools.key_results.clone_from(&seeded);
         let mut effects = Vec::new();
         core.build(run, 2, &mut effects);
         let [Effect::Store(StoreOp::BuildContext(context))] = effects.as_slice() else {
             panic!("one build: {effects:?}");
         };
+        let on_screen = core.drawing.digest(T);
+        assert_ne!(
+            on_screen,
+            crate::drawing::Digest::default(),
+            "the scene is drawn"
+        );
+        let expected = if gathers {
+            let route = crate::context::Route {
+                kind: ConnectionKind::ChatGpt,
+                tag: ConnectionTag(0),
+            };
+            (
+                on_screen,
+                vec![(route, vec![ModelSlug::new("m").expect("slug")])],
+                seeded,
+            )
+        } else {
+            (crate::drawing::Digest::default(), Vec::new(), Vec::new())
+        };
         assert_eq!(
-            context.drawings != crate::drawing::Digest::default(),
-            gathers,
+            (
+                context.drawings.clone(),
+                context.picture_models.clone(),
+                context.key_results.clone()
+            ),
+            expected,
             "{kind:?}"
         );
-        assert_eq!(!context.picture_models.is_empty(), gathers, "{kind:?}");
-        assert_eq!(!context.key_results.is_empty(), gathers, "{kind:?}");
     }
 }

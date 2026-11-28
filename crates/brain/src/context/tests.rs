@@ -2643,11 +2643,12 @@ fn a_route_without_screen_pictures_is_sent_no_screen_scene() {
     }
 }
 
-/// Grouping checks the read's control at each run, so a cancelled or expired read stops it
-/// with that read's error, while the same history groups under a live one; a run that comes
-/// back after another is a bad cut.
+/// Grouping checks the read's control as it goes and at its end, so a read cancelled, expired,
+/// or expiring partway through a long history stops it with that read's error, while the same
+/// history groups under a live one; a run that comes back after another is a bad cut.
 #[test]
 fn grouping_runs_stops_once_its_read_is_cancelled_or_out_of_time() {
+    use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
 
     use crate::recall::control::Control;
@@ -2667,26 +2668,44 @@ fn grouping_runs_stops_once_its_read_is_cancelled_or_out_of_time() {
                         body: Body::User("hi".to_owned()),
                     })
                     .collect();
-                super::build::runs(&snapshot, items, RunId(3)).map(|runs| runs.len())
+                let current = RunId(*order.last().expect("an item"));
+                super::build::runs(&snapshot, items, current).map(|runs| runs.len())
             })
             .expect("handler")
     };
-    let live = Control::new(Instant::now() + Duration::from_secs(60));
-    assert!(matches!(group(&live, &[1, 2, 3]), Ok(3)));
+    let live = || Control::new(Instant::now() + Duration::from_secs(60));
+    assert!(matches!(group(&live(), &[1, 2, 3]), Ok(3)));
     assert!(matches!(
-        group(&live, &[1, 2, 1, 3]),
+        group(&live(), &[1, 2, 1, 3]),
         Err(BuildError::InvalidCut)
     ));
-    let cancelled = live.child();
+    let cancelled = live();
     cancelled.cancel();
     assert!(matches!(
         group(&cancelled, &[1, 2, 3]),
         Err(BuildError::Store(StoreError::Closed))
     ));
-    let late = Control::new(Instant::now() + Duration::from_secs(60));
+    let late = live();
     *late.test.time.lock().expect("clock") = Some(late.end);
     assert!(matches!(
         group(&late, &[1, 2, 3]),
         Err(BuildError::Store(StoreError::RecallBudget))
     ));
+    // 600 items are checked at items 0, 256 and 512, then at the end.
+    let long = [1; 600];
+    assert!(matches!(group(&live(), &long), Ok(1)));
+    for expires_at in [3, 4] {
+        let expiring = live();
+        expiring
+            .test
+            .expire_after
+            .store(expires_at, Ordering::SeqCst);
+        assert!(
+            matches!(
+                group(&expiring, &long),
+                Err(BuildError::Store(StoreError::RecallBudget))
+            ),
+            "{expires_at}"
+        );
+    }
 }
