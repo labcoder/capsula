@@ -38,10 +38,11 @@ build, creates the new folder, copies the shell in as `kumochi.exe` and the brai
 ([gate identity](gate-identity.md#starting-a-gate-tool)). Before building, it refuses a folder
 that already exists or whose parent doesn't. It checks both built images before it makes the
 folder, so a pair that doesn't fit leaves nothing behind. It launches neither image. It never
-writes over a file, and it holds the new folder open while it copies, so the path can't be
-pointed at another folder meanwhile. It removes nothing either: if a copy fails, the folder stays
-and the error says it is incomplete. On success it prints the folder. One build selects both
-packages, so the brain's dependencies resolve with NativeShell's feature requests.
+writes over a file, and it holds the new folder open while it copies, so the folder can't be
+renamed or removed until they are done. It expects a parent folder that nothing else is changing
+while it runs. It removes nothing either: if a copy fails, the folder stays and the error says it
+is incomplete. On success it prints the folder. One build selects both packages, so the brain's
+dependencies resolve with NativeShell's feature requests.
 
 ```bash
 cargo run --release --package xtask --features kumochi-protocol/gate-identity -- stage-nsh <new-folder>

@@ -88,8 +88,9 @@ fn fill(images: &Path, folder: &Path) -> Result<()> {
     })
 }
 
-/// The copies, with `folder` held so its path can't be given to another folder meanwhile, and
-/// never over a file that is already there.
+/// The copies, with `folder` held so it can't be renamed or removed meanwhile, and never over a
+/// file that is already there. The parent is taken to be a folder nothing else is changing: one
+/// swapped in before the hold would be filled instead.
 fn copy_pair(images: &Path, folder: &Path) -> Result<()> {
     let _held = hold(folder).with_context(|| format!("holding {}", folder.display()))?;
     for (built, name, role) in PAIR {
