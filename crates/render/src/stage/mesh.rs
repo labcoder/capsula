@@ -462,6 +462,16 @@ impl PositionStore for Polyline<'_> {
     }
 }
 
+/// Where a stroke vertex sits against a closed line's seam.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Seam {
+    Away,
+    /// At the first point, closing the last edge.
+    Closing,
+    /// At the first point, opening the first edge: lyon emits these after every closing vertex.
+    Opening,
+}
+
 /// A stroke's distances over the points lyon keeps. lyon drops a point closer than its merge
 /// distance to the last one kept, and decides closure from the kept count, so this walk keeps
 /// the same points. A kept point's `L` sums each kept edge's source length, from the last
@@ -486,6 +496,9 @@ struct Walk<'a> {
     opening: [f64; 2],
     /// `L` and `G` of a closed line's closing vertices at its first point.
     closing: [f64; 2],
+    /// The endpoint lyon reports for those closing vertices: the first, or the last kept point
+    /// when it lies within merge distance of the first and lyon moves it there.
+    seam: usize,
 }
 
 impl<'a> Walk<'a> {
@@ -505,7 +518,11 @@ impl<'a> Walk<'a> {
             kept: (0, 0, 0.0),
             opening: [0.0; 2],
             closing: [0.0; 2],
+            seam: 0,
         };
+        if count < 2 {
+            return None;
+        }
         let (mut kept, mut last) = (1, 0);
         let mut at = walk.run(0);
         while at + 1 < count {
@@ -513,7 +530,7 @@ impl<'a> Walk<'a> {
             at = walk.run(last);
             kept += 1;
         }
-        if count < 2 || kept < 2 {
+        if kept < 2 {
             return None;
         }
         walk.close = closed && kept > 2;
@@ -526,6 +543,11 @@ impl<'a> Walk<'a> {
             let [l, g] = walk.seek(last);
             let leave = l + g;
             walk.closing = [l + walk.total - leave, g];
+            let ([x, y], [first_x, first_y]) = (line.at(last), line.at(0));
+            let [dx, dy] = [x - first_x, y - first_y];
+            if dx * dx + dy * dy < walk.merge {
+                walk.seam = last;
+            }
         }
         Some((walk, turn))
     }
@@ -566,17 +588,17 @@ impl<'a> Walk<'a> {
         last
     }
 
-    /// `L` and `G` of the vertex lyon emits at endpoint `id`. A closed line's opening vertices
-    /// carry no advancement and its closing ones at the first point some, whatever id lyon
-    /// reports for them.
-    fn vertex(&mut self, id: usize, advancement: f32) -> [f64; 2] {
+    /// `L` and `G` of the vertex lyon emits at endpoint `id`, and which side of a closed line's
+    /// seam it sits on. Its opening vertices carry no advancement and its closing ones some,
+    /// whatever id lyon reports for the opening ones.
+    fn vertex(&mut self, id: usize, advancement: f32) -> ([f64; 2], Seam) {
         if self.close && advancement <= 0.0 {
-            return self.opening;
+            return (self.opening, Seam::Opening);
         }
-        if self.close && id == 0 {
-            return self.closing;
+        if self.close && id == self.seam {
+            return (self.closing, Seam::Closing);
         }
-        self.seek(id)
+        (self.seek(id), Seam::Away)
     }
 
     fn seek(&mut self, id: usize) -> [f64; 2] {
@@ -671,6 +693,12 @@ struct Sink<'a, 'w> {
     walk: Option<&'a mut Walk<'w>>,
     mark: [usize; 2],
     full: bool,
+    /// A closed line's first closing vertex and first opening vertex, once emitted. lyon
+    /// emits the opening edge's triangles last, and a join folded there hands them a closing
+    /// vertex from the other side of the seam.
+    seam: [Option<u32>; 2],
+    /// That closing vertex and its copy at the opening values.
+    copy: Option<[u32; 2]>,
 }
 
 impl<'a, 'w> Sink<'a, 'w> {
@@ -688,6 +716,8 @@ impl<'a, 'w> Sink<'a, 'w> {
             walk,
             mark,
             full: false,
+            seam: [None; 2],
+            copy: None,
         }
     }
 
@@ -712,6 +742,29 @@ impl<'a, 'w> Sink<'a, 'w> {
         Ok(VertexId(id))
     }
 
+    /// The corner an opening-edge triangle draws with: a closing vertex's copy at the opening
+    /// values, made once; none when the mesh is full.
+    fn reopen(&mut self, corner: VertexId) -> Option<VertexId> {
+        let [Some(closing), Some(opening)] = self.seam else {
+            return Some(corner);
+        };
+        if !(closing..opening).contains(&corner.0) {
+            return Some(corner);
+        }
+        if let Some([from, to]) = self.copy
+            && from == corner.0
+        {
+            return Some(VertexId(to));
+        }
+        let at = self.vertices.get(usize::try_from(corner.0).ok()?)?.at;
+        let open = *self.vertices.get(usize::try_from(opening).ok()?)?;
+        let copy = self
+            .vertex(at, [open.along, open.skip].map(f64::from))
+            .ok()?;
+        self.copy = Some([corner.0, copy.0]);
+        Some(copy)
+    }
+
     fn along(&self, id: VertexId) -> f32 {
         usize::try_from(id.0)
             .ok()
@@ -730,7 +783,14 @@ impl GeometryBuilder for Sink<'_, '_> {
             self.full = true;
             return;
         }
-        let corners = [a, b, c];
+        let mut corners = [a, b, c];
+        for corner in &mut corners {
+            let Some(drawn) = self.reopen(*corner) else {
+                self.full = true;
+                return;
+            };
+            *corner = drawn;
+        }
         let first = if self.walk.is_none() {
             0
         } else {
@@ -763,11 +823,18 @@ impl StrokeGeometryBuilder for Sink<'_, '_> {
         let id = match vertex.source() {
             VertexSource::Endpoint { id } | VertexSource::Edge { from: id, .. } => id,
         };
-        let distance = match &mut self.walk {
+        let (distance, seam) = match &mut self.walk {
             Some(walk) => walk.vertex(id.to_usize(), vertex.advancement()),
-            None => [0.0; 2],
+            None => ([0.0; 2], Seam::Away),
         };
-        self.vertex(vertex.position().to_array(), distance)
+        let made = self.vertex(vertex.position().to_array(), distance)?;
+        let side = match seam {
+            Seam::Away => return Ok(made),
+            Seam::Closing => 0,
+            Seam::Opening => 1,
+        };
+        self.seam[side].get_or_insert(made.0);
+        Ok(made)
     }
 }
 

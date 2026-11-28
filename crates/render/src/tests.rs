@@ -992,11 +992,10 @@ fn a_closed_line_keeps_its_seam_however_its_last_point_is_written() {
         }
     }
     for at in [[5.0, 0.25], [15.0, 0.25], [0.25, 15.0], [0.25, 5.0]] {
-        for (piece, within) in [(1, 1e-3), (2, 0.02)] {
+        for piece in [1, 2] {
             assert!(
-                (along(piece, at) - along(0, at)).abs() < within,
-                "dashes walk piece {piece} at {at:?} as the plain spelling, whose source differs \
-                 by at most the near point's 0.02: {} against {}",
+                (along(piece, at) - along(0, at)).abs() < 1e-3,
+                "dashes walk piece {piece} at {at:?} as the plain spelling: {} against {}",
                 along(piece, at),
                 along(0, at)
             );
@@ -1090,6 +1089,74 @@ fn a_triangle_starts_at_an_earliest_corner_when_two_tie() {
             along.iter().all(|other| first <= *other),
             "{along:?} starts at {first}"
         );
+    }
+}
+
+#[test]
+fn a_line_of_no_points_or_one_builds_to_nothing() {
+    let one = [Vec2::new(3.0, 4.0)];
+    let cache = cache(
+        0,
+        1,
+        &[
+            line(Vec::<Vec2>::new()),
+            line(one),
+            closed_line(Vec::<Vec2>::new()),
+            closed_line(one),
+        ],
+    );
+    let (mut input, mut mesh) = (BuildInput::new(), Mesh::new());
+    build(&mut input, &mut mesh, &cache).expect("it builds");
+    assert_eq!(
+        (
+            mesh.vertices().len(),
+            mesh.indices().len(),
+            mesh.pieces().len()
+        ),
+        (0, 0, 0)
+    );
+}
+
+#[test]
+fn a_join_folded_at_the_first_point_leaves_the_first_edge_rising_from_it() {
+    let cache = cache(
+        0,
+        1,
+        &[closed_line([
+            Vec2::new(0.0, 0.0),
+            Vec2::new(10.0, 0.0),
+            Vec2::new(10.0, 1.0),
+        ])],
+    );
+    let (mut input, mut mesh) = (BuildInput::new(), Mesh::new());
+    build(&mut input, &mut mesh, &cache).expect("it builds");
+    let perimeter = 11.0 + f64::from(10.0_f32).hypot(1.0);
+    let length = f64::from(mesh.pieces()[0].length);
+    assert!((length - perimeter).abs() < 1e-4, "{length}");
+    let slack = 1.0;
+    for at in [[3.0, 0.5], [6.0, 0.8]] {
+        let [first, y] = at.map(f64::from);
+        let last = 11.0 + ((10.0 - first) * 10.0 + (1.0 - y)) / f64::from(10.0_f32).hypot(1.0);
+        let found = sampled(&mesh, 0, at);
+        assert!(
+            found
+                .iter()
+                .any(|[distance, _]| (distance - first).abs() < slack),
+            "the first edge covers {at:?}: {found:?}"
+        );
+        for [distance, _] in &found {
+            assert!(
+                (distance - first).abs() < slack || (distance - last).abs() < slack,
+                "every triangle at {at:?} reads one edge's distance: {distance} against {first} \
+                 or {last}"
+            );
+            assert!(
+                (distance / length - first / perimeter).abs() < slack / perimeter
+                    || (distance / length - last / perimeter).abs() < slack / perimeter,
+                "and its reveal: {}",
+                distance / length
+            );
+        }
     }
 }
 

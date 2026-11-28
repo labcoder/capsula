@@ -52,9 +52,11 @@ const _: () = assert!(
 /// Mesh vertices. lyon 1.0.19's fixed-width stroke of lines, with miter joins and butt caps,
 /// emits two vertices at each end and at each join at most two per side, one where that side
 /// meets in a point. An open line of n kept points emits at most 4 + 4(n − 2) = 4(n − 1), a
-/// closed one of n ≥ 3 at most 4n + 2, closing re-emits two, and a closed line of two points
-/// goes out and back as two open lines of two, 8. Every line of n points charges at least n − 1
-/// segments, so 8 per segment is the most: 4n + 2 ≤ 8(n − 1) from n = 3. lyon's fill sweep
+/// closed one of n ≥ 3 at most 4n + 2, closing re-emits two, and the mesh copies at most one
+/// seam vertex for its opening edge, since lyon folds only one side of a join: 4n + 3. A closed
+/// line of two points goes out and back as two open lines of two, 8. Every line of n points
+/// charges at least n − 1 segments, so 8 per segment is the most: 4n + 3 ≤ 8(n − 1) from n = 3.
+/// lyon's fill sweep
 /// emits one vertex per event, and the crossings it splits edges at can add events past the
 /// points and crossings the scene charges, so no bound follows from its source: the fill cap
 /// here is a reservation, and the mesh refuses a fill past what is left. A border band takes

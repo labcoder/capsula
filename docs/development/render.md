@@ -81,8 +81,10 @@ triangle, and reads `skip` flat from the triangle's first index:
   point. Each stroke triangle's first index is the vertex at its earliest point, so an edge
   arriving at a merged run reaches main's distance there, and the edge leaving it starts past
   the run, as main's walk does. A closed line keeps its seam however its last point is
-  written; a closed line lyon keeps two points of goes out and back as two open lines, the
-  return leg a piece of its own marked `retrace`.
+  written. Where lyon folds the join at its first point, the opening edge's triangles name a
+  vertex of the closing side; the mesh gives them a copy at the opening distance. A closed
+  line lyon keeps two points of goes out and back as two open lines, the return leg a piece of
+  its own marked `retrace`.
 - **Borders.** A vertex carries its reveal times a weight, 1 on the outer edge and the inner
   edge's length over the outer edge's on the inner one. A pixel is revealed when the
   interpolated `reveal` is at most the frame's draw fraction times the interpolated `weight`,
