@@ -99,6 +99,15 @@ Absent lazy panels have no pixels; their create/re-show hooks exclude them after
 owner stores the hidden window and before placement can show it. A failed hook leaves the
 new window hidden. The zero-area taskbar host and Explorer-owned UI are outside this claim.
 
+The lease's decisions are a core driven by asks and answers: it says which surface to snapshot,
+exclude or restore next and takes each answer whenever it comes, so its surfaces can live on
+other threads. The GPUI shell answers at once: `acquire`, `attach`, `cleanup` and `expire` ask,
+call the surface and answer, one call at a time and in the same order as before. An exclude that
+fails, or is still unanswered 250 ms after the acquire began, revokes the lease, and every
+receipt it holds is restored, because an unanswered exclude may have been applied. A restore that
+fails or never comes is restoration debt: the lease refuses the next one as `Busy` until that
+restore is confirmed, however late, or its surface is proved gone. No timer forgives it.
+
 Drawing keeps the overlay's `Visibility` recovery lifecycle, paint scratch and paint notices.
 Its GPUI surface adapter attaches the drawing receipt before show, including a replacement
 window. A drawing window made while no lease is in force starts capture-allowed; one made or
