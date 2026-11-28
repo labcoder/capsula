@@ -23,6 +23,9 @@ pub(crate) fn start(
 
 /// Never reached off Windows, since [`start`] refuses first; it answers unsupported too.
 #[cfg(not(windows))]
-pub(crate) fn run(_deadline: std::time::Instant) -> std::process::ExitCode {
+pub(crate) fn run(
+    _deadline: Option<std::time::Instant>,
+    _backstop: crate::backstop::Backstop,
+) -> std::process::ExitCode {
     std::process::ExitCode::from(crate::UNSUPPORTED)
 }

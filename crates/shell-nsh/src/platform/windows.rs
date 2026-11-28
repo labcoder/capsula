@@ -1,7 +1,9 @@
 //! The shell on Windows: the GPUI shell's start-up, then a `NativeShell` app with one hidden main
-//! window and no view that quits on its deadline.
+//! window and no view, whose root runs the link's pump and the one quit.
 
 use std::process::ExitCode;
+use std::rc::Rc;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use kumochi_protocol::constants;
@@ -9,20 +11,28 @@ use kumochi_shell_core::instance::InstanceLock;
 use kumochi_shell_core::logging;
 use kumochi_shell_core::startup::{self, Refused};
 use nsh_core::desktop::MainWindowOptions;
-use nsh_core::element::desktop::quit;
-use nsh_core::element::{Component, IntoElement, NoEvent, Props, Scope, spawn, timer, view};
+use nsh_core::element::desktop::{main_window, on_quit_request, quit};
+use nsh_core::element::{
+    Component, IntoElement, NoEvent, Props, Scope, blocking, spawn, timer, view,
+};
 use nsh_platform_windows::{AppOptions, AppSource, CacheOptions, Root, run_app};
 
+use crate::backstop::Backstop;
 use crate::launch::{Launch, LaunchError};
+use crate::shell::{self, Act, Begun, Quit};
 
-/// The root's one prop: the milliseconds left of the deadline when the engine mounts the root,
-/// since props take numbers, not an `Instant`. The view's timer starts one commit later.
+/// The backstop's handle for the root, since props take only values the engine can decode.
+static BACKSTOP: OnceLock<Backstop> = OnceLock::new();
+
+/// The root's one prop: the milliseconds left of the deadline, if there is one, when the engine
+/// mounts the root, since props take numbers, not an `Instant`. The view's timer starts one
+/// commit later.
 #[derive(Clone, PartialEq, Props)]
 struct EmptyAppProps {
-    quit_after_ms: u64,
+    quit_after_ms: Option<u64>,
 }
 
-/// An app with nothing to show yet. Its one task quits the app when the deadline passes.
+/// An app with nothing to show yet. Its tasks follow the link and quit the app once.
 struct EmptyApp;
 
 impl Component for EmptyApp {
@@ -30,12 +40,50 @@ impl Component for EmptyApp {
     type Event = NoEvent;
 
     fn view(props: EmptyAppProps, _: Scope<NoEvent>) -> impl IntoElement {
-        spawn(async move {
-            timer(Duration::from_millis(props.quit_after_ms)).await;
-            quit();
-        });
+        let backstop = BACKSTOP
+            .get()
+            .cloned()
+            .expect("`run` keeps the backstop before the app starts");
+        let (link, events) = shell::started();
+        let owner = Rc::new(Quit::new(backstop.clone(), link.clone()));
+        let asker = |owner: &Rc<Quit>| {
+            let owner = Rc::clone(owner);
+            move || ask_quit(&owner)
+        };
+        let close = asker(&owner);
+        main_window().on_close_press(move |_| close());
+        on_quit_request(asker(&owner));
+        if let Some(left) = props.quit_after_ms {
+            let ask = asker(&owner);
+            spawn(async move {
+                timer(Duration::from_millis(left)).await;
+                ask();
+            });
+        }
+        spawn(shell::pump(link, events, move |act| match act {
+            Act::Opened => backstop.connected(),
+            Act::Quit => ask_quit(&owner),
+            // Detached: ending waits briefly on the output owner's lock, never on the engine thread.
+            Act::End(link, session) => drop(blocking(move || link.end(&session))),
+        }));
         view()
     }
+}
+
+/// Asks the one quit. The first ask waits for the link's quit on the blocking pool, since it can
+/// take 13 s and quit hooks get 200 ms, then calls `quit()`, once.
+fn ask_quit(owner: &Quit) {
+    let Some(begun) = owner.begin() else {
+        return;
+    };
+    spawn(async move {
+        if let Begun::Finish(link) = begun
+            && blocking(move || link.finish_quit()).await.is_err()
+        {
+            tracing::warn!("the link's quit ended early");
+        }
+        quit();
+    });
 }
 
 /// The GPUI shell's own start: the same lock and log, so the two shells exclude each other.
@@ -48,18 +96,22 @@ pub(crate) fn start(
     .map_err(Refused::exit_code)
 }
 
-/// Runs the app until it quits at `deadline`, then ends the process: 0 when its message loop
-/// ended with 0, else 1.
-pub(crate) fn run(deadline: Instant) -> ExitCode {
+/// Runs the app until it quits, then ends the process: 0 when its message loop ended with 0, else 1.
+pub(crate) fn run(deadline: Option<Instant>, backstop: Backstop) -> ExitCode {
+    BACKSTOP
+        .set(backstop)
+        .expect("the app runs once in a process");
     let mut window = MainWindowOptions::default();
     window.default_visible = Some(false);
+    // A close press asks the one quit instead of closing at once.
+    window.attributes.close_on_press = Some(false);
     // The engine makes the props as it mounts the root, which can come late: only what's left then,
     // so the quit can trail the deadline by the one commit before the view's timer starts.
-    let root = Root::new::<EmptyApp>(move || {
-        let left = deadline.saturating_duration_since(Instant::now());
-        EmptyAppProps {
-            quit_after_ms: u64::try_from(left.as_millis()).unwrap_or(u64::MAX),
-        }
+    let root = Root::new::<EmptyApp>(move || EmptyAppProps {
+        quit_after_ms: deadline.map(|deadline| {
+            let left = deadline.saturating_duration_since(Instant::now());
+            u64::try_from(left.as_millis()).unwrap_or(u64::MAX)
+        }),
     })
     .app_id(constants::SHELL_APP_ID)
     .main_window(window);

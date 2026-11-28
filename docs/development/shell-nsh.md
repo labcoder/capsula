@@ -2,8 +2,8 @@
 
 `crates/shell-nsh` (package `kumochi-shell-nsh`) is the shell Kumochi is moving to: the same
 job as the GPUI shell in `crates/shell`, built on NativeShell instead of GPUI. For now it starts
-the way the GPUI shell does, holds the same lock and log, and runs an empty NativeShell app in a
-hidden window until a deadline. It has no link to the brain, and its app's view is empty.
+the way the GPUI shell does, holds the same lock and log, links to its brain and follows the link's
+state in an empty NativeShell app with a hidden window. It draws nothing and plays nothing.
 
 It is not the app that ships. Kumochi's shell binary stays `kumochi`, built from the GPUI
 shell. The Mac Dev bundle (`cargo xtask mac-bundle`) and the third-party notices both select
@@ -29,8 +29,8 @@ shell takes over.
 
 The brain admits only the shell named `SHELL_EXE` (`kumochi.exe`) beside its own executable, and
 the shell checks the brain's full path too, so `kumochi-nsh` can't pair with a brain from its
-build folder. `stage-nsh`, on Windows only, prepares a folder with those names. This shell doesn't
-link to a brain yet; the folder is for the change that adds the link.
+build folder. `stage-nsh`, on Windows only, prepares a folder with those names, where the shell's
+link (below) can reach its brain.
 
 As the gate identity only, it builds `kumochi-shell-nsh` and `kumochi-brain` as one debug Gate
 build, creates the new folder, copies the shell in as `kumochi.exe` and the brain as
@@ -60,9 +60,9 @@ On Windows, `main` goes in this order:
    log (a failure exits 1), logs bad flags once as `invalid launch flags` with the parser's fixed
    text (exit 1), and takes the lock. A lock another shell holds logs `another shell is running
    in this session` and exits 0.
-4. It arms the deadline backstop (below), before anything else can block.
+4. It arms the backstop (below), before anything else can block.
 5. It logs `shell started` with the build, the identity and the edition.
-6. `platform::run` runs the app.
+6. `platform::run` runs the app, whose root starts the link.
 
 Off Windows, `platform::start` exits 69 (unsupported) at step 3, before anything is admitted,
 opened or logged: there's no NativeShell backend here for other systems yet.
@@ -73,51 +73,132 @@ start-up succeeds, they exclude each other (whichever starts second exits 0), an
 daily log file.
 
 **The flag.** `--quit-after-ms=<n>`, from 1 to 120000 milliseconds (shell-core's
-`quit_after_ms`), exactly once, is required for now. The window is hidden and there's no link
-yet, so nothing else could quit it. A missing, repeated or out-of-range value, or any other
-argument, is refused with fixed text and exit 1; no argument value reaches the log or an error.
+`quit_after_ms`), at most once, is optional: the brain relaunches a lost shell with no flags, and
+the link is now a way to quit. A repeated or out-of-range value, or any other argument, is refused
+with fixed text and exit 1; no argument value reaches the log or an error.
 
-## The app and quit
+## The app
 
 The app is a Rust root with an empty view. Its main window is created hidden, with no taskbar entry,
 under the app id `SHELL_APP_ID` (`ai.kumochi.dev.shell`, `ai.kumochi.gate.shell`; release's
 `ai.kumochi.shell` stays unused while it's refused) and the title `DISPLAY_NAME`. NativeShell's
-image cache is off.
+image cache is off. The root runs on NativeShell's engine thread and does everything below in its
+own tasks there; nothing it runs there blocks. A failed engine or window start never mounts the
+root, so none of it runs then, and only the backstop ends the process.
 
-`main` takes the deadline, `--quit-after-ms` from taking the lock. The backstop (below) fires at
-a fixed instant past it. The app can't carry an instant in its props, which take numbers, so the
-engine samples the milliseconds left when it mounts the root, which can come late (up to 10 s
-after a replaced process): none at all when it mounted late. The root's one task waits those
-milliseconds on NativeShell's `timer`, starting one commit after the mount, when its view runs,
-so the quit can trail the deadline by that commit. Then it calls NativeShell's `quit()`. The
-engine stops and `run_app` usually ends the process itself with `std::process::exit`: 0 when its
-message loop's result, the quit message's `wParam`, is 0, and 1 when it's nonzero. A quit ends it with 0, but so does the last window
-closing, so 0 doesn't prove the timer fired. Then nothing in `main` is dropped: the OS closes
-the lock's file handle at exit, and the log loses nothing because it writes synchronously. When
-the main window can't be created, `run_app` exits 1 once its message box is dismissed; when the
-UI thread can't even start, `run_app` returns 1 instead, and `main` drops the lock normally. A UI
-thread that starts and then ends without reporting a result, as a panic does in a build that
-unwinds, also gives 1, since `run_app` exits 0 only on a reported success.
-Release builds abort on a panic. The shell's own code uses no Tokio API; NativeShell runs its
-own runtime inside.
+## The link and the pump
 
-**The deadline backstop.** NativeShell can keep running without the deadline: if the engine
-thread can't start, it only logs that and keeps a hidden window with no root and so no timer,
-and a window or UI-thread failure waits on a message box for a person. Either way a hidden
-process would keep the session's lock, and the GPUI shell of that edition couldn't start. So
-right after taking the lock, before even its first log line (a log write can block), `main`
-starts its own thread that sleeps until the instant 15 seconds past that deadline and then exits
-124.
-It writes nothing, since a log write can block; the code is how a run shows the backstop fired,
-because nothing else in this shell or in `run_app` exits with it.
+When it mounts, the root starts the scene dropper (`kumochi_scene::deferred`), then shell-core's
+link with `link::prepare` and `LinkStart::spawn`, the same link the GPUI shell runs, on its own
+threads. It uses `AudioSession::Legacy` and never announces an audio output, so the brain makes no
+speech for it, and it gives the empty text profile (`DrawingText::default()`). The event channel is
+unbounded and always drained, since a Legacy admission can poll a full receiver forever. The link
+holds the only event sender, so the channel ends when the link does. If the dropper, `prepare` or
+`spawn` fails, the shell logs `can't start the link` and quits.
 
-The grace is a budget, not a bound: it's how long past its deadline the shell is allowed, chosen
-above the pin's 10 s wait for a process it replaces (only when `NSH_RESTART_AFTER` is set) and
-its 200 ms of quit hooks. Window creation, mounting and the engine's join have no time limit of
-their own, so a start that is slow but healthy can end with 124 instead of 0. The sleep is a
-minimum, and a suspended machine stretches it. It's unmeasured until the native run. If the
-thread can't start, the shell lets go of the lock, logs `can't start the deadline backstop`
-and exits 1 without running the app.
+The pump (`shell.rs`) is one task that takes the link's events in order, in batches
+(`link::batch`), and hands each to a plain reducer, `Shell`, which holds the open `Session` and a
+`presenter::Refuser` ([scene.md](scene.md)). It knows no NativeShell type, so it's tested without
+the framework. What it does with each event:
+
+- **`Connected`** keeps the session and tells the refuser. An open one disarms the start limit.
+- **Any other state** drops the session and tells the refuser. `Reconnecting` and `Connecting`
+  wait for the link, which reconnects on its own after a first loss. `Failed` and
+  `OutputUnavailable` mean it won't come back, since nobody can press Retry on a shell with no
+  window: the shell quits. That's final; nothing after it is taken.
+- **`Data` and `SceneData`**: every delivered frame goes to `Refuser::data` once, with
+  `link::scene_naming`'s naming, or `Naming::Other` when it names none. Its credit is granted on
+  that frame's own connection, so the brain's writer refills its 512 KiB window, and a scene a call
+  draws on is refused once with `SceneFailed` through `send_control`. A stale generation earns
+  nothing. If the mailbox refuses a refusal, the shell seals the session at once, forgets it and
+  ends it with `LinkHandle::end` on NativeShell's blocking pool, as the GPUI shell does; the link
+  then reconnects.
+- **Everything else** is dropped: control lists (`ScenesV1`, legacy `Scenes`) owe no credit,
+  settings and account state arrive unasked on connect and owe no reply, and the rest answer flows
+  this shell never starts.
+
+When the event channel ends, the pump asks for quit. Logs carry the link's state and the
+connection's generation, never a frame's content.
+
+`Reconnecting` doesn't re-arm a start budget: after the first open connection, a reconnect is
+bounded by the link itself (10 s an attempt, 5 s a handshake phase) and ends in `Connected` or
+`Failed`.
+
+## Quit
+
+There is one quit, owned by the root. Every way out asks it: the main window's close press (the
+window keeps `close_on_press` off and listens with `on_close_press`), the app's quit request
+(`on_quit_request`), the deadline, the link's `Failed` or `OutputUnavailable`, the event
+channel's end, and a link that couldn't start. The first ask goes on and later asks do nothing:
+
+1. It switches the backstop to the quit grace.
+2. It calls `LinkHandle::begin_quit`.
+3. It waits for `finish_quit` on NativeShell's blocking pool, since that can take 13 s and quit
+   hooks get 200 ms. A link that never started has nothing to wait for. If the blocking task ends
+   without finishing, it logs `the link's quit ended early` and goes on.
+4. It calls NativeShell's `quit()`, once.
+
+With `--quit-after-ms`, `main` takes the deadline from taking the lock. The app can't carry an
+instant in its props, which take numbers, so the engine samples the milliseconds left when it
+mounts the root, which can come late (up to 10 s after a replaced process): none at all when it
+mounted late. The root's task waits those milliseconds on NativeShell's `timer`, starting one
+commit after the mount, so the quit can trail the deadline by that commit, and then asks the quit.
+
+Once `quit()` runs, the engine stops and `run_app` usually ends the process itself with
+`std::process::exit`: 0 when its message loop's result, the quit message's `wParam`, is 0, and 1
+when it's nonzero. A quit ends it with 0, but so does the last window closing, so 0 doesn't say
+which quit it was. Then nothing in `main` is dropped: the OS closes the lock's file handle at exit,
+and the log loses nothing because it writes synchronously. When the main window can't be created,
+`run_app` exits 1 once its message box is dismissed; when the UI thread can't even start,
+`run_app` returns 1 instead, and `main` drops the lock normally. A UI thread that starts and then
+ends without reporting a result, as a panic does in a build that unwinds, also gives 1, since
+`run_app` exits 0 only on a reported success. Release builds abort on a panic. The shell's own
+code uses no Tokio API; NativeShell runs its own runtime inside.
+
+## The backstop
+
+NativeShell can keep running without the root that runs the link and the quit: if the engine
+thread can't start, it only logs that and keeps a hidden window with no root, and a window or
+UI-thread failure waits on a message box for a person. Either way a hidden process would keep the
+session's lock, and the GPUI shell of that edition couldn't start. So right after taking the lock,
+before even its first log line (a log write can block), `main` starts a thread of its own that
+waits on a channel with a timeout and then exits 124. It's always armed, in one of three ways:
+
+| Case | Fires at |
+|---|---|
+| With `--quit-after-ms` | The deadline plus the grace. A connection never disarms it and a quit never moves it later |
+| With no flag | `START_LIMIT` after the lock, unless the pump applies the first open `Connected` first, which disarms it |
+| Once a quit begins | The grace from then, or the time above if that's sooner |
+
+Losing the backstop's channel disarms nothing: what's armed still fires. A connection during a
+quit doesn't disarm its grace, and a terminal state or a start error asks the quit, which switches
+to the grace before shutdown begins, so a quit that hangs in `finish_quit` still ends the process.
+The thread writes nothing, since a log write can block; the code is how a run shows the backstop
+fired, because nothing else in this shell or in `run_app` exits with it. If the thread can't
+start, the shell lets go of the lock, logs `can't start the deadline backstop` and exits 1
+without running the app.
+
+The grace, 15 s, is a budget, not a bound: 13 s for `finish_quit` (10 s to connect, 3 s to quit),
+200 ms for quit hooks, and the rest spare, which also covers the pin's 10 s wait for a process it
+replaces (only when `NSH_RESTART_AFTER` is set) at a start with the flag. `START_LIMIT`, 30 s,
+covers a cold brain launch and one connect attempt; it's a guess, to be measured in the native
+session. Window creation, mounting and the engine's join have no time limit of their own, so a
+start or quit that is slow but healthy can end with 124. The waits are minimums, and a suspended
+machine stretches them.
+
+## What isn't covered
+
+- A brain that is alive but wedged stays `Connected`: nothing here detects it, and with no flag the
+  shell runs on.
+- An engine that hangs after the root mounted, while no quit is in progress, isn't caught: the
+  start limit is disarmed by then, or never armed with a flag, which only catches it at the
+  deadline plus the grace.
+- A Windows session end (`WM_ENDSESSION` stops the surface directly), a killed process and exit
+  124 skip the ordered quit, so the brain isn't told `Quitting`, and a brain that survives may
+  relaunch the shell. A forced exit also can't unsend a `Quitting` already sent.
+- The tests run the reducer on `Session::detached` and `LinkHandle::recording` fixtures: they show
+  its credit and refusals and that quit is asked once. `Quitting` on the wire, a real reconnect
+  and a real kill are left to the native session.
 
 NativeShell's `log` lines go nowhere: no logger is installed, and no NativeShell crate uses
 `tracing`, so none reach Kumochi's log. Their content isn't vetted for it.
