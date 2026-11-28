@@ -3,6 +3,9 @@
 //! reveal and dashes measured along the source as main's painter measures them.
 
 mod fixture;
+// Direct3D 12 exists on Windows only; elsewhere `Gpu::open` has its own test.
+#[cfg(windows)]
+mod gpu;
 
 use std::{any::Any, sync::Arc};
 
@@ -16,9 +19,10 @@ use kumochi_scene::{
 use kumochi_shell_core::presenter::{SceneCache, Stage};
 
 use crate::{
-    BuildInput, Cursor, Failure, FrameBuf, Mesh, Record, RenderCache, Shape, Stager,
+    BuildInput, Built, Cursor, Failure, FrameBuf, Mesh, Record, RenderCache, Shape, Stager,
     limits::{
         BATCH_TEXT_BYTES, INPUT_OBJECTS, INPUT_POINTS, INPUT_PRIMS, RECORDS, TESSELLATOR_BYTES,
+        UPLOADED,
     },
     record,
 };
@@ -186,8 +190,10 @@ fn sampled(mesh: &Mesh, piece: u32, at: [f32; 2]) -> Vec<[f64; 2]> {
 
 #[test]
 fn fixed_bytes_is_what_the_buffers_reserve_and_lyons_allowance() {
-    let reserved =
-        3 * FrameBuf::new().reserved() + BuildInput::new().reserved() + Mesh::new().reserved();
+    let reserved = 3 * FrameBuf::new().reserved()
+        + BuildInput::new().reserved()
+        + Mesh::new().reserved()
+        + UPLOADED * Built::reserved_tables();
     assert_eq!(
         Stager::new().fixed_bytes() - TESSELLATOR_BYTES,
         reserved,

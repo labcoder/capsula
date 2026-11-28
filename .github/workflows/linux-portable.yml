@@ -42,7 +42,7 @@ jobs:
         run: >-
           cargo clippy --locked --all-targets
           -p kumochi-protocol -p kumochi-scene -p kumochi-audio
-          -p kumochi-shell-core -p kumochi-brain -p xtask
+          -p kumochi-shell-core -p kumochi-render -p kumochi-brain -p xtask
           -- -D warnings
       - name: Tests (offline, loopback only)
         run: |
@@ -56,4 +56,4 @@ jobs:
             CARGO_NET_OFFLINE=true RUST_TEST_THREADS=4 \
             cargo test --locked --offline --no-fail-fast \
               -p kumochi-protocol -p kumochi-scene -p kumochi-audio \
-              -p kumochi-shell-core -p kumochi-brain -p xtask
+              -p kumochi-shell-core -p kumochi-render -p kumochi-brain -p xtask

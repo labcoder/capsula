@@ -3,6 +3,7 @@ use std::time::Instant;
 use kumochi_protocol::message::{DataToShell, SceneId};
 use kumochi_scene::{Step, limits::MAX_RESIDENT_BYTES, motion::FrameItem, record::Start};
 
+use super::super::{Drawn, PaintTicket};
 use super::{
     Broken, Charged, GENERATION, LIVE, Presenter, RUN, Shaper, Witness, begin, bound_everywhere,
     commit_as, controls, data, live, ms, only_job, paint_shown, recovering, rect, step,
@@ -878,4 +879,207 @@ fn four_retiring_frames_never_paint_a_fifth_and_their_failures_emit_no_old_ack()
     assert!(controls(&presenter.paint_failed()).is_empty());
     assert_eq!(presenter.frames.borrow().retirement_bytes(), 0);
     assert!(!presenter.sample_at(now).expect("a sample").0.visible);
+}
+
+fn later(presenter: &Presenter) -> Vec<PaintTicket> {
+    let mut tickets = Vec::new();
+    assert!(!presenter.frames.borrow().paint_with(|ticket, _, _| {
+        tickets.push(ticket);
+        Ok::<_, ()>(Drawn::Later)
+    }));
+    tickets
+}
+
+fn holds(tickets: &[PaintTicket]) -> Vec<(SceneId, Option<Instant>)> {
+    tickets.iter().map(|t| (t.scene, t.hold_until)).collect()
+}
+
+#[test]
+fn a_frozen_picture_s_ticket_holds_until_expiry_and_never_counts() {
+    const SURVIVOR: SceneId = SceneId(10);
+    let (mut presenter, now) = fixture(&[SURVIVOR, LIVE]);
+    assert_eq!(holds(&later(&presenter)), [(SURVIVOR, None), (LIVE, None)]);
+    replace(&mut presenter, &[LIVE], NEXT, now);
+    begin(&mut presenter, NEXT, now);
+    let frozen = later(&presenter);
+    assert_eq!(
+        holds(&frozen),
+        [(SURVIVOR, None), (LIVE, Some(ms(now, 250)))]
+    );
+    assert!(!presenter.frames.borrow().presented(frozen[1]));
+    assert_eq!(presenter.frames.borrow().painted(LIVE), None);
+    prepare(&mut presenter, 0, rect("new"), now);
+    presenter.advance(GENERATION, now).expect("activation");
+    assert!(presenter.sample_at(now).expect("a sample").0.visible);
+    assert_eq!(
+        holds(&later(&presenter)),
+        [(SURVIVOR, None), (NEXT, None)],
+        "after the handoff no frozen picture paints"
+    );
+    assert!(!presenter.frames.borrow().presented(frozen[1]));
+}
+
+#[test]
+fn a_late_failure_for_a_frozen_picture_retires_it_and_no_live_scene() {
+    const SURVIVOR: SceneId = SceneId(10);
+    for frozen_since in [false, true] {
+        let (mut presenter, now) = fixture(&[SURVIVOR, LIVE]);
+        let made_live = later(&presenter);
+        let survivor = picture(&presenter).swap_remove(0);
+        replace(&mut presenter, &[LIVE], NEXT, now);
+        begin(&mut presenter, NEXT, now);
+        let made_frozen = later(&presenter);
+        let ticket = if frozen_since {
+            made_live[1]
+        } else {
+            made_frozen[1]
+        };
+        assert_eq!(ticket.scene, LIVE);
+        assert!(!presenter.frames.borrow().presented(ticket));
+        assert!(presenter.frames.borrow().mark_failed(ticket));
+        assert!(!presenter.frames.borrow().presented(ticket));
+        assert!(
+            controls(&presenter.paint_failed()).is_empty(),
+            "no old-scene failure"
+        );
+        assert_eq!(presenter.frames.borrow().retirement_bytes(), 0);
+        assert_eq!(
+            picture(&presenter),
+            [survivor],
+            "frozen since {frozen_since}"
+        );
+        assert!(presenter.scenes.contains_key(&SURVIVOR));
+        assert_eq!(presenter.take_shown(GENERATION), [None; 4]);
+        assert!(!presenter.frames.borrow().mark_failed(ticket), "retired");
+    }
+}
+
+#[test]
+fn an_older_view_s_late_failure_leaves_the_newer_frozen_picture_in_place() {
+    const SURVIVOR: SceneId = SceneId(10);
+    let (mut presenter, now) = fixture(&[SURVIVOR, LIVE]);
+    let older = later(&presenter)[1];
+    let before = presenter.frames.borrow().epoch(LIVE);
+    let job =
+        only_job(commit_as(&mut presenter, RUN, LIVE, 1, rect("newer"), now).expect("commit"));
+    presenter
+        .completed(job.run(&mut Shaper), now)
+        .expect("prepared");
+    presenter.advance(GENERATION, now).expect("a newer view");
+    assert!(presenter.sample_at(now).expect("a sample").0.visible);
+    assert_ne!(presenter.frames.borrow().epoch(LIVE), before);
+    replace(&mut presenter, &[LIVE], NEXT, now);
+    begin(&mut presenter, NEXT, now);
+    let pictures = picture(&presenter);
+    let bytes = presenter.frames.borrow().retirement_bytes();
+    assert_eq!(pictures.len(), 2);
+    assert!(bytes > 0);
+
+    assert_eq!(older.scene, LIVE);
+    assert!(
+        !presenter.frames.borrow().mark_failed(older),
+        "an older view"
+    );
+    assert!(presenter.paint_failed().is_empty());
+    assert_eq!(picture(&presenter), pictures);
+    assert_eq!(presenter.frames.borrow().retirement_bytes(), bytes);
+
+    let frozen = later(&presenter)[1];
+    assert!(presenter.frames.borrow().mark_failed(frozen));
+    assert!(presenter.paint_failed().is_empty(), "no old-scene failure");
+    assert_eq!(presenter.frames.borrow().retirement_bytes(), 0);
+    assert_eq!(picture(&presenter).len(), 1);
+}
+
+#[test]
+fn paint_and_paint_with_answering_now_draw_and_record_the_same() {
+    const SURVIVOR: SceneId = SceneId(25);
+    let setup = |handoff: bool| {
+        let (mut presenter, now, job) =
+            recovering(vec![(LIVE, super::pair()), (SURVIVOR, rect("survivor"))]);
+        presenter
+            .completed(job.run(&mut Shaper), now)
+            .expect("recovery");
+        assert!(presenter.sample_at(now).expect("a sample").0.visible);
+        presenter.frames.borrow_mut().shown = true;
+        if handoff {
+            replace(&mut presenter, &[LIVE], NEXT, now);
+            begin(&mut presenter, NEXT, now);
+        }
+        presenter
+    };
+    // One paint through either entry, failing the two-item pair when asked: whether a frame
+    // newly failed, each frame drawn, and what is observed afterwards.
+    let drawn = |presenter: &Presenter, with: bool, fail: bool| {
+        let mut items = Vec::new();
+        let mut draw = |frame: &kumochi_scene::Frame| {
+            items.push(frame.items().to_vec());
+            if fail && frame.items().len() == 2 {
+                Err(())
+            } else {
+                Ok(())
+            }
+        };
+        let frames = presenter.frames.borrow();
+        let failed = if with {
+            frames.paint_with(|_, frame, _| draw(frame).map(|()| Drawn::Now))
+        } else {
+            frames.paint(|frame, _| draw(frame))
+        };
+        (failed, items, frames.observations())
+    };
+    let counts = |items: &[Vec<FrameItem>]| items.iter().map(Vec::len).collect::<Vec<_>>();
+    let bounds = |observations: [Option<(SceneId, u64, u32)>; 4]| {
+        observations
+            .into_iter()
+            .flatten()
+            .map(|(scene, _, bound)| (scene, bound))
+            .collect::<Vec<_>>()
+    };
+    for (handoff, painted, cleared) in [
+        (false, vec![(LIVE, 1), (SURVIVOR, 1)], vec![LIVE]),
+        (true, vec![(SURVIVOR, 1)], vec![]),
+    ] {
+        let by_paint = drawn(&setup(handoff), false, false);
+        assert!(!by_paint.0);
+        assert_eq!(
+            counts(&by_paint.1),
+            [2, 1],
+            "the live or frozen pair, then the survivor, in scene order"
+        );
+        assert_eq!(bounds(by_paint.2), painted, "handoff {handoff}");
+        assert_eq!(
+            drawn(&setup(handoff), true, false),
+            by_paint,
+            "handoff {handoff}"
+        );
+
+        let failing = |with: bool| {
+            let mut presenter = setup(handoff);
+            let first = drawn(&presenter, with, true);
+            let next = drawn(&presenter, with, false);
+            let failed: Vec<_> = presenter
+                .paint_failed()
+                .into_iter()
+                .filter_map(|effect| match effect {
+                    super::Effect::Control(
+                        kumochi_protocol::message::ControlToBrain::SceneFailed { scene },
+                    ) => Some(scene),
+                    _ => None,
+                })
+                .collect();
+            (first, next, failed)
+        };
+        let by_paint = failing(false);
+        assert!(by_paint.0.0, "the pair newly failed");
+        assert_eq!(counts(&by_paint.0.1), [2, 1]);
+        assert_eq!(
+            bounds(by_paint.0.2),
+            [(SURVIVOR, 1)],
+            "the survivor's record"
+        );
+        assert_eq!(counts(&by_paint.1.1), [1], "the failed pair paints no more");
+        assert_eq!(by_paint.2, cleared, "handoff {handoff}");
+        assert_eq!(failing(true), by_paint, "handoff {handoff}");
+    }
 }
