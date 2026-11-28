@@ -225,6 +225,8 @@ struct Presence {
     error: Option<SharedString>,
     /// A local submission refusal, shown only in the typing panel.
     refusal: Option<Text>,
+    /// The pair whose `TextReady` sends the Enter pressed before its pair admitted turns.
+    held_submit: Option<u64>,
 }
 
 impl Presence {
@@ -1196,6 +1198,7 @@ pub(crate) fn open(
             delete_retry: None,
             error: None,
             refusal: None,
+            held_submit: None,
             line: Line::default(),
             drawn: Drawn::default(),
             kumo: kumo.clone(),

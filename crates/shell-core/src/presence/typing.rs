@@ -74,6 +74,9 @@ pub enum Admission {
     Proceed,
     /// No eligible session or notice.
     Ignore,
+    /// The pair opens to turns at its [`crate::link::LinkEvent::TextReady`]; keep the draft and
+    /// submit then.
+    Wait,
     /// The session cannot accept a draft now.
     Refused(Text),
 }
@@ -82,6 +85,8 @@ pub enum Admission {
 pub fn admit(link: &LinkHandle, session: Option<&Session>) -> Admission {
     if link.admits_text(session) {
         Admission::Proceed
+    } else if session.is_some_and(|session| link.awaits_text_ready(session)) {
+        Admission::Wait
     } else if session.is_some() {
         Admission::Refused(Text::TurnBusy)
     } else {

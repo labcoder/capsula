@@ -272,6 +272,7 @@ impl Presence {
         if !text.typing.close(reason) {
             return Ok(());
         }
+        self.held_submit = None;
         let previous = text
             .previous
             .take()
@@ -308,13 +309,17 @@ impl Presence {
     pub(super) fn submit(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
         match typing::admit(&self.link, self.session.as_ref()) {
             Admission::Ignore => return Ok(()),
+            Admission::Wait => {
+                self.held_submit = self.session.as_ref().map(crate::link::Session::generation);
+                return Ok(());
+            }
             Admission::Refused(text) => {
                 let previous_error = self.error.clone();
                 Submission::Refused(text).update_notice(&mut self.error, &mut self.refusal);
                 self.notices_changed(previous_error.as_ref(), cx);
                 return Ok(());
             }
-            Admission::Proceed => {}
+            Admission::Proceed => self.held_submit = None,
         }
         self.cancel_voice(cx);
         self.voice.state.lost = None;

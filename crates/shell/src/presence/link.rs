@@ -6,6 +6,8 @@ mod dock_tests;
 mod draw_fixture_tests;
 #[cfg(test)]
 mod github_tests;
+#[cfg(all(windows, debug_assertions, test))]
+mod text_ready_tests;
 
 use super::{Context, OpenError, Presence, Session, diagnostics};
 use crate::accounts::Receipt;
@@ -326,9 +328,12 @@ impl Presence {
                     }
                 }
                 LinkEvent::KeyStage { generation, reply } => self.key_reply(generation, &reply, cx),
-                LinkEvent::TextReady { .. } => {
+                LinkEvent::TextReady { generation } => {
                     #[cfg(any(debug_assertions, all(windows, feature = "gate-draw-replay")))]
                     self.submit_draw_fixture(cx);
+                    if self.held_submit.take() == Some(generation) && !self.link.is_quitting() {
+                        self.submit(cx)?;
+                    }
                 }
                 LinkEvent::ModelChoice { reply, .. } => {
                     self.runs.apply_model(&reply, std::time::Instant::now());
