@@ -124,6 +124,10 @@ pub enum LinkEvent {
     },
     /// Coalesced drawing evidence from the exact narrated pair and run.
     NarrationReady(NarrationWake),
+    /// The brain acknowledged the queued pair's audio registration, so it admits turns now.
+    TextReady {
+        generation: u64,
+    },
     Settings {
         generation: u64,
         view: SettingsView,
@@ -994,6 +998,14 @@ impl LinkHandle {
                     })
                     .unwrap_or(false)
             })
+    }
+
+    /// A queued pair the brain hasn't acknowledged the audio registration of: its turns wait for
+    /// [`LinkEvent::TextReady`], which comes by the pair's startup deadline or the pair ends.
+    pub fn awaits_text_ready(&self, session: &Session) -> bool {
+        self.worker.is_some()
+            && session.open()
+            && self.shared.output.awaiting_registration(session.generation)
     }
 
     pub fn can_start_voice_gesture(&self, generation: u64) -> bool {
@@ -2359,6 +2371,12 @@ fn watch(
                 shared
                     .voice_ready_at
                     .store(platform::keyboard_ticks(), Ordering::Release);
+                if events
+                    .send_blocking(LinkEvent::TextReady { generation })
+                    .is_err()
+                {
+                    return;
+                }
             }
             Ok(Some(ControlToShell::Ping)) => {
                 if queued.is_some() && shared.output.run_end_overdue(generation, Instant::now()) {
