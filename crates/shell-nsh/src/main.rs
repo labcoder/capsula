@@ -5,6 +5,14 @@
 
 mod launch;
 mod platform;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "nothing reads a Tone, a Size, Dusk, Day or a spring until the first surface lands"
+    )
+)]
+mod ui;
 
 use std::process::ExitCode;
 use std::time::Instant;

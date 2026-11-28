@@ -20,6 +20,7 @@ use nsh_platform_windows::{AppOptions, AppSource, CacheOptions, Root, run_app};
 use super::backstop::{Backstop, Order};
 use super::shell::{self, Act, Begun, Quit};
 use crate::launch::{Launch, LaunchError};
+use crate::ui::theme::{self, Look};
 
 /// The backstop's handle for the root, since props take only values the engine can decode.
 static BACKSTOP: OnceLock<Backstop> = OnceLock::new();
@@ -126,7 +127,15 @@ pub(crate) fn run(deadline: Option<Instant>, backstop: Backstop) -> ExitCode {
         }),
     })
     .app_id(constants::SHELL_APP_ID)
-    .main_window(window);
+    .main_window(window)
+    .appearance(Look::default().appearance());
+    // Read here, on the main thread, since this crate never logs on the engine thread.
+    let root = if let Ok(tokens) = theme::tokens() {
+        root.tokens(tokens)
+    } else {
+        tracing::error!("can't read the theme; drawing with NativeShell's default");
+        root
+    };
     // shortcut: NativeShell's own `log` lines go nowhere, since their content (paths, foreign
     // error text) isn't vetted for Kumochi's log; bridge them through an allow-list of targets
     // once the shell shows something worth diagnosing.
