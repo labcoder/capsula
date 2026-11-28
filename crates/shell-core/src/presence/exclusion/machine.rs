@@ -19,7 +19,9 @@ use kumochi_protocol::message::{CaptureFor, LeaseGeneration};
 pub mod fixture;
 
 pub(super) const LIFETIME: Duration = Duration::from_secs(3);
-/// How long an acquire waits for every snapshot and exclude, counted from its start.
+/// Times an acquire driven by asks and answers, for its own snapshots and excludes, from its start.
+/// The four calls answer at once and aren't timed; a surface opened after the grant has no bound but
+/// the lease's lifetime.
 pub(super) const BOUND: Duration = Duration::from_millis(250);
 const SLOTS: [Slot; 8] = [
     Slot::Dock,
@@ -104,7 +106,7 @@ pub enum Stand {
     Idle,
     /// Snapshots or excludes are still out, and nothing is granted.
     Acquiring,
-    /// Every bound surface's exclude is confirmed, a surface opened since included.
+    /// Every bound surface is covered or proved gone, a surface opened since included.
     Granted,
     /// Revoked, with restores still to ask or to answer.
     Restoring,
@@ -276,8 +278,9 @@ impl<R> Exclusion<R> {
         }
     }
 
-    /// A snapshot's answer at `now`, which counts only before the acquire's bound. A failure, or
-    /// no surface in a slot opened under the lease, revokes it.
+    /// A snapshot's answer at `now`, which counts only before the acquire's bound; `now` applies
+    /// the bound first, whether or not this answer counts. A failure, or no surface in a slot
+    /// opened under the lease, revokes it.
     pub fn snapshot(&mut self, id: AskId, read: Result<Option<R>, Error>, now: Instant) {
         self.overdue(now);
         self.snapshot_in(id, read);
@@ -301,8 +304,8 @@ impl<R> Exclusion<R> {
         self.settle();
     }
 
-    /// An exclude's answer at `now`, which counts only before the acquire's bound. A failure
-    /// revokes the lease.
+    /// An exclude's answer at `now`, which counts only before the acquire's bound; `now` applies
+    /// the bound first, whether or not this answer counts. A failure revokes the lease.
     pub fn excluded(&mut self, id: AskId, done: Result<(), Error>, now: Instant) {
         self.overdue(now);
         self.excluded_in(id, done);
@@ -334,8 +337,14 @@ impl<R> Exclusion<R> {
     }
 
     /// Settles `slot` without a restore when `proved` shows the surface of the receipt it holds now
-    /// is gone, and says whether it did. A slot holding no receipt is left as it is.
-    pub fn gone(&mut self, slot: Slot, proved: impl FnOnce(&R) -> bool) -> bool {
+    /// is gone, and says whether it did. A slot holding no receipt is left as it is. `now` applies
+    /// the acquire's bound first, whether or not the proof counts.
+    pub fn gone(&mut self, slot: Slot, proved: impl FnOnce(&R) -> bool, now: Instant) -> bool {
+        self.overdue(now);
+        self.gone_in(slot, proved)
+    }
+
+    fn gone_in(&mut self, slot: Slot, proved: impl FnOnce(&R) -> bool) -> bool {
         let Some(lease) = &mut self.lease else {
             return false;
         };
@@ -371,7 +380,8 @@ impl<R> Exclusion<R> {
         self.settle();
     }
 
-    /// Revokes `key`'s lease once `now` is at or after its deadline, and says whether it did.
+    /// Revokes `key`'s lease once `now` is at or after its deadline, and says whether it did. The
+    /// lifetime ends only when the owner's timer calls this, as `expire` always has.
     pub fn lapse(&mut self, key: Key, now: Instant) -> bool {
         let due = self
             .lease
@@ -476,7 +486,7 @@ impl<R> Exclusion<R> {
             return Ok(());
         };
         if self.live(generation)
-            && !self.gone(slot, S::gone)
+            && !self.gone_in(slot, S::gone)
             && let Some(prior) = self.receipt(slot)
             && surfaces.same(slot, prior)
         {
@@ -570,8 +580,8 @@ impl<R> Exclusion<R> {
         self.lease.as_ref().map(|lease| lease.deadline)
     }
 
-    /// Whether `generation`'s lease still protects capture: granted, every bound surface
-    /// covered, and not revoked.
+    /// Whether `generation`'s lease still protects capture: granted, every bound surface covered
+    /// or proved gone, and not revoked.
     pub fn live(&self, generation: LeaseGeneration) -> bool {
         self.lease
             .as_ref()

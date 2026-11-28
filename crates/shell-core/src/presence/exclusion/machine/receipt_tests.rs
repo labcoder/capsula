@@ -143,7 +143,7 @@ fn an_unanswered_restore_stays_busy_past_any_time_until_its_surface_is_gone() {
     assert_eq!(owner.begin(10, TURN, late), Err(Error::Busy));
     assert_eq!(owner.next_ask(), None, "the restore out is not asked twice");
     assert!(
-        owner.gone(Slot::Drawing, |_| true),
+        owner.gone(Slot::Drawing, |_| true, late),
         "the drawing's surface is gone"
     );
     assert_eq!(owner.stand(), Stand::Idle);
@@ -282,7 +282,7 @@ fn a_slot_opened_while_acquiring_granted_or_restoring() {
 
     let uncovered = |owner: &Exclusion<Slot>| (owner.stand(), owner.live(key.generation()));
     assert!(
-        owner.gone(Slot::Settings, |_| true),
+        owner.gone(Slot::Settings, |_| true, now),
         "the settings surface is gone"
     );
     assert_eq!(owner.opened(Slot::Settings), Ok(()));
@@ -407,7 +407,7 @@ fn a_proof_about_an_earlier_surface_settles_nothing() {
     for ask in drain(&mut owner) {
         owner.excluded(ask.id, Ok(()), now);
     }
-    assert!(owner.gone(Slot::Drawing, a), "A is gone");
+    assert!(owner.gone(Slot::Drawing, a, now), "A is gone");
     assert_eq!(owner.opened(Slot::Drawing), Ok(()));
     let snapshot = drain(&mut owner);
     owner.snapshot(snapshot[0].id, Ok(Some((Slot::Drawing, 2))), now);
@@ -427,13 +427,55 @@ fn a_proof_about_an_earlier_surface_settles_nothing() {
     }
     assert_eq!(owner.stand(), Stand::Debt);
     assert!(
-        !owner.gone(Slot::Drawing, a),
+        !owner.gone(Slot::Drawing, a, now),
         "A's late notice proves nothing about B"
     );
     assert_eq!(owner.stand(), Stand::Debt);
     assert_eq!(owner.begin(10, TURN, now), Err(Error::Busy));
-    assert!(owner.gone(Slot::Drawing, b), "B's own proof settles it");
+    assert!(
+        owner.gone(Slot::Drawing, b, now),
+        "B's own proof settles it"
+    );
     assert_eq!(owner.stand(), Stand::Idle);
+}
+
+#[test]
+fn a_proof_at_the_bound_grants_nothing_whether_or_not_the_timer_ran() {
+    let now = Instant::now();
+    let bound = now + ACQUIRE_BOUND;
+    let before = bound
+        .checked_sub(Duration::from_nanos(1))
+        .expect("fixture clock supports the instant before the bound");
+    for at in [before, bound] {
+        let mut owner = Exclusion::default();
+        let key = owner.begin(9, TURN, now).unwrap();
+        for ask in drain(&mut owner) {
+            let present = matches!(ask.slot, Slot::Dock | Slot::Drawing);
+            owner.snapshot(ask.id, Ok(present.then_some(ask.slot)), now);
+        }
+        let excludes = drain(&mut owner);
+        assert_eq!(
+            ops(&excludes),
+            each(Op::Exclude, &[Slot::Dock, Slot::Drawing])
+        );
+        owner.excluded(excludes[0].id, Ok(()), now);
+        assert!(
+            owner.gone(Slot::Drawing, |_| true, at),
+            "the drawing is gone"
+        );
+        if at == before {
+            assert_eq!(
+                (owner.stand(), owner.live(key.generation())),
+                (Stand::Granted, true)
+            );
+        } else {
+            assert_eq!(
+                (owner.stand(), owner.live(key.generation())),
+                (Stand::Restoring, false)
+            );
+            assert_eq!(ops(&drain(&mut owner)), [(Op::Restore, Slot::Dock)]);
+        }
+    }
 }
 
 /// Records each snapshot, exclude and restore as `S`, `X` or `R` and the slot's number.
