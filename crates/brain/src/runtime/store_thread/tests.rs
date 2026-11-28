@@ -316,6 +316,10 @@ async fn reply(replies: &mut mpsc::UnboundedReceiver<Input>) -> Input {
 /// by the default for a thread with none, keeps no text, title or thread. A cloud thread's turn
 /// under a local default is stored.
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one table of turns, then what each kept in every table"
+)]
 async fn a_turn_for_the_local_server_is_never_stored() {
     use crate::config::DefaultIntent::{Local, Other, Unknown};
     use kumochi_protocol::message::{ConnectionKind, Effort, ModelChoice, ModelSlug};
