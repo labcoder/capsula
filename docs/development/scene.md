@@ -881,9 +881,12 @@ Prepared display residency is not an admission input.
 
 The dormant presenter conductor binds only a step whose picture waits for speech.
 It chooses one Speech-start head at a time in stable scene order, after the authored
-time and replacement guard allow it. Now and After never create a presenter binding;
-they use their authored visual timing whether they have narration or not. The conductor
-doesn't scan past an uninstalled authored head to reach a later Speech step.
+time and replacement guard allow it. Of a run's promised steps, only the lowest announced one
+that hasn't settled resolves, so a later step that becomes eligible first can't take the
+binding. An ended step stays readable until the presenter releases its binding. Now and After
+never create a presenter binding; they use their authored visual timing whether they have
+narration or not. The conductor doesn't scan past an uninstalled authored head to reach a later
+Speech step.
 Presence attaches the authenticated pair's bridge after resetting its presenter on Connect.
 The bridge supplies the pair clock and assignment lookup; unresolved isn't the same as
 unassigned. Only a queued pair prepared as `Conducted` owns the bridge; the ordinary launcher

@@ -43,12 +43,6 @@ pub(in crate::link) enum NarratedReservation {
     Drained,
 }
 
-#[derive(Clone, Copy)]
-pub(super) enum StopOrigin {
-    Local,
-    Brain,
-}
-
 pub(in crate::link) type PlaybackStop = arc_swap::ArcSwapOption<(RunId, StopSignal)>;
 
 pub(in crate::link) struct Queued {
@@ -82,15 +76,17 @@ enum TalkBackSwitch {
     Refused,
 }
 
-enum Delivery {
-    Unpromised,
-    Promised(Assignment),
-    Announced,
+/// A run's promised steps: committed ones awaiting their announcement, in segment order, then
+/// the announced Speech segments and whether each was locally allowed.
+#[derive(Default)]
+struct Delivery {
+    unannounced: Vec<Assignment>,
+    announced: Vec<(SegmentId, bool)>,
 }
 
 enum DeliveryTarget<'a> {
     Waiting,
-    Live(&'a mut Delivery, Option<&'a Input>),
+    Live(&'a mut Delivery),
     Draining(&'a mut Delivery),
 }
 
@@ -99,7 +95,7 @@ struct Active {
     input: Option<Input>,
     proof: Arc<AtomicU8>,
     delivery: Option<Delivery>,
-    locally_stopped: bool,
+    stop_accepted: bool,
     run_end_by: Option<Instant>,
     speech: Speech,
 }
@@ -165,7 +161,7 @@ impl Queued {
         self.wake();
     }
 
-    pub(super) fn stop(&mut self, run: RunId, origin: StopOrigin) -> bool {
+    pub(super) fn stop(&mut self, run: RunId) -> bool {
         let Some(active) = self.active.as_mut().filter(|active| run <= active.id) else {
             return false;
         };
@@ -177,11 +173,8 @@ impl Queued {
             .run_end_by
             .get_or_insert(Instant::now() + HANDSHAKE_TIMEOUT);
         let accepted = active.input.as_ref().is_none_or(Input::stop);
-        if accepted
-            && matches!(origin, StopOrigin::Local)
-            && let Some(bridge) = &self.narrated
-        {
-            active.locally_stopped = true;
+        if accepted && let Some(bridge) = &self.narrated {
+            active.stop_accepted = true;
             bridge.stop(run);
         }
         self.wake();
@@ -236,7 +229,7 @@ impl Queued {
         if run <= self.stopped {
             Ok(DeliveryTarget::Draining(delivery))
         } else {
-            Ok(DeliveryTarget::Live(delivery, active.input.as_ref()))
+            Ok(DeliveryTarget::Live(delivery))
         }
     }
 }
@@ -296,7 +289,7 @@ impl OutputOwner {
     /// `Busy` on contention.
     pub fn stop_locally(&self, session: u64, run: RunId) -> Result<(), Denied> {
         if let Some((_, owner)) = self.try_lock()?.queue(session) {
-            owner.stop(run, StopOrigin::Local);
+            owner.stop(run);
         }
         Ok(())
     }
@@ -580,7 +573,7 @@ impl OutputOwner {
             owner.pending = None;
             self.hold_released.store(false, Ordering::Release);
             owner.retire();
-            if let Some(old) = owner.active.take().filter(|old| old.locally_stopped)
+            if let Some(old) = owner.active.take().filter(|old| old.stop_accepted)
                 && let Some(delivery) = old.delivery
             {
                 owner.predecessor = Some((old.id, delivery, old.run_end_by));
@@ -596,9 +589,8 @@ impl OutputOwner {
                 id: run,
                 input: None,
                 proof: Arc::clone(&proof),
-                delivery: (!silent && owner.narrated.is_some() && !ended)
-                    .then_some(Delivery::Unpromised),
-                locally_stopped: false,
+                delivery: (!silent && owner.narrated.is_some() && !ended).then(Delivery::default),
+                stop_accepted: false,
                 run_end_by: None,
                 speech: speech.clone(),
             });
@@ -671,6 +663,15 @@ impl OutputOwner {
                 fake,
             )
         };
+        #[cfg(all(windows, debug_assertions))]
+        #[cfg(any(test, feature = "test-support"))]
+        if INSTALLS_HELD.load(std::sync::atomic::Ordering::Acquire) {
+            drop(
+                INSTALLING
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            );
+        }
         result.is_ok_and(|input| self.install_queued_input(session, run, input))
     }
 
@@ -691,6 +692,9 @@ impl OutputOwner {
             .store(Some(Arc::new((run, input.stop_signal()))));
         active.input = Some(input);
         owner.wake();
+        if let Some(bridge) = &owner.narrated {
+            bridge.input_installed();
+        }
         true
     }
 
@@ -704,31 +708,30 @@ impl OutputOwner {
             .speech_queue(assignment.session)
             .filter(|(output, _)| *output == assignment.output)
             .ok_or(())?;
-        let (delivery, input, outcome) = match owner
-            .delivery(assignment.run, &self.hold_released)?
-        {
+        let (delivery, outcome) = match owner.delivery(assignment.run, &self.hold_released)? {
             DeliveryTarget::Waiting => return Ok(NarratedReservation::Waiting),
-            DeliveryTarget::Live(delivery, input) => {
-                (delivery, input, NarratedReservation::Reserved)
-            }
-            DeliveryTarget::Draining(delivery) => (delivery, None, NarratedReservation::Drained),
+            DeliveryTarget::Live(delivery) => (delivery, NarratedReservation::Reserved),
+            DeliveryTarget::Draining(delivery) => (delivery, NarratedReservation::Drained),
         };
-        match (&*delivery, frame) {
-            (Delivery::Unpromised, MetadataFrame::Commit) => {
-                *delivery = Delivery::Promised(assignment);
-            }
-            (Delivery::Promised(expected), MetadataFrame::Announcement)
-                if *expected == assignment =>
-            {
-                if matches!(outcome, NarratedReservation::Reserved) {
-                    let Some(input) = input else {
-                        return Ok(NarratedReservation::Waiting);
-                    };
-                    input.narrate(assignment).map_err(|_| ())?;
+        match frame {
+            MetadataFrame::Commit => {
+                let last = delivery
+                    .unannounced
+                    .last()
+                    .map(|a| a.segment)
+                    .or_else(|| delivery.announced.last().map(|&(segment, _)| segment));
+                if last.is_some_and(|last| assignment.segment <= last) {
+                    return Err(());
                 }
-                *delivery = Delivery::Announced;
+                delivery.unannounced.push(assignment);
             }
-            _ => return Err(()),
+            MetadataFrame::Announcement => {
+                if delivery.unannounced.first() != Some(&assignment) {
+                    return Err(());
+                }
+                delivery.unannounced.remove(0);
+                delivery.announced.push((assignment.segment, false));
+            }
         }
         Ok(outcome)
     }
@@ -737,16 +740,17 @@ impl OutputOwner {
         drop(self.state.lock());
     }
 
+    /// `Ok(false)`: the exact run stopped or ended first, so nothing was enqueued or published.
     pub(in crate::link) fn narrated_gate(
         &self,
         command: Command,
         before: impl FnOnce() -> bool,
-    ) -> Result<(), super::Denied> {
+    ) -> Result<bool, super::Denied> {
         use super::Denied;
 
         let a = match command {
             Command::Allow(binding) | Command::Revoke(binding) => binding.assignment,
-            Command::RevokeSource(assignment) => assignment,
+            Command::Narrate(assignment) | Command::RevokeSource(assignment) => assignment,
             _ => return Err(Denied::Stale),
         };
         let mut state = self.try_lock()?;
@@ -755,24 +759,34 @@ impl OutputOwner {
             .filter(|(output, owner)| *output == a.output && owner.ready())
             .ok_or(Denied::Stale)?;
         if !matches!(command, Command::Allow(_)) && a.run <= owner.stopped {
-            return Ok(());
+            return Ok(true);
         }
-        owner
+        let stopped = owner.stopped;
+        let active = owner
             .active
-            .as_ref()
-            .filter(|active| active.id == a.run && a.run > owner.stopped)
-            .and_then(|active| active.input.as_ref())
-            .is_some_and(|input| {
-                before()
-                    && match command {
-                        Command::Allow(binding) => input.allow(binding),
-                        Command::Revoke(binding) => input.revoke(binding),
-                        Command::RevokeSource(assignment) => input.revoke_source(assignment),
-                        _ => false,
-                    }
+            .as_mut()
+            .filter(|active| active.id == a.run)
+            .ok_or(Denied::Lost)?;
+        if a.run <= stopped {
+            return Ok(false);
+        }
+        let input = active.input.as_ref().ok_or(Denied::Opening)?;
+        match input.command(command) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => return Err(Denied::Busy),
+            Err(TrySendError::Disconnected(_)) => return Err(Denied::Lost),
+        }
+        if matches!(command, Command::Allow(_))
+            && let Some((_, allowed)) = active.delivery.as_mut().and_then(|delivery| {
+                delivery
+                    .announced
+                    .iter_mut()
+                    .find(|(segment, _)| *segment == a.segment)
             })
-            .then_some(())
-            .ok_or(Denied::Lost)
+        {
+            *allowed = true;
+        }
+        before().then_some(true).ok_or(Denied::Lost)
     }
 
     pub(in crate::link) fn queued_feed(
@@ -789,6 +803,7 @@ impl OutputOwner {
             .filter(|(key, _)| *key == output)
             .ok_or(())?;
         if owner.narrated.is_some() {
+            let live = run > owner.stopped;
             let delivery = owner
                 .predecessor
                 .as_ref()
@@ -802,7 +817,16 @@ impl OutputOwner {
                         .delivery
                         .as_ref()
                 });
-            if matches!(delivery, Some(Delivery::Promised(a)) if a.segment == segment) {
+            let sound = packet.as_ref().is_some_and(Packet::sound);
+            if delivery.is_some_and(|delivery| {
+                delivery.unannounced.iter().any(|a| a.segment == segment)
+                    || live
+                        && sound
+                        && delivery
+                            .announced
+                            .iter()
+                            .any(|&(id, allowed)| id == segment && !allowed)
+            }) {
                 return Err(());
             }
         }
@@ -834,7 +858,7 @@ impl OutputOwner {
     pub(in crate::link) fn revoke_queued(&self, session: u64, run: RunId) -> bool {
         self.lock()
             .speech_queue(session)
-            .is_some_and(|(_, owner)| owner.stop(run, StopOrigin::Brain))
+            .is_some_and(|(_, owner)| owner.stop(run))
     }
 
     pub(in crate::link) fn queued_terminal(&self, session: u64, run: RunId) {
@@ -896,11 +920,34 @@ impl OutputOwner {
     }
 }
 
+#[cfg(all(windows, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
+static INSTALLING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Raised only by a crate test's hold, so no other build takes the install barrier.
+#[cfg(all(windows, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
+static INSTALLS_HELD: AtomicBool = AtomicBool::new(false);
+
+/// Holds every bound run's speaker input short of its install until the guard drops.
+#[cfg(all(windows, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "only the crate's own tests hold the barrier")
+)]
+pub(in crate::link) fn hold_input_installs() -> std::sync::MutexGuard<'static, ()> {
+    INSTALLS_HELD.store(true, std::sync::atomic::Ordering::Release);
+    INSTALLING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[cfg(any(test, feature = "test-support"))]
 fn fake_queued_output(shared: &Weak<Shared>) -> Option<crate::speaker::queued::FakeOutput> {
     let owner = shared.upgrade()?;
     Some(crate::speaker::queued::FakeOutput {
-        sender: owner.fake_playback.clone()?,
+        sender: owner.fake_playback.get()?.clone(),
         prime: owner.prime_fake_playback.swap(false, Ordering::AcqRel),
     })
 }

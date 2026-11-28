@@ -99,7 +99,7 @@ impl Reader {
             }
             _ => {
                 if let Some(bridge) = narrated {
-                    self.retirement(bridge, &message)?;
+                    self.membership(bridge, &message)?;
                 }
                 return Ok(Some(message));
             }
@@ -127,8 +127,12 @@ impl Reader {
         Ok(None)
     }
 
-    fn retirement(&mut self, narrated: &Narrated, message: &DataToShell) -> Result<(), ()> {
+    fn membership(&mut self, narrated: &Narrated, message: &DataToShell) -> Result<(), ()> {
         let (scenes, successor, lane) = match message {
+            DataToShell::SceneBegin { scene, .. } => return narrated.began(*scene),
+            DataToShell::SceneSnapshotV1 { chunk } if chunk.ordinal == 0 => {
+                return narrated.began(chunk.scene);
+            }
             DataToShell::ScenesRemoved { scenes } => {
                 (scenes.as_slice(), None, RetirementLane::Scenes)
             }

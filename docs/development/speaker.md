@@ -51,10 +51,11 @@ handoff boundary, or Stop can discard the queue without the handoff boundary. St
 observations don't request recovery. Virtual pacing never crosses the first unheard gap
 in heard history. Finality after Stop still requires every applicable generation-specific
 tail proof and the latest known deadline. Two unresolved device tails refuse another
-physical open, but virtual pacing continues. On a Plain pair, a reply's first open request
-holds virtual pacing until it resolves or reaches its 1 s retry time, whichever comes first, so a
-slow first device open doesn't retire the reply's start unheard. An open still pending after that
-can lose the start. A retry, and a Conducted pair, keep pacing during an open.
+physical open, but virtual pacing continues. On every queued pair, Plain or Conducted, a reply's
+first open request holds virtual pacing until it resolves or reaches its 1 s retry time, whichever
+comes first, so a slow first device open doesn't retire the reply's start unheard. An open still
+pending after that can lose the start. A retry keeps pacing during an open, and an unavailable
+route takes silent timing at once.
 
 Stop is sticky and bypasses the bounded command mailbox. The owner handles commands
 before admitting ingress, and a terminated owner reports disconnection, not backpressure.
@@ -150,7 +151,8 @@ unheard source never produces a played terminal; an earlier gap doesn't prevent 
 later fully heard segment from ending. A fully retired unheard line takes silent
 fallback even when a device opens as virtual pacing exhausts it. Retirement still
 keeps the existing rebuild grace. Ready PCM arms the hold during a pending device
-open, so expiry can release it to virtual pacing without another packet.
+open, so expiry can release it to virtual pacing without another packet; on a reply's first
+open, that pacing still waits for the open or its retry time.
 Missing owner, backend startup failure and worker exit
 are reported to the pair's bridge, which supplies keyed Unavailable when there's no
 onset to preserve. An ordered Applied for the exact binding lets the bridge send
@@ -163,10 +165,10 @@ launcher prepares `Plain`.
 Each link has one output owner. A Legacy connection gets a fresh no-output epoch before
 Connected, so an old capture claim cannot match a replacement session. A queued pair can
 lend the capture inhibit only after its exact logical output is registered, with its Show
-Screen value known (on or off) and no pending setting change. With Talk-back on, the pair must be
-Plain, with no typed turn reserved, no draining predecessor, and the previous run's
-`SpeechStopped` accepted by the control queue. While the inhibit is held, no typed turn
-can reserve the pair. Registration cannot prove that an earlier route or microphone retired.
+Screen value known (on or off) and no pending setting change. With Talk-back on, the pair needs
+no typed turn reserved, no draining predecessor, the previous run's `SpeechStopped` accepted by
+the control queue and, on a Conducted pair, that run's narration released at its exact `RunEnd`.
+While the inhibit is held, no typed turn can reserve the pair. Registration cannot prove that an earlier route or microphone retired.
 
 The inhibit token binds one gesture and microphone generation. The output owner rechecks
 the session, output key and token before the microphone starts or collects. Ending a

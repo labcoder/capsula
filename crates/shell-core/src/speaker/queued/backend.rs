@@ -10,6 +10,9 @@ use crate::platform::speaker_cpal::{BackendStream, Control, OutputError, Transpo
 #[cfg(not(windows))]
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use fixture::FixturePlayback;
+#[cfg(windows)]
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use fixture::hold_fake_opens;
 #[cfg(any(test, feature = "test-support"))]
 pub(super) use fixture::spawn_fake;
 #[cfg(windows)]

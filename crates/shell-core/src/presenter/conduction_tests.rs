@@ -776,10 +776,12 @@ fn authenticated_narration(case: NarratedCase) {
                 assert!(session.open());
                 assert_eq!(producer.speech_decision(), None);
             });
-            wait("exact Discard after releasing the output lock", &mut || {
-                assert!(session.update_narration(&pipe.handle, &mut presenter, Instant::now()));
-                producer.speech_decision() == Some((dispatch, SpeechDecision::Discard))
-            });
+            assert!(session.update_narration(&pipe.handle, &mut presenter, Instant::now()));
+            assert_eq!(
+                producer.speech_decision(),
+                None,
+                "the exact RunEnd settled the unsent Discard"
+            );
         }
         assert_ne!(
             producer.speech_decision(),

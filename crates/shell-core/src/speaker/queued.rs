@@ -29,8 +29,21 @@ pub use backend::{FixturePlayback, await_fake_disposal, serialize_playback};
 #[cfg(test)]
 mod tests;
 
+#[cfg(windows)]
+#[cfg(any(test, feature = "test-support"))]
+#[cfg_attr(
+    not(test),
+    expect(unused_imports, reason = "only the crate's own tests use it")
+)]
+pub(crate) use backend::hold_fake_opens;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use worker::FakeOutput;
+#[cfg(any(test, feature = "test-support"))]
+#[cfg_attr(
+    not(test),
+    expect(unused_imports, reason = "only the crate's own tests use it")
+)]
+pub(crate) use worker::unattended;
 pub(crate) use worker::{
     Command, DrawingIo, Input, Ordered, OwnerExit, StopSignal, spawn, spawn_plain,
 };
@@ -63,6 +76,10 @@ impl Packet {
             pcm,
             credit: Credit { origin, bytes },
         }
+    }
+
+    pub(crate) fn sound(&self) -> bool {
+        !self.pcm.samples.is_empty()
     }
 }
 
