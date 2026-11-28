@@ -209,6 +209,8 @@ pub(super) fn presence(cx: &mut TestAppContext) -> Entity<Presence> {
             kumo_frames: FrameLoop::default(),
             overlay: super::overlay_visibility::Visibility::Closed,
             on_screen: Default::default(),
+            #[cfg(any(debug_assertions, all(windows, feature = "gate-draw-replay")))]
+            draw_fixture: None,
             delete_retry: None,
             error: None,
             refusal: None,

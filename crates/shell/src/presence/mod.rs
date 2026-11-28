@@ -159,6 +159,9 @@ struct Presence {
     /// The scenes on screen as an open panel last heard them.
     on_screen:
         [Option<kumochi_protocol::message::SceneId>; kumochi_protocol::message::MAX_VISIBLE_SCENES],
+    /// The drawing replay's prompt, held until the pair admits turns.
+    #[cfg(any(debug_assertions, all(windows, feature = "gate-draw-replay")))]
+    draw_fixture: Option<&'static str>,
     chat_notice: crate::chat_notice::ChatNotice,
     events: Sender<PresenceEvent>,
     /// The channel's receiving end, for a drop's drains.
@@ -1201,6 +1204,8 @@ pub(crate) fn open(
             kumo_frames: FrameLoop::default(),
             overlay: overlay_visibility::Visibility::Closed,
             on_screen: Default::default(),
+            #[cfg(any(debug_assertions, all(windows, feature = "gate-draw-replay")))]
+            draw_fixture: None,
         }
     });
     owner.update(cx, |this, cx| {
