@@ -356,6 +356,7 @@ async fn a_turn_for_the_local_server_is_never_stored() {
         text: text.into(),
         screen: None,
         local_default,
+        local: None,
     };
     let off = || Some(kumochi_protocol::message::ErrorKey::LocalOff.into());
     let unknown = || Some(kumochi_protocol::message::ErrorKey::ConfigUnreadable.into());
@@ -821,6 +822,7 @@ async fn an_op_fails_while_the_store_cant_reopen_and_the_next_is_stored_once_it_
         text: text.into(),
         screen: None,
         local_default: crate::config::DefaultIntent::Other,
+        local: None,
     };
     assert!(thread.send(turn(RunId(3), "refused words")));
     assert_eq!(
@@ -977,6 +979,7 @@ fn every_operation_gets_one_reply_in_order() {
             text: "hi".into(),
             screen: None,
             local_default: crate::config::DefaultIntent::Other,
+            local: None,
         },
         StoreOp::CommitStep {
             thread: ThreadId(2),
@@ -1081,6 +1084,7 @@ fn a_round_the_reader_would_refuse_fails_its_run_and_the_thread_goes_on() {
             text: "hi".into(),
             screen: None,
             local_default: crate::config::DefaultIntent::Other,
+            local: None,
         },
         round(RunId(1), item, over),
         end(RunId(1), RunEnd::Failed(crate::store::Failure::Store)),
@@ -1091,6 +1095,7 @@ fn a_round_the_reader_would_refuse_fails_its_run_and_the_thread_goes_on() {
             text: "again".into(),
             screen: None,
             local_default: crate::config::DefaultIntent::Other,
+            local: None,
         },
         round(RunId(2), &growing, ok()),
         end(RunId(2), RunEnd::Failed(crate::store::Failure::Store)),
@@ -1101,6 +1106,7 @@ fn a_round_the_reader_would_refuse_fails_its_run_and_the_thread_goes_on() {
             text: "once more".into(),
             screen: None,
             local_default: crate::config::DefaultIntent::Other,
+            local: None,
         },
         round(RunId(3), item, ok()),
         end(RunId(3), RunEnd::Done),
@@ -1174,6 +1180,7 @@ fn a_heard_point_is_stored_and_answers_nothing() {
             text: "hi".into(),
             screen: None,
             local_default: crate::config::DefaultIntent::Other,
+            local: None,
         },
         StoreOp::EndRun {
             screen: None,
@@ -1191,6 +1198,7 @@ fn a_heard_point_is_stored_and_answers_nothing() {
             text: "again".into(),
             screen: None,
             local_default: crate::config::DefaultIntent::Other,
+            local: None,
         },
         StoreOp::EndRun {
             screen: None,
@@ -1261,6 +1269,7 @@ fn a_held_turns_screen_is_stored_with_its_turn() {
         text: "hi".into(),
         screen: Some(HeldScreen::NotIncluded(ScreenClass::TooLarge)),
         local_default: crate::config::DefaultIntent::Other,
+        local: None,
     }));
     store.close().blocking_recv().expect("closed");
     let mut got = Vec::new();
@@ -1613,6 +1622,7 @@ fn measure_delete_during_a_purge() {
                 text: "a measured turn".into(),
                 screen: None,
                 local_default: crate::config::DefaultIntent::Other,
+                local: None,
             }));
             let released = Instant::now();
             releasing.send(()).expect("the copy waits");
@@ -1676,6 +1686,7 @@ fn a_withdrawn_screen_is_stored_after_its_turn() {
         text: "hi".into(),
         screen: Some(HeldScreen::Attached),
         local_default: crate::config::DefaultIntent::Other,
+        local: None,
     }));
     assert!(store.send(StoreOp::WithdrawScreen { run }));
     store.close().blocking_recv().expect("closed");
@@ -1711,6 +1722,7 @@ fn an_unsent_screen_is_cleared_after_its_turn() {
         text: "hi".into(),
         screen: Some(HeldScreen::Screen),
         local_default: crate::config::DefaultIntent::Other,
+        local: None,
     }));
     let other = RunId(2);
     assert!(store.send(StoreOp::BeginTurn {
@@ -1720,6 +1732,7 @@ fn an_unsent_screen_is_cleared_after_its_turn() {
         text: "hey".into(),
         screen: Some(HeldScreen::Attached),
         local_default: crate::config::DefaultIntent::Other,
+        local: None,
     }));
     assert!(store.send(StoreOp::RepairScreen {
         run,
@@ -1848,6 +1861,7 @@ fn a_job_key_picture_authorization_is_refused_without_touching_the_store() {
             text: "hi".into(),
             screen: Some(HeldScreen::Screen),
             local_default: crate::config::DefaultIntent::Other,
+            local: None,
         }));
     }
     let job = LeaseId {
@@ -2002,4 +2016,89 @@ fn an_invalid_picture_authorization_leaves_an_owed_correction_for_the_next_valid
     assert!(repairs.is_empty());
     assert_eq!(screen(&store, 1), None);
     assert_eq!(screen(&store, 2).as_deref(), Some("granted_screen"));
+}
+
+/// A local task's turn is stored only bound to the server it arrived under: the first stamps a
+/// fresh task, the same server continues it, and another server, no ready server or a screen
+/// keeps nothing.
+#[tokio::test]
+async fn a_local_turn_is_stored_only_bound_to_its_server() {
+    use kumochi_protocol::message::{ErrorKey, HeldScreen};
+
+    let scratch = Scratch::new("local-turn-bound");
+    let store = Store::open(&scratch.db()).expect("store");
+    store
+        .conn_for_tests()
+        .execute(
+            "INSERT INTO threads (id, title, created_ms, updated_ms, model, effort, connection)
+             VALUES (2, 'local', 1, 1, 'local-model', 'low', 'local_chat')",
+            [],
+        )
+        .expect("a fresh local task");
+    let (acks, mut replies) = mpsc::unbounded_channel();
+    let custody = crate::test_support::custody(&store);
+    let thread = StoreThread::spawn(store, custody, acks, Schedule::default()).expect("thread");
+    let turn = |run, text: &str, local, screen| StoreOp::BeginTurn {
+        thread: ThreadId(2),
+        title: None,
+        run,
+        text: text.into(),
+        screen,
+        local_default: crate::config::DefaultIntent::Other,
+        local,
+    };
+    for (op, run, refused) in [
+        (turn(RunId(1), "storedfirst", Some(7), None), RunId(1), None),
+        (turn(RunId(2), "storedagain", Some(7), None), RunId(2), None),
+        (
+            turn(RunId(3), "refusedmoved", Some(9), None),
+            RunId(3),
+            Some(ErrorKey::ModelUnavailable),
+        ),
+        (
+            turn(RunId(4), "refusedoff", None, None),
+            RunId(4),
+            Some(ErrorKey::LocalOff),
+        ),
+        (
+            turn(
+                RunId(5),
+                "refusedscreen",
+                Some(7),
+                Some(HeldScreen::Attached),
+            ),
+            RunId(5),
+            Some(ErrorKey::ScreenUnavailable),
+        ),
+    ] {
+        assert!(thread.send(op));
+        let expected = match refused {
+            None => Input::TurnStored { run },
+            Some(key) => Input::TurnRefused {
+                run,
+                reason: key.into(),
+            },
+        };
+        assert_eq!(reply(&mut replies).await, expected);
+    }
+    thread.close().await.expect("closed");
+    let store = Store::open(&scratch.db()).expect("reopen");
+    for (marker, threads) in [
+        ("storedfirst", vec![ThreadId(2)]),
+        ("storedagain", vec![ThreadId(2)]),
+        ("refusedmoved", Vec::new()),
+        ("refusedoff", Vec::new()),
+        ("refusedscreen", Vec::new()),
+    ] {
+        assert_eq!(
+            store.pages().search_ids(marker).expect("search"),
+            threads,
+            "{marker}"
+        );
+    }
+    let runs: i64 = store
+        .conn_for_tests()
+        .query_row("SELECT count(*) FROM runs", [], |row| row.get(0))
+        .expect("runs");
+    assert_eq!(runs, 2);
 }

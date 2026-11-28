@@ -843,13 +843,35 @@ fn serve_op(
             text,
             screen,
             local_default,
+            local,
         } => write(store, purger, acks, run, "turn", |store| {
-            // No build serves a local server yet, so its turn is never kept for another to replay,
-            // nor one that inherits a default that can't be read and may name it.
+            // A local task's turn is kept only bound to the server it arrived under; one that
+            // inherits a local default, or a default that can't be read and may name it, never.
             let refused = match (store.saved_route(thread)?, local_default) {
-                (Some(ConnectionKind::LocalChat), _) | (None, DefaultIntent::Local) => {
-                    Some(ErrorKey::LocalOff.into())
+                (Some(ConnectionKind::LocalChat), _) => {
+                    let Some(tag) = local else {
+                        return Ok(Input::TurnRefused {
+                            run,
+                            reason: ErrorKey::LocalOff.into(),
+                        });
+                    };
+                    if screen.is_some() {
+                        return Ok(Input::TurnRefused {
+                            run,
+                            reason: ErrorKey::ScreenUnavailable.into(),
+                        });
+                    }
+                    let tag = crate::context::ConnectionTag(tag);
+                    return Ok(if store.begin_local_turn(thread, tag, run, &text)? {
+                        Input::TurnStored { run }
+                    } else {
+                        Input::TurnRefused {
+                            run,
+                            reason: ErrorKey::ModelUnavailable.into(),
+                        }
+                    });
                 }
+                (None, DefaultIntent::Local) => Some(ErrorKey::LocalOff.into()),
                 (None, DefaultIntent::Unknown) => Some(ErrorKey::ConfigUnreadable.into()),
                 _ => None,
             };

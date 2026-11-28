@@ -1118,3 +1118,34 @@ async fn a_pending_catalog_update_offers_no_models_once_the_fence_is_closed() {
             .await;
     }
 }
+
+/// Replacing the local server revokes the old one's fence before the new one is heard, and an
+/// engine is built only for the server the current run is bound to: with no such run, even a
+/// ready server gets the refusing engine and no ask.
+#[tokio::test]
+async fn a_replaced_local_server_is_retired_before_its_replacement_is_heard() {
+    use crate::connections::local::endpoint::LoopbackEndpoint;
+    use crate::context::ConnectionTag;
+    use kumochi_protocol::message::ModelSlug;
+
+    let scratch = Scratch::new("local-server-replaced");
+    let mut brain = test_support::brain(&scratch, "");
+    let endpoint = LoopbackEndpoint::for_tests("127.0.0.1:1");
+    let model = ModelSlug::new("claude-sonnet-5-5").expect("model");
+    brain
+        .set_local_server(Some((endpoint, model.clone(), ConnectionTag(5))))
+        .expect("set");
+    let old = brain.local.as_ref().expect("a server").fence.clone();
+    assert!(old.open());
+    assert_owned_refusal(&mut brain, ConnectionKind::LocalChat, model_unavailable()).await;
+    brain
+        .set_local_server(Some((endpoint, model, ConnectionTag(9))))
+        .expect("replaced");
+    assert!(!old.open(), "the old server is retired");
+    let new = brain.local.as_ref().expect("the new server").fence.clone();
+    assert!(new.open());
+    brain.set_local_server(None).expect("removed");
+    assert!(!new.open(), "a removed server is retired");
+    assert!(brain.local.is_none());
+    brain.close().await;
+}

@@ -225,6 +225,7 @@ async fn session_eof_cancels_a_page_still_waiting_at_the_store_barrier() {
         text: "text".into(),
         screen: None,
         local_default: crate::config::DefaultIntent::Other,
+        local: None,
     }));
     while !matches!(
         seen.recv().await,
@@ -1198,6 +1199,7 @@ async fn a_page_read_after_the_sent_marker_waits_for_the_mark_and_shows_the_acti
         text: "text".into(),
         screen: Some(HeldScreen::Attached),
         local_default: crate::config::DefaultIntent::Other,
+        local: None,
     }));
     let lease = crate::coordinator::LeaseId {
         key: crate::coordinator::SendKey::Build(crate::coordinator::BuildKey {

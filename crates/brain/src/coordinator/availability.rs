@@ -551,14 +551,16 @@ impl Coordinator {
         }
     }
 
-    /// Whether a send on `route` may go to `model`: on any route but the key's, yes; on the
-    /// key's, only while its checked catalog offers `model` now.
+    /// Whether a send on `route` may go to `model`: on any route but the key's and the local
+    /// server's, yes; on those, only while the ready catalog offers `model` now.
     pub(super) fn offered(&self, route: Route, model: Option<&str>) -> bool {
-        route.kind != ConnectionKind::AnthropicKey
-            || matches!(self.availability_of(route.kind), Availability::Ready(ready)
-            if model.is_some_and(|model| {
-                ready.models.iter().any(|offered| offered.slug.as_str() == model)
-            }))
+        !matches!(
+            route.kind,
+            ConnectionKind::AnthropicKey | ConnectionKind::LocalChat
+        ) || matches!(self.availability_of(route.kind), Availability::Ready(ready)
+        if model.is_some_and(|model| {
+            ready.models.iter().any(|offered| offered.slug.as_str() == model)
+        }))
     }
 
     /// Why a run on `route` can't go on, if it can't: another sign-in on its kind needs a sign-in

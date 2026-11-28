@@ -199,6 +199,9 @@ pub enum StoreOp {
         screen: Option<HeldScreen>,
         /// Whether the saved default names the local server; the runtime sets it.
         local_default: crate::config::DefaultIntent,
+        /// The local server's `ConnectionTag` when the turn arrived, which a local task must be
+        /// bound to; `None` while none was ready.
+        local: Option<u64>,
     },
     /// The text streamed since the last write, then one step.
     CommitStep {

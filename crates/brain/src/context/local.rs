@@ -48,7 +48,8 @@ fn assemble(
             connection: ConnectionKind::LocalChat,
             ..
         }
-    ) {
+    ) || !snapshot.bound_to(thread, run.connection)?
+    {
         return Err(BuildError::Unbound);
     }
     let items = snapshot

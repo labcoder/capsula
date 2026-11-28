@@ -16,6 +16,7 @@ mod data;
 mod draw_stream_tests;
 mod hold;
 mod issues;
+mod local;
 mod recovery;
 mod screen_gate;
 mod settings;
@@ -263,6 +264,8 @@ pub(crate) struct Brain {
     /// The current run's round, aborted when its `Cancel` drops.
     round: Option<(RunId, Cancel)>,
     key_round: Option<(BuildKey, Arc<engines::anthropic::live::Live>)>,
+    /// The local server the local route answers on; none in a shipped build (`LOCAL_CHAT`).
+    local: Option<local::LocalServer>,
     /// The key attempts the newest run may still start, kept across its rebuilds.
     key_allowance: engines::anthropic::live::Allowance,
     /// The background job's request, aborted the same way.
@@ -496,6 +499,7 @@ impl Brain {
             engine_events,
             round: None,
             key_round: None,
+            local: None,
             key_allowance: engines::anthropic::live::Allowance::default(),
             job: None,
             compact_at: crate::jobs::compact_at(config.context_tuning().compact_at),
@@ -1709,10 +1713,8 @@ impl Brain {
                 self.key_engine(request)
                     .unwrap_or_else(|| Box::new(engines::Unserved::model_unavailable())),
             ),
-            // No build serves a local server yet; never `None`, which would answer on ChatGPT.
-            Some(ConnectionKind::LocalChat) => {
-                Some(Box::new(engines::Unserved::model_unavailable()))
-            }
+            // Never `None`, which would answer on ChatGPT.
+            Some(ConnectionKind::LocalChat) => Some(self.local_engine(request)),
         }
     }
 

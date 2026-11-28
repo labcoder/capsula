@@ -245,6 +245,25 @@ impl Coordinator {
             .then_some((route.tag, motion))
     }
 
+    /// The tag of the local route the current run's admitted build answers on, while that route
+    /// is still ready under it; `None` for anything else, a job included, since a local run starts
+    /// none.
+    pub(crate) fn local_tag(&self, request: &RunRequest) -> Option<ConnectionTag> {
+        let SendKey::Build(key) = request.key else {
+            return None;
+        };
+        let run = self.current.as_ref()?;
+        let build = run.build.as_ref()?;
+        let route = run.route?;
+        (run.id == request.run
+            && run.thread == request.thread
+            && build.key == key
+            && build.admitted
+            && route.kind == ConnectionKind::LocalChat
+            && self.refusal(route).is_none())
+        .then_some(route.tag)
+    }
+
     /// Starts a new build attempt of the current run's `round`.
     pub(super) fn build(&mut self, run: RunId, round: u32, effects: &mut Vec<Effect>) {
         self.attempts += 1;

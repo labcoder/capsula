@@ -89,7 +89,7 @@ impl Snapshot<'_> {
         let source = self.source(ThreadId(task)).map_err(|_| Error::Read)?;
         if source
             .as_ref()
-            .is_some_and(|source| source.kind == ThreadKind::Main)
+            .is_some_and(|source| source.kind == ThreadKind::Main || source.local)
         {
             return Err(Error::NotHere);
         }
@@ -108,6 +108,7 @@ impl Snapshot<'_> {
             "SELECT e.id, e.kind, e.text FROM events e JOIN threads t ON t.id=e.thread
              WHERE e.thread=?1 AND e.id BETWEEN ?2 AND ?3
              AND (?4 IS NULL OR e.thread=?4) AND t.state='live' AND t.kind='thread'
+             AND t.connection IS NOT 'local_chat'
              AND e.kind IN ('user','assistant_text') AND e.text IS NOT NULL
              ORDER BY e.id LIMIT ?5",
         ))?;
@@ -143,7 +144,8 @@ impl Snapshot<'_> {
                     "SELECT e.thread,e.id FROM events_fts JOIN events e ON e.id=events_fts.rowid
                      JOIN threads t ON t.id=e.thread WHERE events_fts MATCH ?1
                      AND (?2 IS NULL OR e.thread=?2) AND (?3 IS NULL OR e.thread=?3)
-                     AND t.state='live' AND t.kind='thread' AND e.kind IN ('user','assistant_text')
+                     AND t.state='live' AND t.kind='thread' AND t.connection IS NOT 'local_chat'
+                     AND e.kind IN ('user','assistant_text')
                      ORDER BY bm25(events_fts),e.id DESC LIMIT ?4",
                 ))?;
                 let rows = sql(statement.query_map(
@@ -225,7 +227,7 @@ impl Snapshot<'_> {
         }
         let mut statement = sql(self.0.prepare(
             "SELECT id FROM threads
-             WHERE kind='thread' AND state='live'
+             WHERE kind='thread' AND state='live' AND connection IS NOT 'local_chat'
              ORDER BY updated_ms DESC,id DESC LIMIT ?1",
         ))?;
         let rows = sql(statement.query_map(

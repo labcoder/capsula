@@ -90,6 +90,7 @@ async fn run(endpoint: LoopbackEndpoint) -> (String, Result<(), Failure>) {
     let mut text = String::new();
     let end = stream(
         endpoint,
+        &Fence::default(),
         &body(),
         async { Some(()) },
         &Budget::default(),
@@ -239,6 +240,7 @@ async fn no_grant_or_no_budget_connects_to_nothing() {
     let budget = Budget::limited(Some(1));
     let refused = stream(
         endpoint,
+        &Fence::default(),
         &body(),
         async { None::<()> },
         &budget,
@@ -248,7 +250,15 @@ async fn no_grant_or_no_budget_connects_to_nothing() {
     assert_eq!(refused, Err(Failure::Rebuild));
     assert_eq!(budget.spent(), 0);
     let spent = Budget::limited(Some(0));
-    let refused = stream(endpoint, &body(), async { Some(()) }, &spent, |_: &str| {}).await;
+    let refused = stream(
+        endpoint,
+        &Fence::default(),
+        &body(),
+        async { Some(()) },
+        &spent,
+        |_: &str| {},
+    )
+    .await;
     assert_eq!(refused, Err(Failure::Spent));
     assert!(no_connection(&listener).await);
 }
@@ -277,6 +287,7 @@ async fn a_lease_that_admits_no_write_sends_no_byte() {
     });
     let ended = stream(
         endpoint,
+        &Fence::default(),
         &body(),
         async { Some(Closed) },
         &Budget::default(),
@@ -292,8 +303,8 @@ async fn a_grant_ready_only_after_the_deadline_spends_nothing() {
     let (_listener, endpoint) = listener().await;
     let budget = Budget::limited(Some(1));
     let (grant, granted) = oneshot::channel::<()>();
-    let (body, ask) = (body(), async { granted.await.ok() });
-    let mut round = std::pin::pin!(stream(endpoint, &body, ask, &budget, |_: &str| {}));
+    let (body, ask, fence) = (body(), async { granted.await.ok() }, Fence::default());
+    let mut round = std::pin::pin!(stream(endpoint, &fence, &body, ask, &budget, |_: &str| {}));
     poll_fn(|cx| {
         assert!(round.as_mut().poll(cx).is_pending());
         Poll::Ready(())
@@ -325,6 +336,7 @@ async fn text_that_is_never_taken_ends_the_round_by_its_deadline() {
     let sink = Stalled(Arc::clone(&waited));
     let ended = stream_by(
         endpoint,
+        &Fence::default(),
         &body(),
         async { Some(()) },
         &Budget::default(),
@@ -353,6 +365,7 @@ async fn a_failure_beside_untaken_text_is_still_that_failure() {
         BOUND,
         stream(
             endpoint,
+            &Fence::default(),
             &body(),
             async { Some(()) },
             &Budget::default(),
@@ -415,9 +428,10 @@ async fn stopping_a_round_closes_its_connection_after_its_request_was_written() 
     });
     let wrote = Arc::new(AtomicBool::new(false));
     let probe = Probe(Arc::clone(&wrote));
-    let (body, budget) = (body(), Budget::default());
+    let (body, budget, fence) = (body(), Budget::default(), Fence::default());
     let round = stream(
         endpoint,
+        &fence,
         &body,
         async { Some(probe) },
         &budget,
@@ -444,6 +458,7 @@ async fn text_parsed_past_the_deadline_ends_the_round_by_it() {
     let mut text = String::new();
     let ended = stream_by(
         endpoint,
+        &Fence::default(),
         &body(),
         async { Some(()) },
         &Budget::default(),

@@ -129,6 +129,7 @@ fn an_ask_starts_a_run_in_the_scenes_thread_with_the_parts_text_and_the_shell_fo
                 text: text.into(),
                 screen: None,
                 local_default: crate::config::DefaultIntent::Other,
+                local: None,
             }),
             thinking,
             Effect::ArmDeadline {
