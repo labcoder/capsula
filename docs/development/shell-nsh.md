@@ -141,8 +141,8 @@ channel's end, and a link that couldn't start. The first ask goes on and later a
 1. It switches the backstop to the quit grace.
 2. It calls `LinkHandle::begin_quit`.
 3. It waits for `finish_quit` on NativeShell's blocking pool, since that can take 13 s and quit
-   hooks get 200 ms. A link that never started has nothing to wait for. If the blocking task ends
-   without finishing, it logs `the link's quit ended early` and goes on.
+   hooks get 200 ms. A link that never started has nothing to wait for. However that wait
+   ends, a failed blocking task included, the quit goes on, and nothing is logged for it.
 4. It calls NativeShell's `quit()`, once.
 
 With `--quit-after-ms`, `main` takes the deadline from taking the lock. The app can't carry an
