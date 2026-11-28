@@ -65,6 +65,10 @@ impl Policy {
         );
         let mut texts = Store::new();
         for allowed in allow.iter().chain(exceptions.values().flatten()) {
+            // shortcut: no notice text for WITH expressions, add it when a shipped crate needs one.
+            if allowed.clone().into_req().addition.is_some() {
+                continue;
+            }
             let name = allowed.to_string();
             let text = spdx::license_id(&name)
                 .with_context(|| format!("no canonical SPDX text for policy license {name}"))?
@@ -491,6 +495,30 @@ mod tests {
             let error = Policy::read(&dir).err().expect("missing key must fail");
             assert_eq!(error.to_string(), message);
         }
+    }
+
+    #[test]
+    fn a_with_exception_reads_but_a_package_that_needs_it_is_refused() {
+        let dir = crate::scratch::dir("notice-with-policy");
+        fs::write(
+            dir.join("deny.toml"),
+            "[licenses]\nallow = [\"MIT\"]\nconfidence-threshold = 0.9\n\
+             exceptions = [{ crate = \"fixture\", allow = [\"Apache-2.0 WITH LLVM-exception\"] }]\n",
+        )
+        .unwrap();
+        let policy = Policy::read(&dir).unwrap();
+        let package_dir = crate::scratch::dir("notice-with-package");
+        let package = serde_json::json!({
+            "name":"fixture", "version":"1.0.0", "manifest_path":package_dir.join("Cargo.toml"),
+            "license":"Apache-2.0 WITH LLVM-exception"
+        });
+        let error = policy
+            .package(&package)
+            .expect_err("no notice text for WITH");
+        assert_eq!(
+            error.to_string(),
+            "fixture has no canonical SPDX text for Apache-2.0 WITH LLVM-exception"
+        );
     }
 
     #[test]
