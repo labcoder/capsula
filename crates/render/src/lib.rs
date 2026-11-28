@@ -13,8 +13,8 @@ mod stage;
 pub use cache::{RenderCache, Stager};
 pub use record::record;
 pub use stage::{
-    Align, BuildInput, Built, Color, Cursor, Failure, FrameBuf, GeometryId, Gpu, GpuFailure, Mesh,
-    Object, Part, Picture, Piece, Record, Shape, Span, Vertex,
+    Align, BuildInput, Built, Color, Cursor, Drawn, Failure, FrameBuf, GeometryId, Gpu, GpuFailure,
+    Mesh, Object, Part, Picture, Piece, Record, Shape, Span, Target, Vertex, View,
 };
 
 #[cfg(test)]

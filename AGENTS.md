@@ -20,7 +20,7 @@ crates/protocol/   shared data: Secret, and constants.rs (every product name)
 crates/scene/      the drawing format, validator and layout
 crates/brain/      bin kumochid: the headless process
 crates/shell-core/ what the shell knows and decides; no UI framework in its tree
-crates/render/     the drawing renderer: mesh, frame records, wgpu upload; no UI crate
+crates/render/     the drawing renderer: mesh, frame records, wgpu draw into an image; no UI crate
 crates/shell/      bin kumochi: the GPUI app
 crates/session/    the Mac shell-brain session: Noise handshake and records, no I/O
 xtask/             dev tasks in Rust; no scripts in other languages

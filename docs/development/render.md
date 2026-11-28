@@ -3,9 +3,9 @@
 `crates/render` (package `kumochi-render`) is the renderer the NativeShell shell will draw
 drawings with, in place of the GPUI overlay's painter. It builds each view's geometry into a
 mesh once and writes each frame as a list of small records, so a frame that animates uploads
-records and never tessellates. It opens a wgpu device on Direct3D 12 and uploads meshes to it,
-but draws nothing yet, and has no window, surface or thread; later units add them. No shell
-uses it, and nothing ships it.
+records and never tessellates. It draws those records with wgpu on Direct3D 12 into an image;
+it has no window, surface or thread yet, and draws no label text. Later units add them. No
+shell uses it, and nothing ships it.
 
 ## Two sides
 
@@ -51,9 +51,10 @@ flowchart LR
   end
   subgraph stage["Stage thread (later units)"]
     mesh["Mesh"] -->|"Gpu::upload"| built["Built"]
+    built -->|"Gpu::draw"| target["Target image"]
   end
   input -->|"begin, extend per batch, finish"| mesh
-  buf -->|"records: object, range, pose"| mesh
+  buf -->|"records: object, range, pose"| target
 ```
 
 Records follow `Frame::paint_items`: every object's ordinary geometry first, then edge-label
@@ -113,33 +114,42 @@ those main refuses included, draws from that mesh. The scene crate's charge does
 the pieces count against this crate's own buffers. A primitive lyon refuses, or one that would
 pass the mesh's reservation, fails its picture as `Failure::Build`.
 
-## The GPU device
+## Drawing with the GPU
 
-`Gpu` (`src/stage/gpu.rs`) is the stage side's one Direct3D 12 device. Only the stage side
-names wgpu.
+`Gpu` (`src/stage/gpu.rs`, with drawing in `gpu/draw.rs` and its shader `gpu/draw.wgsl`) is the
+stage side's one Direct3D 12 device. Only the stage side names wgpu.
 
 - **Opening.** `Gpu::open` refuses as `GpuFailure::NoAdapter` when the build has no Direct3D
   12 back end (`wgpu::Instance::enabled_backend_features`, checked before an instance exists,
   since wgpu panics without one) or no adapter answers. It refuses as `NoDevice` when the
-  adapter lacks what drawing will need: 4x multisampling and resolve of `Bgra8Unorm`,
+  adapter lacks what drawing needs: 4x multisampling and resolve of `Bgra8Unorm`,
   sample-rate shading (`DownlevelFlags::MULTISAMPLED_SHADING`) and storage buffers in the
   vertex stage. wgpu's native futures for the adapter, the device and its error scopes are ready
   when made, so each is polled once; one still pending fails closed as `NoDevice` and nothing
   spins.
 - **Loss.** The device-loss callback and the uncaptured-error handler are installed before any
-  resource exists, and both set one sticky flag that carries nothing of the error. An upload
-  sets it too when wgpu refuses a write with both error scopes clean: wgpu drops a lost
+  resource exists, and both set one sticky flag that carries nothing of the error. An upload or
+  a draw sets it too when wgpu refuses a write with both error scopes clean: wgpu drops a lost
   device's errors, so nothing else explains it, and an explicit destroy invalidates the device
-  before wgpu runs the callback. Every upload checks the flag first and again before it answers,
-  so once it is set every later upload answers `Lost`; releases still take back their slots.
-- **Budget.** `Gpu` keeps a budget of requested resource bytes: the sizes its buffers ask wgpu
-  for, not measured video memory. An upload reserves its whole charge with checked arithmetic
-  before it creates anything and creates its buffers inside validation and out-of-memory error
-  scopes. wgpu holds a buffer with a queued write until the submission that carries it, the
-  device's next, so a charge whose writes were queued waits for that submission to retire
-  before it comes back; one with nothing queued comes back at once. Eight waits are tracked one
-  by one; past them a release merges into the newest, which only holds that charge longer.
-  Nothing submits yet, so a released upload's charge stays held.
+  before wgpu runs the callback. Every call checks the flag first, and an upload and a draw
+  check it again before they answer, so once it is set every later call answers `Lost`;
+  releases still take back their slots and charges.
+- **Budget.** `Gpu` keeps a budget of requested resource bytes: the sizes its buffers and
+  textures ask wgpu for, not measured video memory. The record buffer, 3,000 records of 64
+  bytes, is the first charge. An operation reserves its whole charge with checked arithmetic
+  before it creates anything and creates inside validation and out-of-memory error scopes.
+  wgpu holds a resource until the last submission that uses it, so a released charge waits for
+  the last draw that read it, or for the device's next submission, which carries an upload's
+  queued writes, when no draw read it; one that nothing read or queued comes back at once. Only
+  each draw's `Queue::on_submitted_work_done` callback moves what has retired: a returned
+  submission index proves nothing. Nothing waits for it: a reservation that doesn't fit polls the
+  device once without blocking, which runs finished work's callbacks, and tries again. Eight
+  waits are tracked one by one; past them a release merges into the newest, which only holds
+  that charge longer.
+- **The one poll.** That poll is the one call here wired to wgpu's fatal handler, for a poll
+  error wgpu can't convert. It can't reach it: a non-blocking poll on Direct3D 12 sets no wait,
+  so its only error is reading the fence, which never fails there. It must be rechecked if
+  another back end is ever enabled; check-core pins the feature set.
 - **Upload.** `Gpu::upload` takes the geometry the mesh last finished, `Mesh::geometry`, and
   stages its vertices, indices and pieces for buffers created unmapped, each encoded field by
   field, through `Queue::write_buffer_with`, inside the same error scopes. The staged bytes are
@@ -148,9 +158,9 @@ names wgpu.
   the slot back at once and the charge as above. A `Built` is provisional: its buffers were
   created and its writes handed to wgpu with no error and no loss seen, not confirmed on the
   GPU. A device lost under a write reports nothing then; once the loss is latched every later
-  upload answers `Lost`, and nothing of that `Built` is drawn. Nothing on this path maps a
-  buffer, so this crate's own calls reach none of the wgpu entries that end in its fatal
-  handler; the known limit below is wgpu's own.
+  upload answers `Lost`, and nothing of that `Built` is drawn. Nothing here maps a buffer,
+  and the one poll can't reach wgpu's fatal handler, so this crate's own calls reach none of
+  the wgpu entries that end there; the known limits below are wgpu's own.
 - **Range tables.** An upload also copies the mesh's range tables into one of five reserved
   slots (`limits::UPLOADED`): one per picture of a frame and one more for a geometry uploading
   in place of a shown one. So the mesh can build the next geometry while this one stays, and
@@ -158,17 +168,45 @@ names wgpu.
   an upload answers `Budget`. `Gpu::release_built` gives the slot back at once and the charge
   as above; one from another device is handed back unreleased, so its own device can still take
   it. A `Built` dropped instead keeps both for the device's life.
+- **Targets.** A `Target` is a 4x multisampled `Bgra8Unorm` texture resolved into a
+  single-sampled one, as GPUI's Windows renderer draws paths. It charges both: 20 bytes a pixel.
+  `Gpu::release_target` gives the charge back as above, at once when no draw used it; one from
+  another device is handed back unreleased. A `Target` dropped instead keeps its charge for the
+  device's life.
+- **Drawing.** `Gpu::draw` clears the target and draws one chosen picture or every picture of a
+  frame, each from the `Built` of its geometry. It stages the records through
+  `Queue::write_buffer_with` inside the same error scopes, with an upload's rules: `Refused` when
+  a scope caught why, the flag and `Lost` otherwise, before anything is drawn. The GPU reads
+  them in place: a record's index there is its place in the frame, so the one chosen picture and
+  all of them read the same slots. A target or geometry of another device, a geometry no drawn
+  picture shows, a picture the frame doesn't list or a record outside its geometry is refused as
+  `Mismatch` before any GPU command. `View` places the frame: its origin is subtracted once,
+  then everything is scaled. The answer, `Drawn`, counts pictures drawn, pictures whose ranges
+  draw nothing (label text only, empty or fully transparent) and pictures whose geometry wasn't
+  given. It is provisional, as a `Built` is: submitted with no error and no loss seen, not
+  confirmed on the GPU, and never presented. Text primitives keep their range boundaries, so the
+  label unit can draw them, and draw nothing here.
+
+The fragment stage runs per sample. `along`, `reveal` and `weight` are interpolated at each of
+the four samples, so the end of a reveal or a dash inside a pixel covers part of it, as an edge
+does; `skip`, the piece and the record are read flat from each triangle's first vertex
+(`@interpolate(flat, first)`, Direct3D's provoking vertex). A pixel's alpha is the primitive's
+opacity times the colour override's, when there is one, times the record's, clamped to 0 to 1,
+and the colour is premultiplied by it once and blended over. A full reveal draws a revealed piece
+whole and an empty one nothing, without the comparison; fills are never revealed. A retraced leg
+is skipped when its line is drawn whole and undashed.
 
 The device tests build on Windows only. They ask for Direct3D 12's software adapter
 (`force_fallback_adapter`, a CPU adapter) and fail with a fixed message when it is absent; they
-never skip. Without Direct3D 12 in the build, on Linux, one test checks that
-`Gpu::open` answers `NoAdapter`.
+never skip. They read the resolved image back and check pixels worked by hand. Without
+Direct3D 12 in the build, on Linux, one test checks that `Gpu::open` answers `NoAdapter`.
 
-**Known limit.** This crate's own calls avoid every wgpu entry that reaches wgpu's fatal
+**Known limits.** This crate's own calls avoid every wgpu entry that reaches wgpu's fatal
 handler, but wgpu 29.0.4 itself unwraps some Direct3D failures, as when it begins its
 pending-writes command list at device open and on the first queued write after a submission.
 A device removed at those moments can panic inside wgpu, and a release build aborts on panic.
-This must be closed before a shell hosts the renderer.
+Dropping the device after a submission waits for the GPU and panics on a hang or an unexpected
+error. Both must be closed before a shell hosts the renderer.
 
 ## What is charged and what is fixed
 
@@ -188,8 +226,9 @@ returns its sum, a constant (`limits::FIXED_BYTES`):
 | lyon's working memory | an allowance, main's 2 MiB for the same tessellators | 2,097,152 |
 | Total | | 12,299,908 |
 
-The range tables are reserved when a `Gpu` opens. What the GPU's buffers request is charged to
-that device's budget instead.
+The range tables are reserved when a `Gpu` opens. What the GPU's buffers and textures request is
+charged to that device's budget instead, and wgpu's own allocations, such as the staged copies of
+a mesh or a frame's records, are the framework's.
 
 Objects, points and mesh sizes follow from the global caps in `kumochi_scene::limits`: the
 object cap, the fill-vertex and outline-point caps, and the path-segment cap, which bounds

@@ -1,14 +1,19 @@
 //! The GPU half of the stage side: one Direct3D 12 device, a budget of the resource bytes it
-//! requests, and meshes uploaded as [`Built`] geometries. Nothing here waits on the GPU: wgpu
-//! answers its native futures at once (docs/development/render.md).
+//! requests, meshes uploaded as [`Built`] geometries and [`Target`] images to draw into. Nothing
+//! here waits on the GPU: wgpu answers its native futures at once, and a charge the GPU may still
+//! read is held until the submission that last reads it retires (docs/development/render.md).
 //!
-//! Known limit: this crate's calls avoid every wgpu entry that reaches wgpu's fatal handler, but
+//! Known limits: this crate's calls avoid every wgpu entry that reaches wgpu's fatal handler, but
 //! wgpu 29.0.4 itself unwraps some Direct3D failures, as when it begins its pending-writes
 //! command list at open and on the first queued write after a submission. A device removed at
-//! those moments can panic inside wgpu, and a release build aborts on panic. This must be closed
-//! before a shell hosts the renderer.
+//! those moments can panic inside wgpu, and a release build aborts on panic. Dropping the device
+//! after a submission waits for the GPU and panics on a hang or an unexpected error. Both must be
+//! closed before a shell hosts the renderer.
+
+mod draw;
 
 use std::{
+    cell::Cell,
     fmt,
     ops::Range,
     pin::pin,
@@ -19,11 +24,15 @@ use std::{
     task::{Context, Poll, Waker},
 };
 
+pub use draw::{Drawn, View};
+
 use super::{GeometryId, Mesh, Piece, Record, Vertex, mesh::range};
-use crate::limits::{INPUT_OBJECTS, INPUT_PRIMS, UPLOADED};
+use crate::limits::{INPUT_OBJECTS, INPUT_PRIMS, RECORDS, UPLOADED};
 
 /// The image format drawing needs, as GPUI's Windows renderer draws paths.
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8Unorm;
+/// Samples per pixel, as GPUI's Windows renderer draws paths.
+const SAMPLES: u32 = 4;
 /// Released charges a budget tracks one by one; past them it merges into its newest.
 const WAITING: usize = 8;
 
@@ -39,33 +48,44 @@ pub enum GpuFailure {
     /// The request passes the budget, or every geometry slot is held.
     #[error("the request passes the renderer's GPU budget")]
     Budget,
+    /// An image of zero size or past the device's limit.
+    #[error("an image size of zero or past the device's limit")]
+    Size,
     /// The GPU refused to create or stage a resource.
     #[error("the GPU refused a resource")]
     Refused,
     /// The mesh holds no finished geometry.
     #[error("the mesh holds no finished geometry")]
     Unfinished,
-    /// The device is lost: every later upload answers this, and releases still take back their
-    /// slots.
+    /// A resource of another device, a geometry no drawn picture shows, a picture the frame
+    /// doesn't list or a record outside its geometry.
+    #[error("a resource or picture that doesn't belong to the draw")]
+    Mismatch,
+    /// The device is lost: every later upload, target and draw answers this, and releases still
+    /// take back their slots.
     #[error("the GPU device was lost")]
     Lost,
 }
 
-/// One Direct3D 12 device and the geometries uploaded to it.
+/// One Direct3D 12 device and what every draw on it shares.
 pub struct Gpu {
     id: u64,
     device: wgpu::Device,
     queue: wgpu::Queue,
-    /// Set once, by the loss callback, the uncaptured-error handler or an upload whose write wgpu
-    /// refused with no error to say why; never cleared.
+    /// Set once, by the loss callback, the uncaptured-error handler or an upload or draw whose
+    /// write wgpu refused with no error to say why; never cleared.
     lost: Arc<AtomicBool>,
-    /// The newest submission the GPU has finished. Nothing submits yet, so it stays 0.
+    /// The newest submission the GPU has finished, moved only by each draw's work-done callback.
     retired: Arc<AtomicU64>,
     /// Submissions made so far; the next one carries every write queued since.
     submitted: u64,
     budget: Budget,
     /// Range tables for the geometries not uploaded, reserved at open.
     tables: Vec<Tables>,
+    /// Every record of a frame, encoded.
+    records: wgpu::Buffer,
+    layout: wgpu::BindGroupLayout,
+    pipeline: wgpu::RenderPipeline,
     #[cfg(all(test, windows))]
     on_cpu: bool,
     #[cfg(all(test, windows))]
@@ -73,12 +93,14 @@ pub struct Gpu {
 }
 
 impl Gpu {
-    /// Opens the default Direct3D 12 adapter with `budget` bytes of resources to request.
+    /// Opens the default Direct3D 12 adapter with `budget` bytes of resources to request, the
+    /// record buffer's first.
     ///
     /// # Errors
     /// [`GpuFailure::NoAdapter`] without Direct3D 12 or an adapter; [`GpuFailure::NoDevice`]
     /// when the adapter lacks 4x multisampling and resolve of the image format, sample-rate
-    /// shading or vertex-stage storage buffers.
+    /// shading or vertex-stage storage buffers; [`GpuFailure::Budget`] when the record buffer
+    /// doesn't fit.
     pub fn open(budget: u64) -> Result<Self, GpuFailure> {
         Self::open_with(&wgpu::RequestAdapterOptions::default(), budget)
     }
@@ -91,6 +113,9 @@ impl Gpu {
         if !wgpu::Instance::enabled_backend_features().contains(wgpu::Backends::DX12) {
             return Err(GpuFailure::NoAdapter);
         }
+        let mut budget = Budget::new(budget);
+        let records_bytes = bytes(RECORDS, draw::RECORD_BYTES)?;
+        budget.reserve(records_bytes)?;
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::DX12,
             flags: wgpu::InstanceFlags::empty(),
@@ -120,6 +145,9 @@ impl Gpu {
         device.set_device_lost_callback(move |_, _| latch.store(true, Ordering::Release));
         let latch = Arc::clone(&lost);
         device.on_uncaptured_error(Arc::new(move |_| latch.store(true, Ordering::Release)));
+        let (records, layout, pipeline) =
+            scoped(&device, || draw::pipeline(&device, records_bytes))
+                .map_err(|_| GpuFailure::NoDevice)?;
         let mut tables = Vec::with_capacity(UPLOADED);
         tables.extend((0..UPLOADED).map(|_| Tables::new()));
         Ok(Self {
@@ -133,8 +161,71 @@ impl Gpu {
             lost,
             retired: Arc::new(AtomicU64::new(0)),
             submitted: 0,
-            budget: Budget::new(budget),
+            budget,
             tables,
+            records,
+            layout,
+            pipeline,
+        })
+    }
+
+    /// An image of `width` by `height` pixels to draw into, charged its multisampled and its
+    /// resolved texture.
+    ///
+    /// # Errors
+    /// [`GpuFailure::Size`] for a zero side or one past the device's limit,
+    /// [`GpuFailure::Budget`] past the budget, [`GpuFailure::Refused`] when the GPU refuses
+    /// either texture, and [`GpuFailure::Lost`]; nothing is charged then.
+    pub fn target(&mut self, width: u32, height: u32) -> Result<Target, GpuFailure> {
+        self.live()?;
+        let most = self.device.limits().max_texture_dimension_2d;
+        if width == 0 || height == 0 || width > most || height > most {
+            return Err(GpuFailure::Size);
+        }
+        let bytes = u64::from(width)
+            .checked_mul(u64::from(height))
+            .and_then(|pixels| pixels.checked_mul(4 * u64::from(SAMPLES + 1)))
+            .ok_or(GpuFailure::Budget)?;
+        self.reserve(bytes)?;
+        let size = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
+        let image = |sample_count, usage| {
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: None,
+                size,
+                mip_level_count: 1,
+                sample_count,
+                dimension: wgpu::TextureDimension::D2,
+                format: FORMAT,
+                usage,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            (texture, view)
+        };
+        let resolved = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC;
+        #[cfg(all(test, windows))]
+        let resolved = if self.refuse_second {
+            wgpu::TextureUsages::empty()
+        } else {
+            resolved
+        };
+        let made = scoped(&self.device, || {
+            [
+                image(SAMPLES, wgpu::TextureUsages::RENDER_ATTACHMENT),
+                image(1, resolved),
+            ]
+        });
+        let [(_, samples), (image, view)] = made.inspect_err(|_| self.budget.refund(bytes))?;
+        Ok(Target {
+            device: self.id,
+            samples,
+            image,
+            view,
+            held: Held::new(bytes, 0),
         })
     }
 
@@ -192,6 +283,7 @@ impl Gpu {
                 buffer(sizes[2], wgpu::BufferUsages::STORAGE | copy),
             ];
             let [vertices, indices, pieces] = &made;
+            let bind = draw::bind(&self.device, &self.layout, &self.records, pieces);
             let staged = stage::<VERTEX_WORDS>(
                 &self.queue,
                 vertices,
@@ -215,10 +307,10 @@ impl Gpu {
                     mesh.pieces().iter().flat_map(piece_words),
                 )
             });
-            (made, staged.is_some())
+            (made, bind, staged.is_some())
         });
         let failure = match made {
-            Ok(([vertices, indices, pieces], true)) => match self.live() {
+            Ok(([vertices, indices, pieces], bind, true)) => match self.live() {
                 Ok(()) => {
                     let [starts, objects] = mesh.tables();
                     tables.starts.extend_from_slice(starts);
@@ -228,15 +320,15 @@ impl Gpu {
                         geometry,
                         vertices,
                         indices,
-                        pieces,
+                        _pieces: pieces,
+                        bind,
                         tables,
-                        bytes: total,
-                        carried,
+                        held: Held::new(total, carried),
                     });
                 }
                 Err(lost) => lost,
             },
-            Ok((_, false)) => {
+            Ok((_, _, false)) => {
                 // wgpu drops a lost device's errors, so a write refused with both scopes clean
                 // has no other explanation.
                 self.lost.store(true, Ordering::Release);
@@ -253,9 +345,9 @@ impl Gpu {
         Err(failure)
     }
 
-    /// Gives back `built`'s geometry slot at once, and its charge once the submission that
-    /// carries its writes has retired: wgpu holds its buffers until then. Nothing submits yet,
-    /// so the charge stays held.
+    /// Gives back `built`'s geometry slot at once, and its charge once the last submission that
+    /// reads it has retired, or the one that carries its writes when no draw read it: wgpu holds
+    /// its buffers until then.
     ///
     /// # Errors
     /// Hands `built` back, unreleased, when another device uploaded it.
@@ -271,7 +363,24 @@ impl Gpu {
         tables.starts.clear();
         tables.objects.clear();
         self.tables.push(tables);
-        self.release(built.bytes, built.carried);
+        self.release(built.held.bytes, built.held.last.get());
+        Ok(())
+    }
+
+    /// Gives back `target`'s charge once the last submission that draws into it has retired, or
+    /// at once when none did: wgpu holds its textures until then.
+    ///
+    /// # Errors
+    /// Hands `target` back, unreleased, when another device made it.
+    #[expect(
+        clippy::result_large_err,
+        reason = "a refused target goes back to its caller whole, on a path that never repeats"
+    )]
+    pub fn release_target(&mut self, target: Target) -> Result<(), Target> {
+        if target.device != self.id {
+            return Err(target);
+        }
+        self.release(target.held.bytes, target.held.last.get());
         Ok(())
     }
 
@@ -281,9 +390,19 @@ impl Gpu {
             .release(bytes, last, self.retired.load(Ordering::Acquire));
     }
 
-    /// Charges `bytes`, first taking back what retired submissions released.
+    /// Charges `bytes`, first taking back what retired submissions released; checks once more
+    /// after one non-blocking poll, which runs the work-done callbacks of finished submissions.
     fn reserve(&mut self, bytes: u64) -> Result<(), GpuFailure> {
         self.budget.reclaim(self.retired.load(Ordering::Acquire));
+        if self.budget.reserve(bytes).is_ok() {
+            return Ok(());
+        }
+        // The one call here wired to wgpu's fatal handler. A non-blocking poll can't reach it on
+        // Direct3D 12, whose only poll error is a fence read that never fails there; recheck this
+        // if another back end is ever enabled.
+        if self.device.poll(wgpu::PollType::Poll).is_ok() {
+            self.budget.reclaim(self.retired.load(Ordering::Acquire));
+        }
         self.budget.reserve(bytes)
     }
 
@@ -299,8 +418,36 @@ impl Gpu {
 impl fmt::Debug for Gpu {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Gpu")
+            .field("submitted", &self.submitted)
             .field("budget", &self.budget)
             .field("free_tables", &self.tables.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// An image to draw into: a 4x multisampled texture resolved into a single-sampled one. Hand it
+/// back with [`Gpu::release_target`]: one dropped instead keeps its charge for the device's life.
+pub struct Target {
+    device: u64,
+    samples: wgpu::TextureView,
+    image: wgpu::Texture,
+    view: wgpu::TextureView,
+    held: Held,
+}
+
+impl Target {
+    /// Width and height in pixels.
+    pub fn size(&self) -> [u32; 2] {
+        let size = self.image.size();
+        [size.width, size.height]
+    }
+}
+
+/// Its size only.
+impl fmt::Debug for Target {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Target")
+            .field("size", &self.size())
             .finish_non_exhaustive()
     }
 }
@@ -314,16 +461,13 @@ impl fmt::Debug for Gpu {
 pub struct Built {
     device: u64,
     geometry: GeometryId,
-    #[expect(dead_code, reason = "drawing reads the uploaded buffers")]
     vertices: wgpu::Buffer,
-    #[expect(dead_code, reason = "drawing reads the uploaded buffers")]
     indices: wgpu::Buffer,
-    #[expect(dead_code, reason = "drawing reads the uploaded buffers")]
-    pieces: wgpu::Buffer,
+    /// Kept for the bind group's sake.
+    _pieces: wgpu::Buffer,
+    bind: wgpu::BindGroup,
     tables: Tables,
-    bytes: u64,
-    /// The submission that carries its writes.
-    carried: u64,
+    held: Held,
 }
 
 impl Built {
@@ -356,7 +500,7 @@ impl fmt::Debug for Built {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Built")
             .field("geometry", &self.geometry)
-            .field("bytes", &self.bytes)
+            .field("bytes", &self.held.bytes)
             .finish_non_exhaustive()
     }
 }
@@ -373,6 +517,22 @@ impl Tables {
         Self {
             starts: Vec::with_capacity(INPUT_PRIMS + 1),
             objects: Vec::with_capacity(INPUT_OBJECTS),
+        }
+    }
+}
+
+/// A resource's charge and the last submission that reads it: the one that carries its writes
+/// until a draw reads it, and 0 for none.
+struct Held {
+    bytes: u64,
+    last: Cell<u64>,
+}
+
+impl Held {
+    fn new(bytes: u64, last: u64) -> Self {
+        Self {
+            bytes,
+            last: Cell::new(last),
         }
     }
 }
@@ -572,7 +732,8 @@ impl Gpu {
         self.tables.len()
     }
 
-    /// Makes every later upload's second buffer refuse its write.
+    /// Makes every later upload's second buffer refuse its write, and every later target's
+    /// second texture invalid.
     pub(crate) fn refuse_second(&mut self) {
         self.refuse_second = true;
     }
@@ -590,6 +751,56 @@ impl Gpu {
     pub(crate) fn step(&self) -> bool {
         drop(self.device.poll(wgpu::PollType::Poll));
         self.lost.load(Ordering::Acquire)
+    }
+
+    /// Waits up to ten seconds for every submission, running its work-done callback. Test only:
+    /// a waiting poll panics on a device error.
+    pub(crate) fn settle(&self) {
+        let wait = wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: Some(std::time::Duration::from_secs(10)),
+        };
+        self.device.poll(wait).expect("the submitted work finishes");
+    }
+
+    /// The resolved image's pixels, row by row, each as its four bytes `[B, G, R, A]`. Test only:
+    /// it maps a buffer and waits for it, which panics on a lost device.
+    pub(crate) fn read(&self, target: &Target) -> Vec<[u8; 4]> {
+        let [width, height] = target.size();
+        let row = (width * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: u64::from(row * height),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        encoder.copy_texture_to_buffer(
+            target.image.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row),
+                    rows_per_image: None,
+                },
+            },
+            target.image.size(),
+        );
+        self.queue.submit([encoder.finish()]);
+        buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        self.settle();
+        let mapped = buffer.slice(..).get_mapped_range();
+        let pixels = (0..height)
+            .flat_map(|y| (0..width).map(move |x| y * row + x * 4))
+            .map(|at| usize::try_from(at).expect("a mapped byte index"))
+            .map(|at| [mapped[at], mapped[at + 1], mapped[at + 2], mapped[at + 3]])
+            .collect();
+        drop(mapped);
+        buffer.unmap();
+        pixels
     }
 }
 
