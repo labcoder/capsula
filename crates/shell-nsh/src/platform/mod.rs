@@ -18,11 +18,11 @@ pub(crate) fn start(
     ),
     std::process::ExitCode,
 > {
-    Err(std::process::ExitCode::from(69))
+    Err(std::process::ExitCode::from(crate::UNSUPPORTED))
 }
 
 /// Never reached off Windows, since [`start`] refuses first; it answers unsupported too.
 #[cfg(not(windows))]
 pub(crate) fn run(_quit_after: std::time::Duration) -> std::process::ExitCode {
-    std::process::ExitCode::from(69)
+    std::process::ExitCode::from(crate::UNSUPPORTED)
 }

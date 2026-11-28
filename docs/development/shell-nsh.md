@@ -75,14 +75,14 @@ thread can't start, it only logs that and keeps a hidden window with no root and
 and a window or UI-thread failure waits on a message box for a person. Either way a hidden
 process would keep the session's lock, and the GPUI shell of that edition couldn't start. So
 right after taking the lock, before even its first log line (a log write can block), `main`
-starts its own thread that sleeps `--quit-after-ms` plus a 15-second grace and then exits 1. It
-writes nothing, so an exit of 1 with `shell started` as the run's last line fits the
-backstop but doesn't prove it: a dismissed window error ends the same way.
+starts its own thread that sleeps `--quit-after-ms` plus a 15-second grace and then exits 124.
+It writes nothing, since a log write can block; the code is how a run shows the backstop fired,
+because nothing else in this shell or in `run_app` exits with it.
 
 The grace is a budget, not a bound: it's how long past its deadline the shell is allowed, chosen
 above the pin's 10 s wait for a process it replaces (only when `NSH_RESTART_AFTER` is set) and
 its 200 ms of quit hooks. Window creation, mounting and the engine's join have no time limit of
-their own, so a start that is slow but healthy can end with 1 instead of 0. The sleep is a
+their own, so a start that is slow but healthy can end with 124 instead of 0. The sleep is a
 minimum, and a suspended machine stretches it. It's unmeasured until the native run. If the
 thread can't start, the shell lets go of the lock, logs `can't start the deadline backstop`
 and exits 1 without running the app.
@@ -103,7 +103,7 @@ Read at the pin, in `nsh-platform-windows/src/app.rs` and what it calls:
 | Image cache | Off |
 | Waiting for a replaced process | Only when `NSH_RESTART_AFTER` is set |
 | DPI awareness and OLE | Process-local |
-| A window or UI thread that can't start | A message box with the error text, which waits for a person, then exit 1; the backstop ends it first if nobody answers |
+| A window or UI thread that can't start | A message box with the error text, which waits for a person, then exit 1; the backstop ends it first, with 124, if nobody answers |
 | A message-only dispatcher window and a `WH_GETMESSAGE` hook on the UI thread | Thread-local, for keys a capture takes |
 | Watches of this process's window cloaking, the session and the display's power | Notifications to this process's own windows only |
 | F11 | Toggles full screen in the app's own window, which is hidden here |

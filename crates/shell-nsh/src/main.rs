@@ -13,13 +13,20 @@ use kumochi_protocol::constants::{self, ProductIdentity};
 
 use crate::launch::Launch;
 
+/// The exit code for a build or system this shell doesn't run on, as the brain's.
+const UNSUPPORTED: u8 = 69;
+
+/// The exit code when the deadline backstop ends the shell, as the `timeout` command's. Nothing
+/// else here or in `run_app` exits with it, so it shows the backstop fired without a log write.
+const OVERDUE: u8 = 124;
+
 /// The process exit code for `identity`: 0 for Dev and Gate, else the brain's 69 for unsupported.
 fn exit_code(identity: ProductIdentity) -> u8 {
     // The refusal goes away when this shell replaces the GPUI one.
     if identity == ProductIdentity::DEV || identity == ProductIdentity::GATE {
         0
     } else {
-        69
+        UNSUPPORTED
     }
 }
 
@@ -55,7 +62,7 @@ fn main() -> ExitCode {
     // forever, so nothing comes between taking the lock and arming.
     let armed = arm_backstop(launch.quit_after + BACKSTOP_GRACE, || {
         // `run_app` ends every run the same way: `std::process::exit` off its UI thread.
-        std::process::exit(1)
+        std::process::exit(i32::from(OVERDUE))
     });
     if armed.is_err() {
         drop(lock);
