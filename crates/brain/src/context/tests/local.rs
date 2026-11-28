@@ -13,6 +13,7 @@ fn local() -> ModelChoice {
     }
 }
 
+/// Saves `thread` on the local route and binds it to the server whose tag the test runs carry.
 fn on_local(world: &mut World, thread: ThreadId) {
     assert!(matches!(
         world
@@ -21,6 +22,18 @@ fn on_local(world: &mut World, thread: ThreadId) {
             .expect("saved"),
         ChoiceRead::Found { .. }
     ));
+    bind(world, thread, Some(&ConnectionTag(7).0.to_be_bytes()));
+}
+
+fn bind(world: &World, thread: ThreadId, tag: Option<&[u8]>) {
+    world
+        .store
+        .conn_for_tests()
+        .execute(
+            "UPDATE threads SET local_tag = ?2 WHERE id = ?1",
+            rusqlite::params![i64::try_from(thread.0).expect("small"), tag],
+        )
+        .expect("bound");
 }
 
 fn local_snapshot(task: ThreadId) -> RunSnapshot {
@@ -194,4 +207,75 @@ fn no_older_run_is_kept_past_one_that_did_not_fit() {
     .sum::<usize>();
     let short = built(&world, &run, (task, current), whole - oldest - 1).expect("built");
     assert_eq!(short.request.input, vec![message(Role::User, "current")]);
+}
+
+/// A local task builds only for the server it's bound to: never for another server's run, the
+/// zero tag, or while it's unbound.
+#[test]
+fn a_local_task_builds_only_for_the_server_it_is_bound_to() {
+    let mut world = world("ctx-local-bound");
+    let (task, _) = world.run(None, "first ask", Some("first answer"));
+    on_local(&mut world, task);
+    let (_, current) = world.run(Some(task), "second ask", None);
+    let at = |tag| RunSnapshot {
+        connection: ConnectionTag(tag),
+        ..local_snapshot(task)
+    };
+    assert!(built(&world, &at(7), (task, current), BOUND).is_ok());
+    for tag in [9, 0] {
+        assert!(
+            matches!(
+                built(&world, &at(tag), (task, current), BOUND),
+                Err(BuildError::Unbound)
+            ),
+            "{tag}"
+        );
+    }
+    bind(&world, task, None);
+    assert!(matches!(
+        built(&world, &at(7), (task, current), BOUND),
+        Err(BuildError::Unbound)
+    ));
+}
+
+/// A Kumo run's history result never quotes a local task, by an old reference or any other, while
+/// a cloud task beside it is still quoted.
+#[test]
+fn kumo_never_quotes_a_local_tasks_history() {
+    let mut world = world("ctx-local-quote");
+    let main = world.main;
+    let (task, _) = world.run(None, "secret of the local task", None);
+    let task_ids = world.events(task);
+    on_local(&mut world, task);
+    let (cloud, _) = world.run(None, "cloud ask", None);
+    let cloud_ids = world.events(cloud);
+    let (_, kumo_run) = world.run(Some(main), "ask", None);
+    let last = *world.events(main).last().expect("an event");
+    let supplied = Supplied {
+        summary: None,
+        items: history(
+            kumo_run,
+            last,
+            vec![whole(&task_ids, task), whole(&cloud_ids, cloud)],
+        ),
+        ..Supplied::default()
+    };
+    let built = world
+        .build(
+            &snapshot(Origin::Kumo, None),
+            (main, kumo_run),
+            supplied,
+            BOUND,
+        )
+        .expect("built");
+    let quoted = quoted(&built);
+    assert_eq!(quoted[0], json!({ "task": task.0, "note": UNAVAILABLE }));
+    assert_eq!(quoted[1]["text"], "user: cloud ask");
+    assert_eq!(built.sources, [main, cloud]);
+    assert!(!format!("{:?}", built.request).contains("secret"));
+    assert!(
+        !serde_json::to_string(&quoted)
+            .expect("json")
+            .contains("secret")
+    );
 }

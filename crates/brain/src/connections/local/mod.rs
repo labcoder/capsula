@@ -12,7 +12,10 @@ pub mod request;
 #[cfg(test)]
 mod tests;
 
+use std::future::poll_fn;
 use std::ops::ControlFlow;
+use std::pin::pin;
+use std::task::Poll;
 use std::time::Duration;
 
 use kumochi_protocol::message::{ErrorKey, UserError};
@@ -26,6 +29,7 @@ use self::request::ChatBody;
 use crate::config::tuning::ModelTuning;
 use crate::connections::model::budget::Budget;
 use crate::connections::model::conn::{ModelConn, Upload};
+use crate::connections::model::fence::{Fence, Fenced};
 use crate::connections::model::wire::{Body, Media};
 use crate::connections::model::{Lease, error};
 
@@ -86,6 +90,10 @@ pub enum Failure {
     /// The round passed [`ROUND_DEADLINE`].
     #[error("the local round ran past its deadline")]
     Deadline,
+    /// The server the round was built for was replaced or removed; nothing more is written or
+    /// read on its connection.
+    #[error("the local server was replaced")]
+    Retired,
 }
 
 impl Failure {
@@ -95,6 +103,7 @@ impl Failure {
     pub fn user_error(self) -> UserError {
         match self {
             Self::Dormant => ErrorKey::LocalOff,
+            Self::Retired => ErrorKey::ModelUnavailable,
             Self::Request => ErrorKey::RequestRefused,
             Self::Spent => ErrorKey::LiveBudgetSpent,
             Self::AuthRequired | Self::Refused { .. } | Self::Provider => ErrorKey::LocalRefused,
@@ -148,7 +157,7 @@ impl<F: FnMut(&str)> Sink for F {
 /// One send's state. Fields drop in declaration order, so the connection closes before the lease
 /// settles.
 struct Attempt<L: Lease> {
-    conn: Option<ModelConn<TcpStream>>,
+    conn: Option<ModelConn<Fenced<TcpStream>>>,
     lease: Option<L>,
 }
 
@@ -172,18 +181,20 @@ impl<L: Lease> Drop for Attempt<L> {
 /// # Errors
 /// Why the round didn't complete; see [`Failure`]. Text handed out before a failure stays
 /// handed out, and never counts as a completed answer.
-pub async fn stream<L: Lease>(
+pub(crate) async fn stream<L: Lease>(
     endpoint: LoopbackEndpoint,
+    fence: &Fence,
     body: &ChatBody,
     ask: impl Future<Output = Option<L>>,
     budget: &Budget,
     out: impl Sink,
 ) -> Result<(), Failure> {
-    stream_by(endpoint, body, ask, budget, out, ROUND_DEADLINE).await
+    stream_by(endpoint, fence, body, ask, budget, out, ROUND_DEADLINE).await
 }
 
 async fn stream_by<L: Lease>(
     endpoint: LoopbackEndpoint,
+    fence: &Fence,
     body: &ChatBody,
     ask: impl Future<Output = Option<L>>,
     budget: &Budget,
@@ -195,12 +206,15 @@ async fn stream_by<L: Lease>(
     tokio::select! {
         biased;
         () = sleep_until(by) => Err(Failure::Deadline),
-        ended = round(endpoint, body, ask, budget, out, by) => ended,
+        ended = fence.while_open(round(endpoint, fence, body, ask, budget, out, by)) => {
+            ended.unwrap_or(Err(Failure::Retired))
+        }
     }
 }
 
 async fn round<L: Lease>(
     endpoint: LoopbackEndpoint,
+    fence: &Fence,
     body: &ChatBody,
     ask: impl Future<Output = Option<L>>,
     budget: &Budget,
@@ -223,14 +237,22 @@ async fn round<L: Lease>(
     let send_by = (Instant::now() + tuning.send).min(by);
     timeout_at(send_by, async {
         let connect_by = Instant::now() + CONNECT_DEADLINE;
-        let io = timeout_at(connect_by, endpoint.connect())
+        let mut opening = pin!(endpoint.connect());
+        let connect = poll_fn(|cx| {
+            fence
+                .with(|| opening.as_mut().poll(cx))
+                .unwrap_or(Poll::Ready(Err(Failure::Retired)))
+        });
+        let io = timeout_at(connect_by, connect)
             .await
             .map_err(|_| Failure::Transport)??;
         // A connection that completes as its cap passes is still too late.
         if Instant::now() >= connect_by {
             return Err(Failure::Transport);
         }
-        let conn = attempt.conn.insert(ModelConn::new(io));
+        let conn = attempt
+            .conn
+            .insert(ModelConn::new(Fenced(io, fence.clone())));
         match upload(conn, &request, attempt.lease.as_ref(), send_by).await? {
             Upload::Flushed => Ok(()),
             Upload::Refused(head) => Err(refused(head.status)),

@@ -189,6 +189,104 @@ fn closed_queued_reply_ignores_old_drain_until_its_speech_decision() {
 }
 
 #[test]
+fn revoke_acknowledges_a_latched_decision() {
+    let mut core = queued();
+    say(&mut core, "Plain. ");
+    queue_drawing(&mut core, 1);
+    let taken = Effect::Control(ControlToShell::SpeechDecisionTaken(dispatch(1)));
+    let latched = core
+        .handle(Input::SpeechDecision(dispatch(1), SpeechDecision::Allow))
+        .unwrap();
+    assert!(
+        latched
+            .iter()
+            .all(|effect| *effect != taken && !matches!(effect, Effect::Speak { .. })),
+        "segment 0 is still speaking, so the Allow only latches"
+    );
+    let stopped = core
+        .handle(Input::Stop {
+            run: R,
+            revealed: Vec::new(),
+        })
+        .unwrap();
+    assert_eq!(stopped.iter().filter(|effect| **effect == taken).count(), 1);
+}
+
+#[test]
+fn a_decision_for_a_released_run_of_this_connection_is_acknowledged() {
+    let mut core = queued();
+    queue_drawing(&mut core, 0);
+    assert_eq!(finish(&mut core), []);
+    core.handle(Input::Stop {
+        run: R,
+        revealed: Vec::new(),
+    })
+    .unwrap();
+    core.handle(stopped(None)).unwrap();
+    assert!(
+        core.handle(Input::RunStored { run: R })
+            .unwrap()
+            .contains(&run_end(R))
+    );
+    assert_eq!(core.ending_runs(), 0);
+    let decide = |key| Input::SpeechDecision(key, SpeechDecision::Allow);
+    assert_eq!(
+        core.handle(decide(dispatch(0))),
+        Ok(vec![Effect::Control(ControlToShell::SpeechDecisionTaken(
+            dispatch(0)
+        ))])
+    );
+    for unknown in [
+        SpeechDispatch {
+            run: RunId(R.0 + 1),
+            ..dispatch(0)
+        },
+        SpeechDispatch {
+            output: OutputGeneration(2),
+            ..dispatch(0)
+        },
+        SpeechDispatch {
+            segment: SegmentId(kumochi_protocol::message::MAX_SEGMENTS_PER_RUN),
+            ..dispatch(0)
+        },
+    ] {
+        assert_eq!(core.handle(decide(unknown)), Err(Stale));
+    }
+    core.begin_session();
+    assert_eq!(core.handle(decide(dispatch(0))), Err(Stale));
+}
+
+#[test]
+fn a_late_decision_for_a_released_run_on_a_plain_output_stays_stale() {
+    let mut core = fresh();
+    core.register_queued_output(RATE, OutputGeneration(1), Narration::Plain)
+        .unwrap();
+    core.handle(Input::SpokenReplies { loaded: true }).unwrap();
+    core.handle(Input::Turn {
+        turn: 1,
+        thread: None,
+        text: "hi".into(),
+    })
+    .unwrap();
+    admit(&mut core, R);
+    queue_drawing(&mut core, 0);
+    finish(&mut core);
+    core.handle(Input::Stop {
+        run: R,
+        revealed: Vec::new(),
+    })
+    .unwrap();
+    core.handle(stopped(None)).unwrap();
+    core.handle(Input::RunStored { run: R }).unwrap();
+    assert_eq!(core.ending_runs(), 0);
+    assert_eq!(
+        core.handle(Input::SpeechDecision(dispatch(0), SpeechDecision::Allow)),
+        Err(Stale),
+        "only a conducted output owes a late receipt"
+    );
+}
+
+#[test]
 fn discarded_closed_head_enters_the_next_wait_then_completes() {
     let mut core = queued();
     queue_drawing(&mut core, 0);
@@ -760,6 +858,7 @@ fn a_new_turn_while_draining_revokes_the_old_speech_and_starts_at_once() {
                 text: "next".into(),
                 screen: None,
                 local_default: crate::config::DefaultIntent::Other,
+                local: None,
             }),
             Effect::Control(ControlToShell::RunState {
                 run: next,

@@ -530,10 +530,10 @@ mod profile_files {
         std::fs::create_dir_all(scratch.dir()).expect("scratch folder");
         let authority = scratch.db().with_file_name(AUTHORITY_FILE);
         drop(open_profile(&scratch.db()).expect("a first start"));
-        assert_eq!(version(&scratch.db()), 14);
+        assert_eq!(version(&scratch.db()), 15);
         assert_eq!(version(&authority), 5);
         drop(open_profile(&scratch.db()).expect("the next start opens both"));
-        assert_eq!(version(&scratch.db()), 14);
+        assert_eq!(version(&scratch.db()), 15);
     }
 
     #[test]
@@ -549,7 +549,7 @@ mod profile_files {
         std::fs::rename(&built, scratch.db()).expect("the store's name");
         let authority = scratch.db().with_file_name(AUTHORITY_FILE);
         drop(open_profile(&scratch.db()).expect("the start goes on"));
-        assert_eq!(version(&scratch.db()), 14);
+        assert_eq!(version(&scratch.db()), 15);
         assert_eq!(version(&authority), 5);
         assert_eq!(generations(&authority), 0, "signed out");
         let title: String = Connection::open(scratch.db())
@@ -570,7 +570,7 @@ mod profile_files {
         std::fs::remove_file(scratch.db()).expect("the store goes");
         let before = std::fs::read(&authority).expect("the authority");
         drop(open_profile(&scratch.db()).expect("the start goes on"));
-        assert_eq!(version(&scratch.db()), 14);
+        assert_eq!(version(&scratch.db()), 15);
         assert_eq!(std::fs::read(&authority).expect("the authority"), before);
     }
 

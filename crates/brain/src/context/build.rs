@@ -555,7 +555,8 @@ fn quote(
     else {
         return Ok(json!({ "task": task, "note": REMOVED }));
     };
-    if origin == Origin::Kumo && source.kind != ThreadKind::Thread {
+    // A local task's text never reaches another route.
+    if source.local || origin == Origin::Kumo && source.kind != ThreadKind::Thread {
         return Ok(json!({ "task": task, "note": UNAVAILABLE }));
     }
     // Its title is shown even for an empty range, so it's a source either way.

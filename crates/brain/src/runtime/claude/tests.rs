@@ -103,6 +103,7 @@ async fn a_claude_generation_change_after_the_picture_commit_rebuilds_without_th
         text: "words".into(),
         screen: Some(HeldScreen::Attached),
         local_default: crate::config::DefaultIntent::Other,
+        local: None,
     }));
     brain.claude.asked = Some((key, brain.claude.generation, LaunchId(123_456)));
     let gate = SendGate::new(

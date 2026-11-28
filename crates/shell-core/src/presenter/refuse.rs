@@ -34,7 +34,7 @@ pub struct Disposal {
 }
 
 /// The contract for a shell with no drawing surface: how it answers scene traffic so the brain
-/// isn't stalled by it. Nothing calls it yet. The caller passes every delivered `Data` and
+/// isn't stalled by it. `kumochi-nsh` is its caller. The caller passes every delivered `Data` and
 /// `SceneData` frame once, with [`Naming::Other`] when `scene_naming` returns `None`; control
 /// lists such as `ScenesV1` and legacy `Scenes` owe nothing and never reach it. For the open
 /// connection each frame's credit comes back for the caller to grant, or the data writer stops

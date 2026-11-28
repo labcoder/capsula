@@ -12,7 +12,9 @@ name = "kumochi-nsh"
 path = "src/main.rs"
 
 [dependencies]
+async-channel = "2"
 kumochi-protocol.workspace = true
+kumochi-scene.workspace = true
 kumochi-shell-core.workspace = true
 nsh-core.workspace = true
 thiserror.workspace = true
@@ -20,6 +22,10 @@ tracing.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 nsh-platform-windows.workspace = true
+
+[dev-dependencies]
+# The link fixtures the core shares with its shells' tests.
+kumochi-shell-core = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true

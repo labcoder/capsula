@@ -1,4 +1,4 @@
-//! The shell's launch flags: `--quit-after-ms=<1..=120000>`, once, and nothing else.
+//! The shell's launch flags: `--quit-after-ms=<1..=120000>`, at most once, and nothing else.
 
 use std::ffi::OsString;
 use std::time::Duration;
@@ -8,8 +8,8 @@ use kumochi_shell_core::startup::quit_after_ms;
 /// What the command line asks for.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Launch {
-    /// When the shell quits on its own.
-    pub(crate) quit_after: Duration,
+    /// When the shell quits on its own, if it is given a deadline.
+    pub(crate) quit_after: Option<Duration>,
 }
 
 /// Why the flags were refused. Unit variants only, so no argument value is kept or shown.
@@ -21,9 +21,6 @@ pub(crate) enum LaunchError {
     Repeated,
     #[error("unknown launch flag")]
     Unknown,
-    // A hidden window with no link to the brain has no other way to quit.
-    #[error("this shell needs --quit-after-ms until it has a link")]
-    NoDeadline,
 }
 
 impl Launch {
@@ -40,9 +37,7 @@ impl Launch {
                 return Err(LaunchError::Repeated);
             }
         }
-        quit_after
-            .map(|quit_after| Self { quit_after })
-            .ok_or(LaunchError::NoDeadline)
+        Ok(Self { quit_after })
     }
 }
 
@@ -56,7 +51,7 @@ mod tests {
 
     fn after(millis: u64) -> Launch {
         Launch {
-            quit_after: Duration::from_millis(millis),
+            quit_after: Some(Duration::from_millis(millis)),
         }
     }
 
@@ -74,7 +69,8 @@ mod tests {
             ),
             (&["--other"], Err(LaunchError::Unknown)),
             (&["--quit-after-ms"], Err(LaunchError::Unknown)),
-            (&[], Err(LaunchError::NoDeadline)),
+            // The brain relaunches a shell with no flags.
+            (&[], Ok(Launch { quit_after: None })),
         ] {
             assert_eq!(parse(args), expected, "{args:?}");
         }
@@ -118,11 +114,6 @@ mod tests {
                 ],
                 "Repeated",
                 "--quit-after-ms comes at most once",
-            ),
-            (
-                vec![],
-                "NoDeadline",
-                "this shell needs --quit-after-ms until it has a link",
             ),
         ] {
             let error =

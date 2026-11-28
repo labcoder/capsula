@@ -92,6 +92,7 @@ fn new_hold_stores_exact_words_once_only_after_submit() {
             text: "recognized-history-sentinel".into(),
             screen: None,
             local_default: crate::config::DefaultIntent::Other,
+            local: None,
         }]
     );
     assert!(running.thread.send(writes.into_iter().next().unwrap()));

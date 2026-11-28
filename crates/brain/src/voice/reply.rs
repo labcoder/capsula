@@ -592,6 +592,9 @@ impl Reply {
             return;
         }
         self.synthesis = Synthesis::Revoked;
+        for at in 0..self.segments.len() {
+            self.take_decision(at, out);
+        }
         if let Some(state) = &mut self.retirement {
             state.waiting = None;
         }

@@ -21,10 +21,6 @@ pub(crate) mod anthropic;
 pub(crate) mod claude_code;
 #[cfg(any(test, debug_assertions, feature = "gate-fixture"))]
 pub(crate) mod fixture;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "local chat is off (LOCAL_CHAT)")
-)]
 pub(crate) mod local;
 pub(crate) mod responses;
 

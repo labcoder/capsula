@@ -1409,3 +1409,46 @@ fn a_local_route_takes_no_picture_even_when_ready_with_an_image_model() {
     assert!(!core.takes_pictures(ConnectionKind::LocalChat, &haiku));
     assert!(!core.pictured(on(ConnectionKind::LocalChat, 5), Some(&haiku)));
 }
+
+/// A local run is bound to the server it arrived under: its engine is built only for that
+/// server's tag, a replaced server ends it with Open Settings, and the new server never answers
+/// it.
+#[test]
+fn a_replaced_local_server_ends_the_run_bound_to_the_old_one() {
+    let local = kumochi_protocol::message::ConnectionKind::LocalChat;
+    let (mut core, effects) = turn_on(local, vec![chatgpt_signed_out(), kind_ready(local, 5)]);
+    let request = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::StartEngine { request } => Some(request.clone()),
+            _ => None,
+        })
+        .expect("the engine starts");
+    assert_eq!(route(&core), on(local, 5));
+    assert_eq!(core.local_tag(&request), Some(ConnectionTag(5)));
+    assert_eq!(
+        core.handle(kind_ready(local, 9)),
+        Ok(failed(Some(model_unavailable())))
+    );
+    assert_eq!(core.local_tag(&request), None);
+}
+
+/// A local server that no longer offers the run's model, under the same tag, takes no send.
+#[test]
+fn a_local_send_goes_only_to_a_model_its_server_offers_now() {
+    let local = kumochi_protocol::message::ConnectionKind::LocalChat;
+    let mut core = Coordinator::new(ThreadId(1), ThreadId(3), RunId(9), Vec::new());
+    core.handle(kind_ready(local, 5)).expect("never stale");
+    assert!(core.offered(on(local, 5), Some("haiku")));
+    core.handle(Input::Engines(
+        local,
+        Availability::Ready(Ready {
+            connection: ConnectionTag(5),
+            models: vec![info("other")],
+            trusted_draw: false,
+            images: Vec::new(),
+        }),
+    ))
+    .expect("never stale");
+    assert!(!core.offered(on(local, 5), Some("haiku")));
+}

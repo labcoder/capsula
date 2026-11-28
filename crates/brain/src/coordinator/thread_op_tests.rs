@@ -178,6 +178,7 @@ fn deleting_the_main_thread_answers_not_hidden_before_anything_else() {
                 text: "again".into(),
                 screen: None,
                 local_default: crate::config::DefaultIntent::Other,
+                local: None,
             }),
             state(RunId(11), MAIN, Phase::Thinking),
             Effect::ArmDeadline {

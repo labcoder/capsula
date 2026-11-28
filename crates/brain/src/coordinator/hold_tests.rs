@@ -91,6 +91,7 @@ fn new_hold_allocates_only_at_submit_with_real_origin_and_no_typed_watermark() {
             text: "exact recognized words".into(),
             screen: None,
             local_default: crate::config::DefaultIntent::Other,
+            local: None,
         })
     );
     assert_eq!(
@@ -679,6 +680,7 @@ fn a_held_turn_stores_its_screen_before_any_build_can_start() {
                 text: "words".into(),
                 screen: held,
                 local_default: crate::config::DefaultIntent::Other,
+                local: None,
             })
         );
         assert_eq!(
@@ -1306,6 +1308,7 @@ fn a_turn_still_queued_behind_an_older_run_is_stored_withdrawn() {
             text: "second".into(),
             screen: Some(HeldScreen::Withdrawn),
             local_default: crate::config::DefaultIntent::Other,
+            local: None,
         })),
         "{effects:?}"
     );
@@ -1335,6 +1338,7 @@ fn a_turn_still_queued_when_its_run_ends_is_stored_with_no_picture() {
             text: "second".into(),
             screen: None,
             local_default: crate::config::DefaultIntent::Other,
+            local: None,
         })),
         "{effects:?}"
     );

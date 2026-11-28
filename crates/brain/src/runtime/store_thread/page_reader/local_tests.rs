@@ -49,6 +49,14 @@ fn task_on(scratch: &Scratch, connection: ConnectionKind) -> Store {
         store.set_model(TASK, Some(&on(connection))).expect("saved"),
         ChoiceRead::Found { .. }
     ));
+    // Bound as its first stored local turn would bind it, to the snapshot's server.
+    store
+        .conn_for_tests()
+        .execute(
+            "UPDATE threads SET local_tag = x'0000000000000007' WHERE id = 2 AND connection = 'local_chat'",
+            [],
+        )
+        .expect("bound");
     store
         .begin_turn(TASK, None, RunId(2), "second ask")
         .expect("turn");
@@ -61,7 +69,7 @@ fn snapshot() -> RunSnapshot {
         assistant: AssistantName::new("Kumo").expect("name"),
         user: None,
         choice: None,
-        connection: ConnectionTag(0),
+        connection: ConnectionTag(7),
     }
 }
 
@@ -82,7 +90,7 @@ fn build(control: Control, connection: ConnectionKind) -> BuildContext {
         origin: Origin::Task(TASK),
         snapshot: Some(snapshot()),
         first: true,
-        arrived: crate::coordinator::Arrived::default(),
+        arrived: crate::coordinator::Arrived::of(connection, ConnectionTag(7)),
         drawings: crate::drawing::Digest::default(),
         picture_models: vec![(
             Route {
@@ -209,5 +217,62 @@ fn no_title_or_summary_is_read_for_a_local_task() {
             !titled,
             "{connection:?}"
         );
+    }
+}
+
+/// An inline rewrite reads nothing of a task stored as local, even for a run pinned to a cloud
+/// choice.
+#[test]
+fn a_local_task_is_never_compacted_under_a_cloud_snapshot() {
+    let scratch = Scratch::new("page-local-cloud-compact");
+    let store = task_on(&scratch, ConnectionKind::LocalChat);
+    let side = store.side();
+    let compact = CompactContext {
+        control: control(),
+        key: build(control(), ConnectionKind::AnthropicKey).key,
+        thread: TASK,
+        snapshot: Some(RunSnapshot {
+            choice: Some(on(ConnectionKind::AnthropicKey)),
+            ..snapshot()
+        }),
+        room: 1000,
+    };
+    let compact = super::context::read_compact(Some(&side), compact, || ());
+    assert!(
+        compact
+            .result
+            .is_err_and(|failed| failed == Unbuilt::Failed)
+    );
+}
+
+/// A later round whose snapshot still says cloud builds nothing of a task stored as local, while
+/// the same round builds for a task stored on that cloud route.
+#[test]
+fn a_local_task_is_never_built_under_a_stale_cloud_snapshot() {
+    for (stored, builds) in [
+        (ConnectionKind::AnthropicKey, true),
+        (ConnectionKind::LocalChat, false),
+    ] {
+        let scratch = Scratch::new("page-local-stale-cloud");
+        let store = task_on(&scratch, stored);
+        let side = store.side();
+        let later = BuildContext {
+            first: false,
+            snapshot: Some(RunSnapshot {
+                choice: Some(on(ConnectionKind::AnthropicKey)),
+                ..snapshot()
+            }),
+            ..build(control(), ConnectionKind::AnthropicKey)
+        };
+        let built = super::context::read(Some(&side), later, ContextTuning::default(), || ());
+        assert_eq!(
+            built.result.is_ok(),
+            builds,
+            "{stored:?}: {:?}",
+            built.result.err()
+        );
+        if !builds {
+            assert!(matches!(built.result, Err(Unbuilt::Failed)));
+        }
     }
 }

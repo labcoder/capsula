@@ -519,7 +519,7 @@ the turn's. Known limits:
 | `NoTurn` | The run's turn isn't stored. |
 | `InvalidCut` | A tool call is apart from its result, or an item repeats. |
 | `TooLarge { room }` | The parts that can't be dropped are over the bound; `room` is what's left for a summary when the current run fits without one. |
-| `Unbound` | A local build's thread isn't a task whose own saved route is local. |
+| `Unbound` | A local build's thread isn't a task whose own saved route is local and bound to the run's local server. |
 | `LocalContent` | A local task holds more than plain turns and answers. |
 | `Store` | The read failed. |
 
@@ -724,8 +724,9 @@ split byte by byte. Transport tests use real sockets on `127.0.0.1:0` only.
 ## The local engine
 
 `engines/local.rs` answers a local task's runs over the transport above. It's tests-only while
-`LOCAL_CHAT` is off: the dispatcher still answers the local kind with a refusal, and the store
-refuses every local turn before keeping it (see [store](store.md)), so no run reaches it.
+`LOCAL_CHAT` is off: nothing in a shipped build sets the runtime's local server, so the dispatcher
+answers the local kind with a refusal, and the store refuses every local turn that arrived with no
+server ready (see [store](store.md)), so no run reaches it.
 
 ```mermaid
 flowchart LR
@@ -742,8 +743,8 @@ summary. On a run's first build admission doesn't know the route yet, so the dra
 and key results it gathered are dropped unsent; once the run is bound to a local route, its
 rebuilds gather none. The read runs under the reader's scope: its queries stop when it's cancelled or past its
 deadline, and grouping the history into runs checks the same scope every 256 items and at its end. It accepts only a live task (`Origin::Task` of that thread) whose own saved
-route is `local_chat` (`Unbound` otherwise; one that only inherits a local default isn't
-bound). It reads the task's stored `user` and `assistant_text` events, and any of them with
+route is `local_chat` and that is bound to the server the run arrived under (`Unbound`
+otherwise; one that only inherits a local default isn't bound). It reads the task's stored `user` and `assistant_text` events, and any of them with
 stored metadata, a call, a result or a native item fails the build as `LocalContent`. The
 request is the app's instructions, those turns and answers, and no tools, keeping the newest
 whole runs that fit; nothing summarizes a local task, so a current run alone over the bound
@@ -756,6 +757,19 @@ too. The engine sends only when the request's choice is the local kind and the e
 model; it never changes endpoint or model. Its encoder takes the instructions as `system` and
 each user or assistant message as itself; a `Developer` message, any other item or a tool offer
 fails the round as `Request` before the gate is asked.
+
+**Bound to one server.** The runtime holds at most one local server (`runtime/local.rs`): its
+endpoint, model, a generation tag and a fence. Its tag is the local route's `ConnectionTag`, so a
+local run is pinned to it at arrival like any route, and a new endpoint or model is a new server
+under a fresh tag. Replacing or removing the server revokes the old fence first, then reports the
+new availability: `Coordinator::available` ends a run bound to the old tag, a grant under it is
+refused, and a model the server no longer offers takes no send even under the same tag. The
+dispatcher builds a `LocalEngine` only for the server whose tag the current run's route carries,
+so an engine built after a replacement never carries an old task to the new endpoint. Inside the
+round, the connect, every read and write poll and the whole round run inside the fence: once it's
+revoked nothing more is connected, written or read, the connection closes, and the round ends as
+`Retired` with its pending text dropped. A write polled before the revocation counts as written;
+none starts after it. A task is bound durably by its first stored turn (see [store](store.md)).
 
 **How it ends.** Text goes to the round's channel only once there's room for it, so the pump
 sets the pace. Each read's wait ends at the earlier of its own cutoff and the round's deadline,
@@ -770,6 +784,7 @@ a cloud recovery:
 | `Failure` | Error |
 |---|---|
 | `Dormant` | `LocalOff` |
+| `Retired` | `ModelUnavailable` |
 | `Request` | `RequestRefused` |
 | `Spent` | `LiveBudgetSpent` |
 | `AuthRequired`, `Refused`, `Provider` | `LocalRefused` |
@@ -780,8 +795,7 @@ a cloud recovery:
 **Before it can be switched on.** A Ready path from an explicit model-list check, a settings
 path, sanitized recordings from each supported server, and the owner's decision on trusting a
 server the user configured: loopback proves where Kumochi sends, not which process listens or
-what it forwards. The first build that writes `local_chat` must also stamp a fresh task's route
-with its first turn under a schema version older builds refuse, keep recall and restart from
-crossing routes, and refuse unbound rows. Before a Ready slot can send, each grant and write
-must check the live endpoint and model, and a replaced endpoint must end the old stream with
-nothing replayed.
+what it forwards. The settings writer must store each endpoint with its tag, draw a fresh tag
+for a new endpoint (clearing and re-adding one included), and retire the old server before the
+new one is reported, as the test setter does. A moved task's refusal still uses
+`ModelUnavailable`'s account copy, which activation must replace.
