@@ -1176,47 +1176,62 @@ fn a_refused_turn_fails_with_its_reason() {
 }
 
 /// A run stopped before the store refused its turn still tells the shell why, so a New target
-/// that named the unkept thread can return.
+/// that named the unkept thread can return, a run quieting its spoken reply included.
 #[test]
 fn a_stopped_runs_refusal_still_carries_its_reason() {
-    let mut core = fresh();
-    let effects = core
-        .handle(Input::Turn {
-            turn: 1,
-            thread: None,
-            text: "b".into(),
-        })
-        .expect("turn");
-    let run = effects
-        .iter()
-        .find_map(|effect| match effect {
-            Effect::Store(StoreOp::BeginTurn { run, .. }) => Some(*run),
-            _ => None,
-        })
-        .expect("a begun turn");
-    core.handle(Input::Stop {
-        run,
-        revealed: Vec::new(),
-    })
-    .expect("stopped");
-    let reason: kumochi_protocol::message::UserError =
-        kumochi_protocol::message::ErrorKey::ConfigUnreadable.into();
-    let effects = core
-        .handle(Input::TurnRefused {
+    for spoken in [false, true] {
+        let mut core = fresh();
+        if spoken {
+            core.handle(Input::AudioOutput {
+                rate: 24_000,
+                generation: kumochi_protocol::message::OutputGeneration(1),
+            })
+            .expect("never stale");
+            core.handle(Input::SpokenReplies { loaded: true })
+                .expect("never stale");
+        }
+        let effects = core
+            .handle(Input::Turn {
+                turn: 1,
+                thread: None,
+                text: "b".into(),
+            })
+            .expect("turn");
+        let run = effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::Store(StoreOp::BeginTurn { run, .. }) => Some(*run),
+                _ => None,
+            })
+            .expect("a begun turn");
+        core.handle(Input::Stop {
             run,
-            reason: reason.clone(),
+            revealed: Vec::new(),
         })
-        .expect("refused");
-    let told: Vec<_> = effects
-        .iter()
-        .filter_map(|effect| match effect {
-            Effect::Control(ControlToShell::RunState { phase, error, .. }) => {
-                Some((*phase, error.clone()))
-            }
-            _ => None,
-        })
-        .collect();
-    assert_eq!(told, vec![(Phase::Failed, Some(reason))]);
+        .expect("stopped");
+        let reason: kumochi_protocol::message::UserError =
+            kumochi_protocol::message::ErrorKey::ConfigUnreadable.into();
+        let effects = core
+            .handle(Input::TurnRefused {
+                run,
+                reason: reason.clone(),
+            })
+            .expect("refused");
+        let told: Vec<_> = effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::Control(ControlToShell::RunState { phase, error, .. }) => {
+                    Some((*phase, error.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            told,
+            vec![(Phase::Failed, Some(reason))],
+            "spoken: {spoken}"
+        );
+    }
 }
 
 #[test]

@@ -1595,11 +1595,15 @@ impl Coordinator {
         }
         let at = self.ending_at(run)?;
         let ended = &mut self.ending[at];
-        let (id, thread) = (ended.id, ended.thread);
-        let ending = ended.ending.as_mut().expect("an ending run has an Ending");
-        if ending.stored {
+        if ended.ending.as_ref().is_some_and(|ending| ending.stored) {
             return Err(Stale);
         }
+        // Every telling of this ending, a quieting one's included, carries the refusal.
+        if reason.is_some() {
+            ended.error.clone_from(&reason);
+        }
+        let (id, thread) = (ended.id, ended.thread);
+        let ending = ended.ending.as_mut().expect("an ending run has an Ending");
         // A failed outcome was already told; any other ending now turns out failed. A quieting
         // one tells it once it's released.
         let tell_end = ending.notify == Notify::Shell
