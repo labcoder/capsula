@@ -71,10 +71,11 @@ const RESTORE: &str = "claude-question.restore";
 /// The most entries the Claude Code folder's listing takes [guess].
 const MAX_ENTRIES: usize = 10_000;
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-const KINDS: [ConnectionKind; 3] = [
+const KINDS: [ConnectionKind; 4] = [
     ConnectionKind::ChatGpt,
     ConnectionKind::AnthropicKey,
     ConnectionKind::ClaudeCode,
+    ConnectionKind::LocalChat,
 ];
 
 /// One step of the run.
@@ -1051,6 +1052,7 @@ fn kind_word(kind: ConnectionKind) -> &'static str {
         ConnectionKind::ChatGpt => "chatgpt",
         ConnectionKind::AnthropicKey => "anthropic-key",
         ConnectionKind::ClaudeCode => "claude-code",
+        ConnectionKind::LocalChat => "local-chat",
     }
 }
 

@@ -501,7 +501,7 @@ after every op and wake; while it's being found that's `Finding`, which reads as
 What never changes about a kind sits in one exhaustive row, `connections::facts::of(kind)`: its
 slot in per-kind state, its shipped picture switch (`PictureRoutes::SHIPPED` reads it; tests
 override it only through `PictureRoutes::new`), its stored spelling (`chatgpt`,
-`anthropic_key`, `claude_code`, which written rows keep for good; see [store](store.md)) and
+`anthropic_key`, `claude_code`, `local_chat`, which written rows keep for good; see [store](store.md)) and
 how its stored rounds replay (`ChatGPT`'s native items carry their text, the key's native calls
 sit beside it, Claude Code's rounds replay as text). The coordinator keeps each kind's current `Availability`, and a turn's arrival keeps
 each kind's tag, in a `PerKind` indexed by that slot. A row grants nothing: the default route,
@@ -516,6 +516,7 @@ These classifications have no typed reader yet, so they stay here rather than in
 | `ChatGPT` | account sign-in and recovery | native Responses | switched on in its row; per model by its catalog | Kumochi's OAuth sign-in | fixed OpenAI HTTPS routes |
 | Anthropic key | the checked key and its catalog | native Messages | switched on in its row | the key in Credential Manager | fixed Anthropic HTTPS routes |
 | Claude Code | discovery, sign-in and policy | launch-scoped MCP | switched off in its row | Claude Code's own sign-in in Kumochi's folder | the contained child, bound to its provider |
+| Local server | nothing yet: always unavailable, and its engine is a refusal | none | off in its row, with no switch to turn it on | none | none yet; the [loopback transport](engines.md#the-local-chat-completions-transport) is unused |
 
 The tools column is a ceiling, never an offer: each request's offer is built and admitted as in
 [the tool loop](#the-tool-loop). A picture switch never makes a model take pictures or skips its

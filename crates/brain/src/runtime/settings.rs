@@ -337,6 +337,19 @@ impl Brain {
                 };
                 *choice = repaired;
             }
+            // No build serves a local server yet, so none is saved as the default, and one saved by
+            // hand stays: a turn typed under it then never meets another route at the store.
+            if let Change::User(SettingsOp::SetDefaultModel(choice)) = &change
+                && (choice.connection == kumochi_protocol::message::ConnectionKind::LocalChat
+                    || self.config.local_intent())
+            {
+                self.settled(
+                    epoch,
+                    Outcome::Refused(ErrorKey::ModelUnavailable),
+                    link.as_deref_mut(),
+                )?;
+                continue;
+            }
             let model = matches!(&change, Change::User(SettingsOp::SetDefaultModel(_)));
             let op = match &change {
                 Change::User(op) => Some(op.clone()),

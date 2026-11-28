@@ -465,6 +465,7 @@ impl Brain {
         let drawing_scenes = store.drawing_scenes();
         let mut coordinator = Coordinator::new(main_thread, last_thread, last_run, scenes);
         coordinator.tuning = config.run_tuning();
+        coordinator.local_default = config.local_intent();
         coordinator.configure_drawing(config.drawing_tuning());
         let recovery_clears = coordinator.restore_drawings(drawing_scenes);
         // The accounts go back with the error, so their owner can still close them.
@@ -1708,6 +1709,10 @@ impl Brain {
                 self.key_engine(request)
                     .unwrap_or_else(|| Box::new(engines::Unserved::model_unavailable())),
             ),
+            // No build serves a local server yet; never `None`, which would answer on ChatGPT.
+            Some(ConnectionKind::LocalChat) => {
+                Some(Box::new(engines::Unserved::model_unavailable()))
+            }
         }
     }
 

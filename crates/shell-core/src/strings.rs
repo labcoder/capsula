@@ -403,6 +403,7 @@ texts! {
 
     // Claude Code
     ClaudeProvider => "claude-provider",
+    LocalProvider => "local-provider",
     ClaudeReview => "claude-review",
     ClaudeConnect => "claude-connect",
     ClaudeDisconnect => "claude-disconnect",

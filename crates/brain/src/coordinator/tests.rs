@@ -382,6 +382,7 @@ fn a_turn_is_stored_before_the_engine_starts() {
                 run: R,
                 text: "  \n  Draw a cat\nplease".into(),
                 screen: None,
+                local_default: false,
             }),
             state(R, T, Phase::Thinking),
             Effect::ArmDeadline {
@@ -626,6 +627,7 @@ fn a_new_turn_replaces_the_current_run_with_a_higher_id() {
                 run: RunId(11),
                 text: "again".into(),
                 screen: None,
+                local_default: false,
             }),
         ]
     );
@@ -836,6 +838,7 @@ fn a_failed_ending_is_reported_after_done_after_stop_and_after_a_replacement() {
                 run: RunId(11),
                 text: "again".into(),
                 screen: None,
+                local_default: false,
             }),
         ],
         "the old run's step failed while its replacement waits"
@@ -1112,6 +1115,28 @@ fn a_deadline_after_done_leaves_the_finished_run_alone() {
     );
 }
 
+/// A turn carries whether the saved default named the local server, for the store to judge it by.
+#[test]
+fn a_turn_carries_the_saved_local_intent_to_the_store() {
+    let mut core = fresh();
+    core.local_default = true;
+    let effects = core
+        .handle(Input::Turn {
+            turn: 1,
+            thread: None,
+            text: "b".into(),
+        })
+        .expect("turn");
+    let carried: Vec<bool> = effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Store(StoreOp::BeginTurn { local_default, .. }) => Some(*local_default),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(carried, vec![true]);
+}
+
 #[test]
 fn a_replacement_is_stored_and_started_only_after_the_runs_before_it() {
     let (b, c) = (RunId(11), RunId(12));
@@ -1122,6 +1147,7 @@ fn a_replacement_is_stored_and_started_only_after_the_runs_before_it() {
             run,
             text: text.into(),
             screen: None,
+            local_default: false,
         })
     };
     let mut core = started();

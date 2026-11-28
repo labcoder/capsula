@@ -294,6 +294,17 @@ impl Config {
             .map_or(StoredChoice::Invalid, default_choice_of)
     }
 
+    /// Whether the saved default names the local server, however malformed the rest of it is.
+    pub(crate) fn local_intent(&self) -> bool {
+        self.table.as_ref().is_ok_and(|table| {
+            table
+                .get(DEFAULT_MODEL)
+                .and_then(|value| value.get("connection"))
+                .and_then(Value::as_str)
+                == Some("LocalChat")
+        })
+    }
+
     /// `[claude_code] enabled`: on unless it's `false`. Anything else there, or a file that
     /// couldn't be read, turns it off, because it may have said so.
     pub(crate) fn claude_code_enabled(&self) -> bool {
@@ -734,6 +745,7 @@ fn default_choice_of(table: &Table) -> StoredChoice {
             "ChatGpt" => "chatgpt",
             "ClaudeCode" => "claude_code",
             "AnthropicKey" => "anthropic_key",
+            "LocalChat" => "local_chat",
             _ => return StoredChoice::Invalid,
         },
         Some(_) => return StoredChoice::Invalid,

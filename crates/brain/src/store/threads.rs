@@ -2,12 +2,14 @@
 //! model choice. Neither change moves a thread in the list.
 
 use kumochi_protocol::message::{
-    ChoiceRead, ChoiceRev, ModelChoice, SavedChoice, ThreadId, ThreadKind, ThreadTitle,
+    ChoiceRead, ChoiceRev, ConnectionKind, ModelChoice, SavedChoice, ThreadId, ThreadKind,
+    ThreadTitle,
 };
 use rusqlite::{OptionalExtension as _, TransactionBehavior, params};
 
 use super::choice::{StoredChoice, connection_text, effort_text};
 use super::{Generation, Store, StoreError, now_ms, row_id, sql_id};
+use crate::connections::facts;
 
 /// Who set a task's title. A first-words title is `BeginTurn`'s, and only it can be replaced by
 /// a model's.
@@ -79,7 +81,8 @@ impl Store {
     /// uses the global default, and advances its revision in the same transaction. Kumo's main
     /// chat takes this write like any task. Answers what was committed: `Missing` for a missing,
     /// hidden or unrepresentable thread, and `Failed` with nothing written once the revision
-    /// can't advance.
+    /// can't advance, or for a thread whose saved route is the local server: no build serves it
+    /// yet, so it stays, and a turn typed under it never meets another route at the store.
     ///
     /// # Errors
     /// Fails when SQLite fails.
@@ -94,16 +97,19 @@ impl Store {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let revision: Option<i64> = tx
+        let row: Option<(i64, Option<String>)> = tx
             .query_row(
-                "SELECT model_choice_rev FROM threads WHERE id = ?1 AND state = 'live'",
+                "SELECT model_choice_rev, connection FROM threads WHERE id = ?1 AND state = 'live'",
                 params![thread],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        let Some(revision) = revision else {
+        let Some((revision, connection)) = row else {
             return Ok(ChoiceRead::Missing);
         };
+        if connection.as_deref() == Some(connection_text(ConnectionKind::LocalChat)) {
+            return Ok(ChoiceRead::Failed);
+        }
         let Some((next, rev)) = revision
             .checked_add(1)
             .and_then(|next| Some((next, u64::try_from(next).ok()?)))
@@ -129,6 +135,30 @@ impl Store {
             }),
             revision: ChoiceRev(rev),
         })
+    }
+
+    /// The route a thread's own saved choice names; `None` for a thread with none, a spelling no
+    /// build wrote, or no such thread yet.
+    ///
+    /// # Errors
+    /// Fails when SQLite fails.
+    pub(crate) fn saved_route(
+        &self,
+        thread: ThreadId,
+    ) -> Result<Option<ConnectionKind>, StoreError> {
+        let Ok(thread) = sql_id(thread.0, StoreError::NoThread) else {
+            return Ok(None);
+        };
+        let saved: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT connection FROM threads WHERE id = ?1",
+                params![thread],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        Ok(saved.as_deref().and_then(facts::stored))
     }
 }
 

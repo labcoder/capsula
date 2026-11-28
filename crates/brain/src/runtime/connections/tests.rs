@@ -27,11 +27,79 @@ async fn production_composition_serves_the_key_route_and_refuses_unadmitted_send
             Availability::Unavailable(refusal),
         )) if refusal == unavailable
     ));
-    assert_owned_key_refusal(&mut brain, unavailable).await;
+    assert_owned_refusal(&mut brain, ConnectionKind::AnthropicKey, unavailable).await;
     brain.close().await;
 }
 
-async fn assert_owned_key_refusal(brain: &mut Brain, unavailable: UserError) {
+/// A saved local choice gets its own refusing engine; `None` would answer it on `ChatGPT`.
+#[tokio::test]
+async fn a_local_choice_is_refused_by_its_own_engine_never_the_default() {
+    let scratch = Scratch::new("dormant-local-route");
+    let mut brain = test_support::brain(&scratch, "");
+    assert_owned_refusal(&mut brain, ConnectionKind::LocalChat, model_unavailable()).await;
+    brain.close().await;
+}
+
+/// No build serves a local server yet, so the brain refuses one as the default, whatever the
+/// shell sends, and starts no write.
+#[tokio::test]
+async fn a_local_default_model_is_refused_and_nothing_is_written() {
+    use crate::runtime::settings::{Change, Queued};
+    use kumochi_protocol::message::{Effort, ModelChoice, ModelSlug, SettingsOp};
+    let scratch = Scratch::new("dormant-local-default");
+    let mut brain = test_support::brain(&scratch, "");
+    let before = brain.config.default_choice();
+    brain.settings_ops.push_back(Queued {
+        change: Change::User(SettingsOp::SetDefaultModel(ModelChoice {
+            connection: ConnectionKind::LocalChat,
+            model: ModelSlug::new("gpt-6-luna").expect("model"),
+            effort: Effort::Low,
+        })),
+        epoch: brain.epoch + 1,
+    });
+    brain.pump_settings(None).expect("pumped");
+    assert!(brain.config_write.is_none(), "no write started");
+    assert!(brain.settings_ops.is_empty());
+    assert_eq!(brain.config.default_choice(), before);
+    brain.close().await;
+}
+
+/// A local default saved by hand, malformed or not, sets the coordinator's flag from the start,
+/// and no edit in the app replaces it, so a turn typed under it never meets another route.
+#[tokio::test]
+async fn a_saved_local_default_is_heard_at_start_and_kept() {
+    use crate::runtime::settings::{Change, Queued};
+    use kumochi_protocol::message::{Effort, ModelChoice, ModelSlug, SettingsOp};
+    let scratch = Scratch::new("dormant-local-intent");
+    std::fs::create_dir_all(scratch.dir()).expect("folder");
+    std::fs::write(
+        scratch.dir().join(kumochi_protocol::constants::CONFIG_FILE),
+        "[default_model]\nconnection = \"LocalChat\"\n",
+    )
+    .expect("written");
+    let mut brain = test_support::brain(&scratch, "");
+    assert!(brain.coordinator.local_default, "read at start");
+    let before = brain.config.default_choice();
+    brain.settings_ops.push_back(Queued {
+        change: Change::User(SettingsOp::SetDefaultModel(ModelChoice {
+            connection: ConnectionKind::ChatGpt,
+            model: ModelSlug::new("gpt-6-luna").expect("model"),
+            effort: Effort::Low,
+        })),
+        epoch: brain.epoch + 1,
+    });
+    brain.pump_settings(None).expect("pumped");
+    assert!(brain.config_write.is_none(), "no write started");
+    assert_eq!(brain.config.default_choice(), before);
+    assert!(brain.config.local_intent());
+    brain.close().await;
+}
+
+async fn assert_owned_refusal(
+    brain: &mut Brain,
+    connection: ConnectionKind,
+    unavailable: UserError,
+) {
     use crate::context::{ModelRequest, Origin};
     use crate::coordinator::{BuildKey, SendKey};
     use crate::engines::{Asks, EngineFailure, Finish, RunRequest, SendGate, TurnEvent};
@@ -49,7 +117,7 @@ async fn assert_owned_key_refusal(brain: &mut Brain, unavailable: UserError) {
         origin: Origin::Kumo,
         request: ModelRequest {
             choice: Some(ModelChoice {
-                connection: ConnectionKind::AnthropicKey,
+                connection,
                 model: ModelSlug::new("claude-sonnet-5-5").expect("model"),
                 effort: Effort::Medium,
             }),

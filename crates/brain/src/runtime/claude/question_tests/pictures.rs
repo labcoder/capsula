@@ -82,6 +82,7 @@ async fn start_screen_picture(brain: &mut Brain) -> (LeaseId, Vec<Effect>) {
                 run: request.run,
                 text: "words".into(),
                 screen: Some(kumochi_protocol::message::HeldScreen::Screen),
+                local_default: false,
             })
     );
     let stored = timeout(WAIT, brain.inputs.recv())
@@ -521,6 +522,7 @@ async fn a_bound_find_keeps_the_round_until_its_picture_settles_unsent() {
                 run: request.run,
                 text: "words".into(),
                 screen: Some(kumochi_protocol::message::HeldScreen::Attached),
+                local_default: false,
             })
     );
     let stored = timeout(WAIT, brain.inputs.recv())

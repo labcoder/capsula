@@ -19,6 +19,8 @@ pub enum ConnectionKind {
     AnthropicKey,
     /// The user's installed Claude Code.
     ClaudeCode,
+    /// A model server on this machine's loopback address; no build lets a user choose it yet.
+    LocalChat,
 }
 
 /// Something the user asked of a Claude connection; answered by one

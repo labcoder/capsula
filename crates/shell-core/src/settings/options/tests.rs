@@ -8,6 +8,45 @@ use kumochi_protocol::message::{
 use super::{Settings, Strings};
 use crate::settings::Update;
 
+/// A saved local default, which no catalog lists, always names this computer, so it never reads
+/// like a cloud model of the same name.
+#[test]
+fn a_saved_local_default_always_names_this_computer() {
+    let strings = Strings::english();
+    let mut model = Settings::default();
+    model.set_models(
+        ChatGpt,
+        vec![ModelInfo {
+            slug: ModelSlug::new("luna").expect("slug"),
+            display_name: ModelName::new("luna").expect("name"),
+            supported_efforts: None,
+        }],
+    );
+    let mut snapshot = saved();
+    snapshot.default_model = Some(ModelChoice {
+        model: ModelSlug::new("luna").expect("slug"),
+        effort: Effort::Low,
+        connection: kumochi_protocol::message::ConnectionKind::LocalChat,
+    });
+    model.set_view(snapshot, Update::Unsolicited);
+    let (choices, checked) = model.default_model_options(&strings);
+    assert_eq!(checked, Some(0));
+    assert_eq!(
+        choices
+            .iter()
+            .map(|(connection, slug, label)| (*connection, slug.as_str(), label.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (
+                kumochi_protocol::message::ConnectionKind::LocalChat,
+                "luna",
+                "luna (This computer)"
+            ),
+            (ChatGpt, "luna", "luna"),
+        ]
+    );
+}
+
 #[test]
 fn a_key_row_always_names_the_key_and_another_only_on_a_shared_name() {
     let row = |slug, name| ModelInfo {

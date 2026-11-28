@@ -13,6 +13,45 @@ use crate::store::{Interruption, RunEnd, TitleSource};
 /// `fresh`'s main thread.
 const MAIN: ThreadId = ThreadId(1);
 
+/// No build serves a local server yet, so a thread's local choice is refused before the store,
+/// and while a local default is saved so is every set or clear: a thread that inherits it stays
+/// local.
+#[test]
+fn local_routes_are_refused_before_the_store() {
+    let on = |connection| ModelChoice {
+        model: ModelSlug::new("gpt-6.1-sol").expect("valid"),
+        effort: Effort::Medium,
+        connection,
+    };
+    for (local_default, choice) in [
+        (
+            false,
+            Some(on(kumochi_protocol::message::ConnectionKind::LocalChat)),
+        ),
+        (
+            true,
+            Some(on(kumochi_protocol::message::ConnectionKind::ChatGpt)),
+        ),
+        (true, None),
+    ] {
+        let mut core = fresh();
+        core.local_default = local_default;
+        assert_eq!(
+            core.handle(Input::ThreadOp(ThreadOp::SetModel {
+                request: 7,
+                thread: T,
+                choice: choice.clone(),
+            })),
+            Ok(vec![Effect::Control(ControlToShell::ThreadModelSet {
+                request: 7,
+                thread: T,
+                result: kumochi_protocol::message::ChoiceRead::Failed,
+            })]),
+            "{local_default} {choice:?}"
+        );
+    }
+}
+
 #[test]
 fn model_results_echo_the_exact_write_and_refusals_have_an_answer() {
     let mut core = fresh();
@@ -133,6 +172,7 @@ fn deleting_the_main_thread_answers_not_hidden_before_anything_else() {
                 run: RunId(11),
                 text: "again".into(),
                 screen: None,
+                local_default: false,
             }),
             state(RunId(11), MAIN, Phase::Thinking),
             Effect::ArmDeadline {

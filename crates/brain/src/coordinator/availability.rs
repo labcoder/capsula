@@ -142,6 +142,8 @@ impl PictureRoutes {
             ConnectionKind::ChatGpt => facts::of(ConnectionKind::ChatGpt).pictures,
             ConnectionKind::AnthropicKey => self.anthropic_key,
             ConnectionKind::ClaudeCode => self.claude_code,
+            // No switch overrides it: a local server never takes a picture.
+            ConnectionKind::LocalChat => facts::of(ConnectionKind::LocalChat).pictures,
         }
     }
 }

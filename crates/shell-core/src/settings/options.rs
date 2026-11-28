@@ -75,8 +75,9 @@ impl Settings {
     }
 }
 
-/// A key model's row always names the key, since each request is billed; another row names its
-/// connection only when another connection offers a model of the same name.
+/// A key model's row always names the key, since each request is billed, and a local one this
+/// computer, since no catalog lists it; another row names its connection only when another
+/// connection offers a model of the same name.
 fn label(
     connection: ConnectionKind,
     name: &str,
@@ -88,6 +89,7 @@ fn label(
         .any(|(other, model)| *other != connection && model.display_name.as_str() == name);
     let provider = match connection {
         ConnectionKind::AnthropicKey => Text::AnthropicTitle,
+        ConnectionKind::LocalChat => Text::LocalProvider,
         _ if !shared => return name.to_owned(),
         ConnectionKind::ChatGpt => Text::AccountProvider,
         ConnectionKind::ClaudeCode => Text::ClaudeProvider,

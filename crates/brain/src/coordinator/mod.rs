@@ -835,6 +835,9 @@ pub struct Coordinator {
     drawing_held: Vec<(ThreadId, DataToShell, Option<RunId>)>,
     /// Whether `draw` may mark the user's screen: [`crate::drawing::SCREEN_MARKS`].
     screen_marks: crate::drawing::ScreenMarks,
+    /// Whether the saved default names the local server, which no edit changes while no build
+    /// serves it; each turn carries it to the store.
+    pub(crate) local_default: bool,
     /// `[tuning.runs]`, set once at start.
     pub(crate) tuning: crate::config::tuning::RunTuning,
     /// Never deleted or renamed.
@@ -934,6 +937,7 @@ impl Coordinator {
             drawing_held: Vec::new(),
             drawing_reply: None,
             screen_marks: crate::drawing::SCREEN_MARKS,
+            local_default: false,
             tuning: crate::config::tuning::RunTuning::default(),
             main_thread,
             last_thread,
@@ -960,7 +964,9 @@ impl Coordinator {
                 ConnectionKind::ChatGpt => {
                     Availability::Unavailable(availability::sign_in_needed())
                 }
-                ConnectionKind::AnthropicKey | ConnectionKind::ClaudeCode => {
+                ConnectionKind::AnthropicKey
+                | ConnectionKind::ClaudeCode
+                | ConnectionKind::LocalChat => {
                     Availability::Unavailable(availability::model_unavailable())
                 }
             }),
@@ -1452,6 +1458,7 @@ impl Coordinator {
             run,
             text,
             screen: screen.as_ref().map(crate::context::Screen::held),
+            local_default: self.local_default,
         };
         if let Some(hold) = &mut hold {
             hold.defaults.origin = admission::origin(thread, self.main_thread);

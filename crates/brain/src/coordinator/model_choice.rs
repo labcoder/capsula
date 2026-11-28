@@ -79,6 +79,20 @@ impl Coordinator {
         choice: Option<ModelChoice>,
         effects: &mut Vec<Effect>,
     ) {
+        // No build serves a local server yet, so none is saved as a thread's route, and while a
+        // local default is saved no thread's route changes: one that inherits it stays local.
+        if self.local_default
+            || choice.as_ref().is_some_and(|choice| {
+                choice.connection == kumochi_protocol::message::ConnectionKind::LocalChat
+            })
+        {
+            effects.push(Effect::Control(ControlToShell::ThreadModelSet {
+                request,
+                thread,
+                result: ChoiceRead::Failed,
+            }));
+            return;
+        }
         effects.push(Effect::Store(StoreOp::SetModel {
             session: self.model_choices.session,
             request,

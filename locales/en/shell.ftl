@@ -497,6 +497,7 @@ error-claude-code-cleanup-pending = Disconnecting Claude Code isn't finished yet
 error-claude-code-unavailable = Claude Code is unavailable. Restart Kumochi before trying again.
 error-claude-code-busy = Claude Code is still finishing an earlier question. Try again in a moment.
 claude-provider = Claude Code
+local-provider = This computer
 claude-review = Connect…
 claude-connect = Connect Claude Code
 claude-disconnect = Disconnect Claude Code

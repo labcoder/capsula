@@ -1553,3 +1553,50 @@ fn a_config_that_cant_be_written_serves_onboarded_and_still_refuses_every_write(
     assert_eq!(std::fs::read_to_string(&path).expect("readable"), broken);
     assert!(blocked_file.is_dir());
 }
+/// Any saved default naming the local server counts as local intent, however malformed the rest;
+/// a cloud or absent default doesn't.
+#[test]
+fn local_intent_follows_the_saved_connection_alone() {
+    let scratch = Scratch::new("config-local-intent");
+    let dir = dir(&scratch);
+    for (text, local) in [
+        (
+            "[default_model]\nconnection = \"LocalChat\"\nmodel = \"\"\n",
+            true,
+        ),
+        ("[default_model]\nconnection = \"LocalChat\"\n", true),
+        (
+            "[default_model]\nconnection = \"ChatGpt\"\nmodel = \"m\"\n",
+            false,
+        ),
+        ("", false),
+    ] {
+        std::fs::write(dir.join(CONFIG_FILE), text).expect("written");
+        assert_eq!(
+            Config::load(Some(dir.clone()), ThreadId(1)).local_intent(),
+            local,
+            "{text:?}"
+        );
+    }
+}
+
+/// A local default saved by hand reads as local, so its run is refused on its own kind rather
+/// than read as no choice.
+#[test]
+fn a_local_default_model_reads_as_local() {
+    let scratch = Scratch::new("config-local-default");
+    let dir = dir(&scratch);
+    std::fs::write(
+        dir.join(CONFIG_FILE),
+        "[default_model]\nmodel = \"gpt-6-luna\"\neffort = \"Low\"\nconnection = \"LocalChat\"\n",
+    )
+    .expect("written");
+    assert_eq!(
+        Config::load(Some(dir), ThreadId(1)).default_choice(),
+        crate::store::choice::StoredChoice::Valid {
+            connection: kumochi_protocol::message::ConnectionKind::LocalChat,
+            model: ModelSlug::new("gpt-6-luna").expect("valid"),
+            effort: Some(Effort::Low),
+        }
+    );
+}
