@@ -66,7 +66,7 @@ impl Policy {
         let mut texts = Store::new();
         for allowed in allow.iter().chain(exceptions.values().flatten()) {
             // shortcut: no notice text for WITH expressions, add it when a shipped crate needs one.
-            if allowed.clone().into_req().addition.is_some() {
+            if allowed.as_ref().addition.is_some() {
                 continue;
             }
             let name = allowed.to_string();
