@@ -993,10 +993,10 @@ fn an_older_view_s_late_failure_leaves_the_newer_frozen_picture_in_place() {
 
 #[test]
 fn paint_and_paint_with_answering_now_draw_and_record_the_same() {
-    const SURVIVOR: SceneId = SceneId(10);
+    const SURVIVOR: SceneId = SceneId(25);
     let setup = |handoff: bool| {
         let (mut presenter, now, job) =
-            recovering(vec![(SURVIVOR, rect("survivor")), (LIVE, super::pair())]);
+            recovering(vec![(LIVE, super::pair()), (SURVIVOR, rect("survivor"))]);
         presenter
             .completed(job.run(&mut Shaper), now)
             .expect("recovery");
@@ -1008,40 +1008,78 @@ fn paint_and_paint_with_answering_now_draw_and_record_the_same() {
         }
         presenter
     };
-    let drawn = |presenter: &Presenter, with: bool| {
+    // One paint through either entry, failing the two-item pair when asked: whether a frame
+    // newly failed, each frame drawn, and what is observed afterwards.
+    let drawn = |presenter: &Presenter, with: bool, fail: bool| {
         let mut items = Vec::new();
+        let mut draw = |frame: &kumochi_scene::Frame| {
+            items.push(frame.items().to_vec());
+            if fail && frame.items().len() == 2 {
+                Err(())
+            } else {
+                Ok(())
+            }
+        };
         let frames = presenter.frames.borrow();
         let failed = if with {
-            frames.paint_with(|_, frame, _| {
-                items.push(frame.items().to_vec());
-                Ok::<_, ()>(Drawn::Now)
-            })
+            frames.paint_with(|_, frame, _| draw(frame).map(|()| Drawn::Now))
         } else {
-            frames.paint(|frame, _| {
-                items.push(frame.items().to_vec());
-                Ok::<_, ()>(())
-            })
+            frames.paint(|frame, _| draw(frame))
         };
-        assert!(!failed);
-        let painted: Vec<_> = frames
-            .observations()
+        (failed, items, frames.observations())
+    };
+    let counts = |items: &[Vec<FrameItem>]| items.iter().map(Vec::len).collect::<Vec<_>>();
+    let bounds = |observations: [Option<(SceneId, u64, u32)>; 4]| {
+        observations
             .into_iter()
             .flatten()
             .map(|(scene, _, bound)| (scene, bound))
-            .collect();
-        (items, frames.observations(), painted)
+            .collect::<Vec<_>>()
     };
-    for (handoff, painted) in [
-        (false, vec![(SURVIVOR, 1), (LIVE, 1)]),
-        (true, vec![(SURVIVOR, 1)]),
+    for (handoff, painted, cleared) in [
+        (false, vec![(LIVE, 1), (SURVIVOR, 1)], vec![LIVE]),
+        (true, vec![(SURVIVOR, 1)], vec![]),
     ] {
-        let by_paint = drawn(&setup(handoff), false);
+        let by_paint = drawn(&setup(handoff), false, false);
+        assert!(!by_paint.0);
         assert_eq!(
-            by_paint.0.iter().map(Vec::len).collect::<Vec<_>>(),
-            [1, 2],
-            "the survivor, then the live or frozen pair"
+            counts(&by_paint.1),
+            [2, 1],
+            "the live or frozen pair, then the survivor, in scene order"
         );
-        assert_eq!(by_paint.2, painted, "handoff {handoff}");
-        assert_eq!(drawn(&setup(handoff), true), by_paint, "handoff {handoff}");
+        assert_eq!(bounds(by_paint.2), painted, "handoff {handoff}");
+        assert_eq!(
+            drawn(&setup(handoff), true, false),
+            by_paint,
+            "handoff {handoff}"
+        );
+
+        let failing = |with: bool| {
+            let mut presenter = setup(handoff);
+            let first = drawn(&presenter, with, true);
+            let next = drawn(&presenter, with, false);
+            let failed: Vec<_> = presenter
+                .paint_failed()
+                .into_iter()
+                .filter_map(|effect| match effect {
+                    super::Effect::Control(
+                        kumochi_protocol::message::ControlToBrain::SceneFailed { scene },
+                    ) => Some(scene),
+                    _ => None,
+                })
+                .collect();
+            (first, next, failed)
+        };
+        let by_paint = failing(false);
+        assert!(by_paint.0.0, "the pair newly failed");
+        assert_eq!(counts(&by_paint.0.1), [2, 1]);
+        assert_eq!(
+            bounds(by_paint.0.2),
+            [(SURVIVOR, 1)],
+            "the survivor's record"
+        );
+        assert_eq!(counts(&by_paint.1.1), [1], "the failed pair paints no more");
+        assert_eq!(by_paint.2, cleared, "handoff {handoff}");
+        assert_eq!(failing(true), by_paint, "handoff {handoff}");
     }
 }
