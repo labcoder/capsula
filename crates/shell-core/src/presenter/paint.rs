@@ -539,8 +539,9 @@ impl Frames {
 }
 
 impl Presenter {
-    /// The frames the overlay paints. Borrow them only to paint or to hand back a later answer,
-    /// and release the borrow before `paint_failed`, `take_shown` or any other presenter call.
+    /// The frames the overlay paints. Borrow them only to paint, to show or hide them, or to
+    /// hand back a later answer, and release the borrow before `paint_failed`, `take_shown` or
+    /// any other presenter call.
     pub fn frames(&self) -> Rc<RefCell<Frames>> {
         Rc::clone(&self.frames)
     }
