@@ -145,11 +145,12 @@ names wgpu.
   field, through `Queue::write_buffer_with`, inside the same error scopes. The staged bytes are
   wgpu's own, outside the budget, and go to the GPU with the device's next submission. A write
   wgpu refuses answers `Refused` when a scope caught why and `Lost` otherwise. A failure gives
-  the slot back at once and the charge as above. A `Built` means its buffers were created and
-  their writes queued, not confirmed on the GPU: a device lost under a queued write reports
-  nothing then, answers `Lost` at the next call, and nothing of that `Built` is drawn.
-  Nothing on this path maps a buffer, so this crate's calls reach none of wgpu's panicking
-  entries.
+  the slot back at once and the charge as above. A `Built` is provisional: its buffers were
+  created and its writes handed to wgpu with no error and no loss seen, not confirmed on the
+  GPU. A device lost under a write reports nothing then; once the loss is latched every later
+  upload answers `Lost`, and nothing of that `Built` is drawn. Nothing on this path maps a
+  buffer, so this crate's own calls reach none of the wgpu entries that end in its fatal
+  handler; the known limit below is wgpu's own.
 - **Range tables.** An upload also copies the mesh's range tables into one of five reserved
   slots (`limits::UPLOADED`): one per picture of a frame and one more for a geometry uploading
   in place of a shown one. So the mesh can build the next geometry while this one stays, and

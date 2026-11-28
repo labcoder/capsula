@@ -305,11 +305,12 @@ impl fmt::Debug for Gpu {
     }
 }
 
-/// One geometry on the GPU, with the range tables that resolve its records. Its buffers were
-/// created and their writes queued, not confirmed on the GPU: wgpu reports nothing when a
-/// device is lost under a queued write, so such a loss answers `Lost` at the next call and
-/// nothing of this geometry is drawn. Hand it back with [`Gpu::release_built`]: one dropped
-/// instead keeps its charge and its table slot for the device's life.
+/// One geometry on the GPU, with the range tables that resolve its records. It is provisional:
+/// its buffers were created and its writes handed to wgpu with no error and no loss seen, not
+/// confirmed on the GPU. wgpu reports nothing when a device is lost under a write, so such a
+/// loss shows only once it is latched, when every later upload answers `Lost`, and nothing of
+/// this geometry is drawn. Hand it back with [`Gpu::release_built`]: one dropped instead keeps
+/// its charge and its table slot for the device's life.
 pub struct Built {
     device: u64,
     geometry: GeometryId,
