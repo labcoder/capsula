@@ -49,6 +49,8 @@ pub(crate) enum Owner {
     Presentation,
     /// A frame nothing revokes, such as the model catalog.
     Marker,
+    /// Holds every later frame until recovery no longer owes this scene.
+    Gate(SceneId),
 }
 
 pub(crate) struct DataQueue {
@@ -56,6 +58,7 @@ pub(crate) struct DataQueue {
     pages: Vec<Admitted>,
     token: u64,
     writing: Option<Owner>,
+    gated: bool,
     /// The memory the queued frames hold.
     bytes: usize,
     credit: usize,
@@ -98,6 +101,7 @@ impl DataQueue {
             pages: Vec::new(),
             token: 0,
             writing: None,
+            gated: false,
             bytes: 0,
             credit,
             window,
@@ -113,6 +117,67 @@ impl DataQueue {
     pub(crate) fn push(&mut self, owner: Owner, frame: Vec<u8>) {
         self.bytes += frame.len() + ENTRY;
         self.frames.push_back((owner, frame));
+    }
+
+    /// Holds a frame that depends on `scene`, and every later one, until recovery no longer owes it.
+    pub(super) fn gate(&mut self, scene: SceneId) {
+        if !self
+            .frames
+            .iter()
+            .any(|(owner, _)| *owner == Owner::Gate(scene))
+        {
+            self.gated = true;
+            self.push(Owner::Gate(scene), Vec::new());
+        }
+    }
+
+    /// A snapshot chunk goes ahead of the gate, so it precedes the live frames held behind it.
+    pub(super) fn push_ahead(&mut self, owner: Owner, frame: Vec<u8>) {
+        let at = self
+            .frames
+            .iter()
+            .position(|(held, _)| matches!(held, Owner::Gate(_)))
+            .unwrap_or(self.frames.len());
+        self.bytes += frame.len() + ENTRY;
+        self.frames.insert(at, (owner, frame));
+    }
+
+    /// Opens the gate of every scene recovery no longer owes.
+    pub(super) fn open(&mut self, owed: impl Fn(SceneId) -> bool) {
+        if self.gated {
+            self.retain(|owner| !matches!(owner, Owner::Gate(scene) if !owed(*scene)));
+            self.gated = self
+                .frames
+                .iter()
+                .any(|(owner, _)| matches!(owner, Owner::Gate(_)));
+        }
+    }
+
+    pub(super) fn gated(&self) -> bool {
+        self.gated
+    }
+
+    /// The scene the first shut gate waits for.
+    pub(super) fn first_gate(&self) -> Option<SceneId> {
+        if !self.gated {
+            return None;
+        }
+        self.frames.iter().find_map(|(owner, _)| match owner {
+            Owner::Gate(scene) => Some(*scene),
+            _ => None,
+        })
+    }
+
+    /// The memory queued ahead of the gate, which paces recovery.
+    pub(super) fn ahead(&self) -> usize {
+        if !self.gated {
+            return self.bytes;
+        }
+        self.frames
+            .iter()
+            .take_while(|(owner, _)| !matches!(owner, Owner::Gate(_)))
+            .map(|(_, frame)| frame.len() + ENTRY)
+            .sum()
     }
 
     pub(crate) fn push_review(&mut self, frame: Vec<u8>) -> Result<(), super::Full> {
@@ -363,7 +428,11 @@ impl DataQueue {
             let (_, frame) = self.frames.pop_front()?;
             self.bytes -= frame.len() + ENTRY;
         }
-        let len = self.frames.front()?.1.len();
+        let (owner, frame) = self.frames.front()?;
+        if matches!(owner, Owner::Gate(_)) {
+            return None;
+        }
+        let len = frame.len();
         self.waiting_since.get_or_insert(now);
         if len > self.credit {
             return None;
@@ -399,6 +468,29 @@ mod tests {
 
     const A: Owner = Owner::Run(RunId(1));
     const B: Owner = Owner::Run(RunId(2));
+
+    /// A retirement must precede its victim's promise, so when that promise is ahead of a gate
+    /// the new marker, and an earlier marker held behind the gate, both go ahead of it.
+    #[test]
+    fn a_retirement_ahead_of_a_gate_takes_the_held_markers_with_it() {
+        let now = Instant::now();
+        let mut queue = DataQueue::new(64);
+        queue.push(Owner::SpeechPromise(SceneId(1)), vec![1]);
+        queue.gate(SceneId(2));
+        queue.push(Owner::Presentation, vec![2]);
+        queue.push(A, vec![3]);
+        queue.retire_scenes(&[SceneId(1)], vec![4]);
+        assert_eq!(
+            queue.pop(now),
+            Some(vec![2]),
+            "the held marker keeps its order"
+        );
+        assert_eq!(queue.pop(now), Some(vec![4]));
+        assert_eq!(queue.pop(now), Some(vec![1]));
+        assert_eq!(queue.pop(now), None, "the gate still holds the run's frame");
+        queue.open(|_| false);
+        assert_eq!(queue.pop(now), Some(vec![3]));
+    }
 
     #[test]
     fn review_frames_include_entry_cost_and_never_exceed_the_data_cap() {

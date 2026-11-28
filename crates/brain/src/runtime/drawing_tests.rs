@@ -50,6 +50,16 @@ fn typed_brain_with_steps(
     fault: Option<&str>,
     extra: &[Arc<kumochi_scene::Step>],
 ) -> (Brain, kumochi_protocol::message::SceneId) {
+    let (brain, scenes) = typed_brain_with_scenes(scratch, fault, &[extra]);
+    (brain, scenes[0])
+}
+
+/// One stored scene per entry, oldest first, each with steps `a` and `b` and then its extra steps.
+fn typed_brain_with_scenes(
+    scratch: &Scratch,
+    fault: Option<&str>,
+    scenes: &[&[Arc<kumochi_scene::Step>]],
+) -> (Brain, Vec<kumochi_protocol::message::SceneId>) {
     let mut store = Store::open(&scratch.db()).expect("store");
     store.recover().expect("recover");
     let main = store.main_thread().expect("main");
@@ -58,47 +68,56 @@ fn typed_brain_with_steps(
     store
         .begin_turn(thread, Some("task"), run, "turn")
         .expect("turn");
-    let header = serde_json::from_value(serde_json::json!({"begin":{"v":1,"scene":"scene","surface":"overlay","alt":"diagram"},"layout_version":2})).expect("header");
-    let Reply::Step(scene) = store
-        .drawing_write(&Write::Step {
-            thread,
-            run,
-            clear: Vec::new(),
-            target: Target::New(header),
-            revision: 1,
-            layout_version: 2,
-            step: stored_step("a", "a"),
-            protected: false,
-        })
-        .expect("first step")
-    else {
-        panic!("step reply")
-    };
-    store
-        .drawing_write(&Write::Step {
-            thread,
-            run,
-            clear: Vec::new(),
-            target: Target::Existing(scene),
-            revision: 2,
-            layout_version: 2,
-            step: stored_step("b", "b"),
-            protected: false,
-        })
-        .expect("second step");
-    for (revision, step) in (3..).zip(extra) {
+    let mut ids = Vec::new();
+    for (at, extra) in scenes.iter().enumerate() {
+        let name = if at == 0 {
+            "scene".to_owned()
+        } else {
+            format!("scene{at}")
+        };
+        let header = serde_json::from_value(serde_json::json!({"begin":{"v":1,"scene":name,"surface":"overlay","alt":"diagram"},"layout_version":2})).expect("header");
+        let Reply::Step(scene) = store
+            .drawing_write(&Write::Step {
+                thread,
+                run,
+                clear: Vec::new(),
+                target: Target::New(header),
+                revision: 1,
+                layout_version: 2,
+                step: stored_step("a", "a"),
+                protected: false,
+            })
+            .expect("first step")
+        else {
+            panic!("step reply")
+        };
         store
             .drawing_write(&Write::Step {
                 thread,
                 run,
                 clear: Vec::new(),
                 target: Target::Existing(scene),
-                revision,
+                revision: 2,
                 layout_version: 2,
-                step: Arc::clone(step),
+                step: stored_step("b", "b"),
                 protected: false,
             })
-            .expect("extra recovery step");
+            .expect("second step");
+        for (revision, step) in (3..).zip(extra.iter()) {
+            store
+                .drawing_write(&Write::Step {
+                    thread,
+                    run,
+                    clear: Vec::new(),
+                    target: Target::Existing(scene),
+                    revision,
+                    layout_version: 2,
+                    step: Arc::clone(step),
+                    protected: false,
+                })
+                .expect("extra recovery step");
+        }
+        ids.push(scene);
     }
     store
         .end_run(thread, run, &[], RunEnd::Done)
@@ -124,7 +143,7 @@ fn typed_brain_with_steps(
             crate::runtime::IssueEpochs::default(),
         )
         .expect("brain"),
-        scene,
+        ids,
     )
 }
 
@@ -312,9 +331,7 @@ async fn delivered_final_recovery_chunk_starts_the_crash_guard_clock() {
     brain.close().await;
 }
 
-#[tokio::test]
-async fn delivered_membership_stays_armed_while_recovery_cannot_finish_queueing() {
-    let scratch = Scratch::new("typed-crash-queued-wiring");
+fn dense_steps() -> Vec<Arc<kumochi_scene::Step>> {
     let mut put = vec![serde_json::json!({"chart":{"id":"c","kind":"line","box":[0,0,100,100]}})];
     let mut patches = Vec::new();
     for series in 0..8 {
@@ -334,6 +351,243 @@ async fn delivered_membership_stays_armed_while_recovery_cannot_finish_queueing(
             .expect("dense recovery update"),
         ));
     }
+    extra
+}
+
+#[tokio::test]
+async fn a_live_frame_waits_behind_a_paced_recovery_larger_than_the_watermark() {
+    use super::super::{DATA_CAP, Registration, recovery::Recovery};
+    use crate::coordinator::Effect;
+    use kumochi_protocol::message::{
+        OutputGeneration, SegmentId, SegmentStart, SpeechPromise, StepRef,
+    };
+
+    let scratch = Scratch::new("gated-recovery");
+    let (mut brain, scene) = typed_brain_with_steps(&scratch, None, &dense_steps());
+    let (out, _controls) = mpsc::channel(64);
+    let queue = RefCell::new(DataQueue::new(window()));
+    let ready = Notify::new();
+    let mut tap = Tap::from_env();
+    let registration = std::cell::Cell::new(Registration::Awaiting);
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    link.registration = Some(&registration);
+    link.recovery = brain.describe(&mut link).expect("membership");
+    let run = RunId(5);
+    let step = StepRef { scene, index: 41 };
+    let output_generation = OutputGeneration(3);
+    let live = vec![
+        Effect::Data(DataToShell::SceneStepCommit {
+            run,
+            scene,
+            index: step.index,
+            step: (*stored_step("live", "live")).clone(),
+            speech: Some(SpeechPromise {
+                output_generation,
+                segment: SegmentId(0),
+            }),
+        }),
+        Effect::Data(DataToShell::SegmentQueued {
+            run,
+            segment: SegmentId(0),
+            step: Some(step),
+            start: SegmentStart::Speech,
+            output_generation,
+        }),
+    ];
+    brain.apply(live, Some(&mut link)).expect("live frames");
+    assert!(
+        queue.borrow().bytes() < DATA_CAP,
+        "the live frames pull no snapshot in with them"
+    );
+    while Brain::feeds(&link) {
+        brain.queue_recovery(&mut link).expect("chunk");
+    }
+    assert!(
+        link.recovery.as_ref().is_some_and(Recovery::pending),
+        "nothing written, so the watermark pauses recovery"
+    );
+    brain
+        .apply(vec![Effect::Revoke { run }], Some(&mut link))
+        .expect("stop while deferred");
+    let mut seen = Vec::new();
+    loop {
+        {
+            let mut queue = queue.borrow_mut();
+            queue.grant(u32::MAX);
+            while let Some(bytes) = queue.pop(std::time::Instant::now()) {
+                seen.push(
+                    frame::read::<DataToShell>(&mut bytes.as_slice(), Pipe::Data)
+                        .expect("data frame")
+                        .expect("whole data frame"),
+                );
+                queue.wrote();
+            }
+        }
+        if !Brain::feeds(&link) {
+            break;
+        }
+        while Brain::feeds(&link) {
+            brain.queue_recovery(&mut link).expect("chunk");
+        }
+    }
+    let order: Vec<_> = seen
+        .iter()
+        .filter_map(|message| match message {
+            DataToShell::SceneSnapshotV1 { chunk } if chunk.scene == scene => {
+                Some(("snapshot", chunk.ordinal, chunk.last))
+            }
+            DataToShell::SceneStepCommit { scene: owner, .. } if *owner == scene => {
+                Some(("commit", 0, false))
+            }
+            DataToShell::SegmentQueued { run: owner, .. } if *owner == run => {
+                Some(("announcement", 0, false))
+            }
+            _ => None,
+        })
+        .collect();
+    let chunks = order.len() - 1;
+    assert!(chunks > 1, "a multi-chunk snapshot");
+    let expected: Vec<_> = (0..chunks)
+        .map(|at| ("snapshot", u16::try_from(at).unwrap(), at + 1 == chunks))
+        .chain([("commit", 0, false)])
+        .collect();
+    assert_eq!(
+        order, expected,
+        "every chunk, then the promise; Stop dropped the deferred announcement"
+    );
+    assert_eq!(queue.borrow().bytes(), 0);
+    brain.close().await;
+}
+
+#[tokio::test]
+async fn a_stopped_run_s_run_end_follows_its_own_scene_s_snapshot_when_that_scene_recovers_first() {
+    Box::pin(stopped_run_beside_a_dense_scene(
+        "gate-own-first",
+        First::Own,
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn a_shut_gate_s_scene_is_fed_before_an_earlier_dense_scene_so_run_end_skips_its_tail() {
+    Box::pin(stopped_run_beside_a_dense_scene(
+        "gate-dense-first",
+        First::Dense,
+    ))
+    .await;
+}
+
+/// Which scene recovery describes first.
+#[derive(PartialEq)]
+enum First {
+    Own,
+    Dense,
+}
+
+/// A stopped run's frames wait for its own scene's snapshot, which the feed takes first while the
+/// gate is shut, then the dense scene's snapshot advances one chunk per pass; a frame for the
+/// dense scene waits behind its own gate.
+async fn stopped_run_beside_a_dense_scene(label: &str, first: First) {
+    use super::super::Registration;
+    use crate::coordinator::Effect;
+    use kumochi_protocol::message::{OutputGeneration, SegmentId, SpeechPromise};
+
+    let scratch = Scratch::new(label);
+    let dense = dense_steps();
+    let stored: [&[Arc<kumochi_scene::Step>]; 2] = if first == First::Dense {
+        [&dense, &[]]
+    } else {
+        [&[], &dense]
+    };
+    let (mut brain, scenes) = typed_brain_with_scenes(&scratch, None, &stored);
+    let (own, unrelated) = if first == First::Dense {
+        (scenes[1], scenes[0])
+    } else {
+        (scenes[0], scenes[1])
+    };
+    let (out, _controls) = mpsc::channel(64);
+    let queue = RefCell::new(DataQueue::new(window()));
+    let ready = Notify::new();
+    let mut tap = Tap::from_env();
+    let registration = std::cell::Cell::new(Registration::Awaiting);
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    link.registration = Some(&registration);
+    link.recovery = brain.describe(&mut link).expect("membership");
+    let (run, successor) = (RunId(5), RunId(6));
+    let commit = |run, scene, index, speech| {
+        Effect::Data(DataToShell::SceneStepCommit {
+            run,
+            scene,
+            index,
+            step: (*stored_step("live", "live")).clone(),
+            speech,
+        })
+    };
+    let promise = SpeechPromise {
+        output_generation: OutputGeneration(3),
+        segment: SegmentId(0),
+    };
+    let effects = vec![
+        commit(run, own, 2, Some(promise)),
+        Effect::Revoke { run },
+        Effect::Data(DataToShell::RunEnd { run }),
+        Effect::Data(DataToShell::AssistantText {
+            run: successor,
+            delta: "next".to_owned().into(),
+        }),
+        commit(successor, unrelated, 41, None),
+    ];
+    brain.apply(effects, Some(&mut link)).expect("live frames");
+    let mut seen = Vec::new();
+    while Brain::feeds(&link) {
+        brain.queue_recovery(&mut link).expect("chunk");
+        let mut queue = queue.borrow_mut();
+        queue.grant(u32::MAX);
+        while let Some(bytes) = queue.pop(std::time::Instant::now()) {
+            seen.push(
+                frame::read::<DataToShell>(&mut bytes.as_slice(), Pipe::Data)
+                    .expect("data frame")
+                    .expect("whole data frame"),
+            );
+            queue.wrote();
+        }
+    }
+    let order: Vec<_> = seen
+        .iter()
+        .filter_map(|message| match message {
+            DataToShell::SceneSnapshotV1 { chunk } if chunk.scene == own => Some("own snapshot"),
+            DataToShell::SceneSnapshotV1 { .. } => Some("unrelated snapshot"),
+            DataToShell::SceneStepCommit { scene, .. } if *scene == own => Some("own commit"),
+            DataToShell::SceneStepCommit { .. } => Some("unrelated commit"),
+            DataToShell::RunEnd { run: ended } if *ended == run => Some("run end"),
+            DataToShell::AssistantText { .. } => Some("successor"),
+            _ => None,
+        })
+        .collect();
+    let chunks = order
+        .iter()
+        .filter(|kind| **kind == "unrelated snapshot")
+        .count();
+    assert!(
+        chunks > 1,
+        "the unrelated snapshot advances over several passes"
+    );
+    let expected: Vec<_> = ["own snapshot", "own commit", "run end", "successor"]
+        .into_iter()
+        .chain(std::iter::repeat_n("unrelated snapshot", chunks))
+        .chain(["unrelated commit"])
+        .collect();
+    assert_eq!(
+        order, expected,
+        "RunEnd goes once its own scene's snapshot is out, ahead of the unrelated one"
+    );
+    brain.close().await;
+}
+
+#[tokio::test]
+async fn delivered_membership_stays_armed_while_recovery_cannot_finish_queueing() {
+    let scratch = Scratch::new("typed-crash-queued-wiring");
+    let extra = dense_steps();
     let (mut brain, scene) = typed_brain_with_steps(&scratch, None, &extra);
     let snapshot = brain
         .coordinator

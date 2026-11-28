@@ -1273,7 +1273,20 @@ scene that the shell cannot prepare is refused through `SceneFailed` and cleared
 not cut through a stale run's `StepFailed` observation.
 
 The data FIFO orders removal of an evicted scene before the next scene's header and first
-step. Live scene headers, steps, snapshot chunks, cut acknowledgements and call-end frames are
+step. Recovery queues one snapshot chunk per loop turn while the bytes queued ahead of it stay
+under the data watermark. A live frame or speech announcement for a scene whose chunks are still
+owed shuts a gate for that scene in the FIFO: it and every later frame wait behind the gate, and
+the remaining chunks go in ahead of the first gate. While a gate is shut, recovery feeds the
+first shut gate's scene before any other, each scene keeping its chunk order, and a scene's
+gate opens once its own last chunk is queued. A later held frame for another owed scene gets
+its own gate in place. So a recovered scene's snapshot always precedes its live frames and
+promises, and a held frame waits for the frames already queued ahead of it, the snapshots their
+gates name and its own scene's snapshot, not for the rest of recovery. The one exception to
+waiting is a retirement: its marker must precede the victim's retained promise, so when that
+promise is ahead of a gate the marker, and the earlier removal or replacement markers held
+behind it, go ahead of the gate. Held frames count toward the watermark that pauses the engine
+and new turns, and Stop, scene revocation and retirement treat them like any other queued
+frame. Live scene headers, steps, snapshot chunks, cut acknowledgements and call-end frames are
 scene-owned, not run-owned: Stop never revokes them. A durable step whose store acknowledgement
 arrives after Stop still travels before the cut acknowledgement. `ScenesRemoved` remains the
 non-revocable FIFO removal marker, so clearing the scene cannot discard the removal itself.
