@@ -4320,8 +4320,11 @@ name = "kumochi-shell-nsh"
 version = "0.1.2"
 dependencies = [
  "kumochi-protocol",
+ "kumochi-shell-core",
  "nsh-core",
  "nsh-platform-windows",
+ "thiserror 2.0.21",
+ "tracing",
 ]
 
 [[package]]
