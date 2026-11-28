@@ -78,18 +78,9 @@ fn a_local_task_sends_its_own_turns_and_answers_alone() {
     assert_eq!(built.request.tools, Vec::new());
     assert_eq!(built.request.choice, Some(local()));
     assert_eq!(built.sources, vec![task]);
-    let (other, other_run) = world.run(None, "cloud ask", None);
     let cloud = world
-        .build(
-            &RunSnapshot {
-                origin: Origin::Task(other),
-                ..run
-            },
-            (other, other_run),
-            Supplied::default(),
-            BOUND,
-        )
-        .expect("a cloud task's build");
+        .build(&run, (task, current), Supplied::default(), BOUND)
+        .expect("the cloud build");
     assert_eq!(built.request.instructions, cloud.request.instructions);
 }
 
@@ -245,40 +236,6 @@ fn a_local_task_builds_only_for_the_server_it_is_bound_to() {
         built(&world, &at(7), (task, current), BOUND),
         Err(BuildError::Unbound)
     ));
-}
-
-/// A round whose snapshot still says cloud never builds a local task's conversation, bound or not,
-/// while the same snapshot builds for a cloud task.
-#[test]
-fn a_stale_cloud_snapshot_never_builds_a_local_task() {
-    let mut world = world("ctx-local-stale");
-    let (task, _) = world.run(None, "secret of the local task", Some("secret answer"));
-    let (_, current) = world.run(Some(task), "second ask", None);
-    let (cloud, cloud_run) = world.run(None, "cloud ask", None);
-    assert!(
-        world
-            .build(
-                &snapshot(Origin::Task(cloud), None),
-                (cloud, cloud_run),
-                Supplied::default(),
-                BOUND
-            )
-            .is_ok()
-    );
-    on_local(&mut world, task);
-    for tag in [Some(&ConnectionTag(7).0.to_be_bytes()[..]), None] {
-        bind(&world, task, tag);
-        let refused = world.build(
-            &snapshot(Origin::Task(task), None),
-            (task, current),
-            Supplied::default(),
-            BOUND,
-        );
-        assert!(
-            matches!(refused, Err(BuildError::Origin)),
-            "{tag:?}: {refused:?}"
-        );
-    }
 }
 
 /// A Kumo run's history result never quotes a local task, by an old reference or any other, while

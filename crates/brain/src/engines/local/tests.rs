@@ -301,11 +301,11 @@ async fn a_consumer_that_never_takes_gets_nothing_late() {
     assert_eq!(events.recv().await, None);
 }
 
-/// A read whose wait for room was cut, by its own cutoff or the round's deadline, already had
-/// its wait: only the failure follows.
+/// A read whose wait for room was cut, by its own cutoff, the round's deadline or its server's
+/// retirement, already had its wait: only the failure follows.
 #[tokio::test]
 async fn text_cut_by_its_own_wait_is_never_offered_again() {
-    for failure in [Failure::Backpressure, Failure::Deadline] {
+    for failure in [Failure::Backpressure, Failure::Deadline, Failure::Retired] {
         let (events_tx, mut events) = mpsc::channel(2);
         let cut = Finish::Failed(EngineFailure::Local(failure));
         timeout(BOUND, deliver(&events_tx, "cut".to_owned(), cut, QUIET))
@@ -500,71 +500,6 @@ async fn a_grant_arriving_after_retirement_never_connects() {
     assert!(
         timeout(QUIET, listener.accept()).await.is_err(),
         "no connection"
-    );
-}
-
-/// Text still waiting for room when its server is replaced is dropped: the round ends retired
-/// right after the text the channel already held.
-#[tokio::test]
-async fn text_waiting_for_room_when_its_server_is_retired_is_dropped() {
-    let (listener, endpoint) = listener().await;
-    let (full_tx, full) = tokio::sync::oneshot::channel::<()>();
-    let (wrote_tx, wrote) = tokio::sync::oneshot::channel();
-    let server = tokio::spawn(async move {
-        let delta = |text: &str| {
-            format!(
-                "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{text}\"}},\"finish_reason\":null}}]}}\n\n"
-            )
-        };
-        let (mut socket, _) = listener.accept().await.expect("accept");
-        read_request(&mut socket).await;
-        let head = format!("{EVENTS}{}", delta("Hi"));
-        socket.write_all(head.as_bytes()).await.expect("write");
-        full.await.expect("the channel filled");
-        socket
-            .write_all(delta("late").as_bytes())
-            .await
-            .expect("write");
-        wrote_tx.send(()).ok();
-        let mut rest = [0; 64];
-        socket.read(&mut rest).await.unwrap_or(0)
-    });
-    let fence = Fence::default();
-    let request = request(vec![message(Role::User, "Hi")]);
-    let gate = granting(&request);
-    let (events_tx, mut events) = mpsc::channel(1);
-    let probe = events_tx.clone();
-    let round = tokio::spawn(fenced(endpoint, &fence).start(request, events_tx, gate));
-    timeout(BOUND, async {
-        while probe.capacity() > 0 {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .expect("the first text filled the channel");
-    drop(probe);
-    full_tx.send(()).expect("the server waits");
-    timeout(BOUND, wrote).await.expect("wrote").expect("server");
-    tokio::time::sleep(QUIET).await;
-    fence.revoke();
-    let mut seen = Vec::new();
-    while let Some(event) = timeout(BOUND, events.recv()).await.expect("an event") {
-        seen.push(event);
-    }
-    assert_eq!(
-        seen,
-        [
-            TurnEvent::TextDelta("Hi".to_owned()),
-            failed(Failure::Retired)
-        ]
-    );
-    timeout(BOUND, round).await.expect("ended").expect("round");
-    assert_eq!(
-        timeout(BOUND, server)
-            .await
-            .expect("closed")
-            .expect("server"),
-        0
     );
 }
 

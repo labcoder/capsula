@@ -244,3 +244,35 @@ fn a_local_task_is_never_compacted_under_a_cloud_snapshot() {
             .is_err_and(|failed| failed == Unbuilt::Failed)
     );
 }
+
+/// A later round whose snapshot still says cloud builds nothing of a task stored as local, while
+/// the same round builds for a task stored on that cloud route.
+#[test]
+fn a_local_task_is_never_built_under_a_stale_cloud_snapshot() {
+    for (stored, builds) in [
+        (ConnectionKind::AnthropicKey, true),
+        (ConnectionKind::LocalChat, false),
+    ] {
+        let scratch = Scratch::new("page-local-stale-cloud");
+        let store = task_on(&scratch, stored);
+        let side = store.side();
+        let later = BuildContext {
+            first: false,
+            snapshot: Some(RunSnapshot {
+                choice: Some(on(ConnectionKind::AnthropicKey)),
+                ..snapshot()
+            }),
+            ..build(control(), ConnectionKind::AnthropicKey)
+        };
+        let built = super::context::read(Some(&side), later, ContextTuning::default(), || ());
+        assert_eq!(
+            built.result.is_ok(),
+            builds,
+            "{stored:?}: {:?}",
+            built.result.err()
+        );
+        if !builds {
+            assert!(matches!(built.result, Err(Unbuilt::Failed)));
+        }
+    }
+}

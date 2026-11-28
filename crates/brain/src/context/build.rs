@@ -66,8 +66,7 @@ fn assemble(
         Origin::Kumo => thread.kind == ThreadKind::Main,
         Origin::Task(task) => task == turn.thread && thread.kind == ThreadKind::Thread,
     };
-    // A task whose saved route is local never leaves the machine, whatever its snapshot says.
-    if !owns || thread.local {
+    if !owns {
         return Err(BuildError::Origin);
     }
     let summary = supplied.summary;

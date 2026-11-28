@@ -192,6 +192,10 @@ pub(super) fn read(
                             })
                             .map_err(StoreError::from);
                     }
+                    // A task saved local never reaches a cloud read, whatever its snapshot says.
+                    if read.source(thread)?.is_some_and(|source| source.local) {
+                        return Ok(Err(BuildError::Origin));
+                    }
                     let answers_chatgpt = snapshot
                         .choice
                         .as_ref()
