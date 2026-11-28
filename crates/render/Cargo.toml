@@ -14,6 +14,10 @@ kumochi-shell-core.workspace = true
 # Main's painter tessellates with lyon at this pin; only the stage side's mesh build calls it.
 lyon = "=1.0.19"
 thiserror.workspace = true
+wgpu = { version = "=29.0.4", default-features = false, features = ["std", "parking_lot", "wgsl"] }
+
+[target.'cfg(windows)'.dependencies]
+wgpu = { version = "=29.0.4", default-features = false, features = ["dx12"] }
 
 [[bench]]
 name = "render-workloads"
