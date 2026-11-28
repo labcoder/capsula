@@ -9,7 +9,7 @@ mod platform;
     not(test),
     expect(
         dead_code,
-        reason = "nothing reads a Tone, a Size, Dusk, Day or a spring until the first surface lands"
+        reason = "nothing reads a Tone, a Size, Dusk or Day until the first surface lands"
     )
 )]
 mod ui;

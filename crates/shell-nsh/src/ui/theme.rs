@@ -3,8 +3,7 @@
 //! code reads them as fields of `nsh_base::theme()`.
 
 use nsh_base::{Theme, ThemeError};
-use nsh_core::element::{AdaptiveColor, Tokens};
-use nsh_core::geometry::{Points, px};
+use nsh_core::element::Tokens;
 use nsh_core::platform::Appearance;
 
 /// The theme file, in shadcn's `cssVars` form: Dusk is its `dark` set and Day its `light` set.
@@ -12,7 +11,7 @@ const THEME: &str = include_str!("../../theme.json");
 
 /// The theme file's tokens over `NativeShell`'s defaults; an error when the file isn't JSON.
 pub(crate) fn tokens() -> Result<Tokens, ThemeError> {
-    // What it leaves out is empty: the file is compiled in and a test reads it whole.
+    // What it reports leaving out is empty: the file is compiled in and a test checks that.
     Theme::from_json_lenient(THEME).map(|(theme, _left_out)| theme.into_tokens())
 }
 
@@ -120,32 +119,6 @@ token_names! {
     }
 }
 
-impl Tone {
-    /// Its colour in the current theme. One the theme lacks is lime, which no colour of Kumochi's
-    /// is, so review sees it instead of a panic.
-    #[expect(
-        dead_code,
-        reason = "nothing reads a token until the first surface lands"
-    )]
-    pub(crate) fn color(self) -> AdaptiveColor {
-        nsh_base::theme()
-            .color(self.token())
-            .unwrap_or(AdaptiveColor::rgb(0x00_ff00, 0x00_ff00))
-    }
-}
-
-impl Size {
-    /// Its length in the current theme. One the theme lacks is 0, which collapses what it sizes,
-    /// so review sees it instead of a panic.
-    #[expect(
-        dead_code,
-        reason = "nothing reads a token until the first surface lands"
-    )]
-    pub(crate) fn points(self) -> Points {
-        px(nsh_base::theme().number(self.token()).unwrap_or(0.0))
-    }
-}
-
 /// The look a person picks.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Look {
@@ -173,7 +146,7 @@ impl Look {
 mod tests {
     use std::collections::BTreeSet;
 
-    use nsh_core::element::{FONT_MONO, FONT_SANS};
+    use nsh_core::element::{AdaptiveColor, FONT_MONO, FONT_SANS};
     use nsh_core::{Color, JsonValue};
 
     use super::*;
@@ -183,21 +156,29 @@ mod tests {
         (Color::from(color.light).0, Color::from(color.dark).0)
     }
 
-    /// The names in section `section` of the theme file, as written.
+    /// The names in section `section` of the theme file, as written, each with text for a value:
+    /// the reader takes a null as unset without saying so, and Day's value then shows in Dusk.
     fn names(section: &str) -> BTreeSet<String> {
         let file: JsonValue = THEME.parse().expect("the theme file is JSON");
-        file["cssVars"][section]
+        let fields = file["cssVars"][section]
             .as_object()
-            .expect("each section is an object")
-            .keys()
-            .cloned()
-            .collect()
+            .expect("each section is an object");
+        let unwritten: Vec<&String> = fields
+            .iter()
+            .filter(|(_, value)| !value.is_string())
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(unwritten, Vec::<&String>::new(), "{section}: not text");
+        fields.keys().cloned().collect()
     }
 
     #[test]
     fn the_theme_file_reads_with_nothing_left_out() {
         let (_, left_out) = Theme::from_json_lenient(THEME).expect("the theme file is JSON");
         assert_eq!(left_out, Vec::<String>::new());
+        for section in ["theme", "dark", "light"] {
+            assert!(!names(section).is_empty(), "{section} is empty");
+        }
     }
 
     #[test]

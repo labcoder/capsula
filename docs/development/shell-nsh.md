@@ -105,18 +105,20 @@ Code names a token and never writes a raw colour, length or timing:
 
 - NativeShell's own tokens (`background`, `foreground`, `card`, `primary`, `border`, `radius`
   and the rest of shadcn's names) are fields of `nsh_base::theme()`, with no wrapper.
-- The colours the theme adds are `ui::theme::Tone`, read with `Tone::color`, and its lengths
-  are `ui::theme::Size`, read in points with `Size::points`. A token the theme lacks reads as
-  lime or 0 points, so it shows in review instead of panicking.
+- The colours the theme adds are named by `ui::theme::Tone` and its lengths, in points, by
+  `ui::theme::Size`; each has its name in the file as `token()`. The first surface adds their
+  readers, and decides what a token the theme lacks reads as.
 - The look a person picks is `ui::theme::Look`: Match system, Dusk or Day.
-- The springs are `ui::motion`'s `OPEN`, `EXPAND`, `WINDOW` and `KUMO`, each a response (how
-  long one swing would take undamped) and a damping ratio, as NativeShell's
-  `Spring::new(response).damping_ratio(ratio)` makes them.
+- The springs are `ui::motion`'s `open`, `expand`, `window` and `kumo`, each a response (how
+  long one swing would take undamped) and a damping ratio, made by NativeShell's
+  `Spring::new(response).damping_ratio(ratio)`.
 
 A token is named for its role, never its look or the component that first used it
 (`attention`, not `peach`). Dusk and Day define the same names. A new need adds its token to the
-file and to `Tone` or `Size` first, then uses it. Tests fail when the file leaves anything
-unread, when the file and the code don't list the same names, or when Dusk and Day differ.
+file and to `Tone` or `Size` first, then uses it. Tests fail when NativeShell's reader reports
+leaving something out, when a value in the file isn't text, when the file and the code don't
+list the same names, or when Dusk and Day don't define the same names. They check a sample of
+values against the design, not every one.
 
 Not here yet: the type weights, Kumo's frame caps and the message width, any component or
 backdrop, keeping the person's look, and loading a custom theme. Nothing reads `Tone`, `Size`,
