@@ -69,14 +69,14 @@ back to uncontained workers.
 
 ## The NativeShell shell's exit codes
 
-`kumochi-nsh` ([shell-nsh.md](shell-nsh.md)) isn't started by the brain or relaunched by it yet.
+`kumochi-nsh` ([shell-nsh.md](shell-nsh.md)) starts or is relaunched by a brain only when it is staged beside one as its shell.
 
 | Exit | When |
 |---|---|
-| 0 | NativeShell's message loop ended with 0, which its deadline's quit causes and so does its last window closing; or another shell holds this session's lock |
+| 0 | NativeShell's message loop ended with 0, which its one quit causes (a close press, a quit request, the deadline, or a link that failed, ended or never started) and so does its last window closing; or another shell holds this session's lock |
 | 1 | The lock's admission, the log, the flags or the lock failed; NativeShell's message loop ended with a nonzero result (its quit message's `wParam`), its main window couldn't be created (after its message box is dismissed), its UI thread couldn't start, or its UI thread started and ended without reporting a result (a panic in a build that unwinds; a release build aborts instead); or the deadline backstop couldn't start |
 | 69 | A release-identity build, before anything else, or any system other than Windows, before the lock or the log |
-| 124 | The deadline backstop ended it, once its 15 s budget past `--quit-after-ms` ran out |
+| 124 | The backstop ended it: 15 s past `--quit-after-ms`; with no flag, 30 s after start, or after the pump applied `Reconnecting`, with no open connection applied since; or 15 s after a quit was asked, or the flag's limit if that's sooner |
 
 ## Containment tiers
 

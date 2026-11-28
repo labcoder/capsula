@@ -4335,7 +4335,9 @@ dependencies = [
 name = "kumochi-shell-nsh"
 version = "0.1.2"
 dependencies = [
+ "async-channel",
  "kumochi-protocol",
+ "kumochi-scene",
  "kumochi-shell-core",
  "nsh-core",
  "nsh-platform-windows",

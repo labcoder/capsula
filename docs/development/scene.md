@@ -2209,7 +2209,8 @@ that still names a locally cleared scene causes its idempotent clear to be sent 
 
 A shell with no drawing surface still receives scene traffic, because an empty text profile
 doesn't stop the brain drawing. `presenter::Refuser` is the contract such a shell follows in
-place of a `Presenter`; nothing calls it yet. The caller passes every delivered `Data` and
+place of a `Presenter`; `kumochi-nsh` follows it
+([shell-nsh.md](shell-nsh.md#the-link-and-the-pump)). The caller passes every delivered `Data` and
 `SceneData` frame once. The link's `scene_naming` names exactly the kinds the data reader
 tags as `SceneData`, and the caller uses `Naming::Other` when it returns `None`:
 
