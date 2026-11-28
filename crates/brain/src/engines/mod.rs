@@ -21,6 +21,11 @@ pub(crate) mod anthropic;
 pub(crate) mod claude_code;
 #[cfg(any(test, debug_assertions, feature = "gate-fixture"))]
 pub(crate) mod fixture;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "local chat is off (LOCAL_CHAT)")
+)]
+pub(crate) mod local;
 pub(crate) mod responses;
 
 use std::fmt;
@@ -468,6 +473,8 @@ pub enum EngineFailure {
     Stream(crate::connections::model::error::Failure),
     /// The Anthropic stream failed, was refused, or broke its rules.
     Anthropic(crate::connections::anthropic::error::Failure),
+    /// The local round failed, was refused, or broke its rules.
+    Local(crate::connections::local::Failure),
     /// The account gave no bearer for the run's connection; nothing was sent. It carries the
     /// account's own reason when it gave one.
     Access(Option<UserError>),

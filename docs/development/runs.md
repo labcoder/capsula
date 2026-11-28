@@ -516,7 +516,7 @@ These classifications have no typed reader yet, so they stay here rather than in
 | `ChatGPT` | account sign-in and recovery | native Responses | switched on in its row; per model by its catalog | Kumochi's OAuth sign-in | fixed OpenAI HTTPS routes |
 | Anthropic key | the checked key and its catalog | native Messages | switched on in its row | the key in Credential Manager | fixed Anthropic HTTPS routes |
 | Claude Code | discovery, sign-in and policy | launch-scoped MCP | switched off in its row | Claude Code's own sign-in in Kumochi's folder | the contained child, bound to its provider |
-| Local server | nothing yet: always unavailable, and its engine is a refusal | none | off in its row, with no switch to turn it on | none | none yet; the [loopback transport](engines.md#the-local-chat-completions-transport) is unused |
+| Local server | nothing yet: always unavailable, and its dispatched engine is a refusal | none | off in its row, with no switch to turn it on | none | none yet; the [local engine](engines.md#the-local-engine) is built only in tests |
 
 The tools column is a ceiling, never an offer: each request's offer is built and admitted as in
 [the tool loop](#the-tool-loop). A picture switch never makes a model take pictures or skips its

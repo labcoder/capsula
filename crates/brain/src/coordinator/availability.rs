@@ -645,7 +645,14 @@ impl Coordinator {
     /// bearer, the account's own reason, else why the run's connection can't send. The fixture's provider failure and an engine's interruption say nothing.
     pub(super) fn engine_reason(&self, route: Option<Route>, finish: Finish) -> Option<UserError> {
         match finish {
+            // A local round's pump ends it unfinished when its outcome couldn't be told in time.
+            Finish::Truncated
+                if route.is_some_and(|route| route.kind == ConnectionKind::LocalChat) =>
+            {
+                Some(crate::connections::local::Failure::Truncated.user_error())
+            }
             Finish::Truncated => Some(Stream::Truncated.user_error()),
+            Finish::Failed(EngineFailure::Local(failure)) => Some(failure.user_error()),
             Finish::Failed(EngineFailure::Stream(failure)) => Some(failure.user_error()),
             Finish::Failed(EngineFailure::Anthropic(failure)) => Some(failure.user_error()),
             Finish::Failed(EngineFailure::Access(Some(error)) | EngineFailure::Claude(error)) => {

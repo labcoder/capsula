@@ -15,6 +15,7 @@ mod tests;
 use std::ops::ControlFlow;
 use std::time::Duration;
 
+use kumochi_protocol::message::{ErrorKey, UserError};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::time::{Instant, sleep_until, timeout, timeout_at};
@@ -85,6 +86,30 @@ pub enum Failure {
     /// The round passed [`ROUND_DEADLINE`].
     #[error("the local round ran past its deadline")]
     Deadline,
+}
+
+impl Failure {
+    /// What the user is told. No local failure offers a sign-in, a cloud recovery or a Retry,
+    /// which would resend under whatever route the thread has by then.
+    #[must_use]
+    pub fn user_error(self) -> UserError {
+        match self {
+            Self::Dormant => ErrorKey::LocalOff,
+            Self::Request => ErrorKey::RequestRefused,
+            Self::Spent => ErrorKey::LiveBudgetSpent,
+            Self::AuthRequired | Self::Refused { .. } | Self::Provider => ErrorKey::LocalRefused,
+            Self::Incomplete => ErrorKey::LocalIncomplete,
+            Self::Protocol => ErrorKey::LocalUnreadable,
+            Self::Endpoint
+            | Self::Rebuild
+            | Self::Transport
+            | Self::Withheld
+            | Self::Truncated
+            | Self::Backpressure
+            | Self::Deadline => ErrorKey::LocalUnfinished,
+        }
+        .into()
+    }
 }
 
 impl From<error::Failure> for Failure {
