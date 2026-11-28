@@ -186,7 +186,11 @@ pub(super) fn read(
                         snapshot.connection = arrived.replay(snapshot.choice.as_ref());
                     }
                     if is_local(&snapshot) {
-                        return Ok(build_local(read, &snapshot, thread, key.run, BOUND));
+                        return scope
+                            .query(conn, || {
+                                Ok(build_local(read, &snapshot, thread, key.run, BOUND))
+                            })
+                            .map_err(StoreError::from);
                     }
                     let answers_chatgpt = snapshot
                         .choice

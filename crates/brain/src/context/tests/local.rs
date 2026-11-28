@@ -71,12 +71,14 @@ fn a_local_task_sends_its_own_turns_and_answers_alone() {
     assert_eq!(built.request.instructions, cloud.request.instructions);
 }
 
-/// Text with stored metadata, however malformed, may carry more than the task's own words.
+/// Text with stored metadata, however malformed or empty, may carry more than the task's own
+/// words.
 #[test]
 fn a_local_task_holding_more_than_plain_text_builds_nothing() {
     for (row, body) in [
         ("narration", r#"{"draw_call":"call_1"}"#),
         ("malformed", "not json"),
+        ("empty", ""),
     ] {
         let mut world = world("ctx-local-content");
         let (task, _) = world.run(None, "ask", None);
@@ -166,4 +168,30 @@ fn older_runs_go_first_and_an_oversized_turn_has_no_room() {
         built(&world, &run, (task, current), alone - 1),
         Err(BuildError::TooLarge { room: None })
     ));
+}
+
+/// A run too big for the room ends the history there: no older run fills in behind it.
+#[test]
+fn no_older_run_is_kept_past_one_that_did_not_fit() {
+    let mut world = world("ctx-local-gap");
+    let (task, _) = world.run(None, "oldest", Some("oldest answer"));
+    on_local(&mut world, task);
+    world.run(Some(task), &"x".repeat(4096), None);
+    let (_, current) = world.run(Some(task), "current", None);
+    let run = local_snapshot(task);
+    let whole = crate::context::bound::request_bytes(
+        &built(&world, &run, (task, current), BOUND)
+            .expect("built")
+            .request,
+    );
+    // One byte short of the newer two runs, with room left that the oldest alone would fit.
+    let oldest = [
+        message(Role::User, "oldest"),
+        message(Role::Assistant, "oldest answer"),
+    ]
+    .iter()
+    .map(crate::context::bound::item_bytes)
+    .sum::<usize>();
+    let short = built(&world, &run, (task, current), whole - oldest - 1).expect("built");
+    assert_eq!(short.request.input, vec![message(Role::User, "current")]);
 }

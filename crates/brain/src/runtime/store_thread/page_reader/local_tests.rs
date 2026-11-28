@@ -127,6 +127,23 @@ fn a_local_tasks_build_is_its_own_text_alone() {
     assert_eq!(built.sources, vec![TASK]);
 }
 
+/// A cancel that lands once the read began still ends a local task's build.
+#[test]
+fn a_local_build_cancelled_mid_read_builds_nothing() {
+    let scratch = Scratch::new("page-local-cancel");
+    let store = task_on(&scratch, ConnectionKind::LocalChat);
+    let side = store.side();
+    let control = control();
+    let cancel = control.clone();
+    let built = super::context::read(
+        Some(&side),
+        build(control, ConnectionKind::LocalChat),
+        ContextTuning::default(),
+        move || cancel.cancel(),
+    );
+    assert!(matches!(built.result, Err(Unbuilt::Failed)));
+}
+
 /// The same task on a cloud route gets the usual build: its local time and its tools.
 #[test]
 fn the_same_task_on_a_cloud_route_builds_as_usual() {

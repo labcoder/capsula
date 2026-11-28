@@ -735,8 +735,10 @@ flowchart LR
 ```
 
 **What it sends.** Right after a build resolves the run's choice, a local one takes
-`context::local::build_local` instead of the usual build, before the local time, picture, summary
-or drawing reads. It accepts only a live task (`Origin::Task` of that thread) whose own saved
+`context::local::build_local` instead of the usual build, so it reads no local time, picture or
+summary; the drawing digests and key results admission gathered for the job are dropped unsent,
+and activation stops gathering them for a local route. The read runs under the reader's scope,
+so a cancel or its deadline ends it. It accepts only a live task (`Origin::Task` of that thread) whose own saved
 route is `local_chat` (`Unbound` otherwise; one that only inherits a local default isn't
 bound). It reads the task's stored `user` and `assistant_text` events, and any of them with
 stored metadata, a call, a result or a native item fails the build as `LocalContent`. The

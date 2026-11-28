@@ -234,7 +234,7 @@ impl Snapshot<'_> {
 
     /// A local task's newest runs within about `budget` bytes, oldest first, or `None` when any
     /// of them holds more than plain text: a call, a result, a native item, or text with stored
-    /// metadata, however malformed.
+    /// metadata, however malformed or empty.
     ///
     /// # Errors
     /// Fails when SQLite fails.
@@ -245,7 +245,7 @@ impl Snapshot<'_> {
     ) -> Result<Option<Vec<Item>>, StoreError> {
         let thread = sql_id(thread.0, StoreError::NoThread)?;
         let mut statement = self.0.prepare(
-            "SELECT id, run, kind, coalesce(text, ''), coalesce(body, '') FROM events
+            "SELECT id, run, kind, coalesce(text, ''), body IS NULL FROM events
              WHERE thread = ?1 AND run IS NOT NULL
              AND kind IN ('user', 'assistant_text', 'output_item', 'tool_result')
              ORDER BY id DESC",
@@ -260,11 +260,11 @@ impl Snapshot<'_> {
             }
             let kind: String = row.get(2)?;
             let text: String = row.get(3)?;
-            let stored: String = row.get(4)?;
+            let plain: bool = row.get(4)?;
             bytes = bytes.saturating_add(text.len());
             let body = match kind.as_str() {
-                "user" if stored.is_empty() => Body::User(text),
-                "assistant_text" if stored.is_empty() => Body::Assistant(text),
+                "user" if plain => Body::User(text),
+                "assistant_text" if plain => Body::Assistant(text),
                 _ => return Ok(None),
             };
             items.push(Item {
