@@ -278,9 +278,9 @@ impl<R> Exclusion<R> {
         }
     }
 
-    /// A snapshot's answer at `now`, which counts only before the acquire's bound; `now` applies
-    /// the bound first, whether or not this answer counts. A failure, or no surface in a slot
-    /// opened under the lease, revokes it.
+    /// A snapshot's answer at `now`. While the acquire is still out it counts only before the
+    /// acquire's bound; `now` applies the bound first, whether or not this answer counts. A
+    /// failure, or no surface in a slot opened under the lease, revokes it.
     pub fn snapshot(&mut self, id: AskId, read: Result<Option<R>, Error>, now: Instant) {
         self.overdue(now);
         self.snapshot_in(id, read);
@@ -304,8 +304,9 @@ impl<R> Exclusion<R> {
         self.settle();
     }
 
-    /// An exclude's answer at `now`, which counts only before the acquire's bound; `now` applies
-    /// the bound first, whether or not this answer counts. A failure revokes the lease.
+    /// An exclude's answer at `now`. While the acquire is still out it counts only before the
+    /// acquire's bound; `now` applies the bound first, whether or not this answer counts. A
+    /// failure revokes the lease.
     pub fn excluded(&mut self, id: AskId, done: Result<(), Error>, now: Instant) {
         self.overdue(now);
         self.excluded_in(id, done);
