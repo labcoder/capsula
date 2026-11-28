@@ -12,7 +12,8 @@ use std::fmt;
 use std::time::Duration;
 
 use kumochi_protocol::message::{
-    ControlToShell, DataToShell, Narration, OutputGeneration, RunId, SegmentId,
+    ControlToShell, DataToShell, MAX_SEGMENTS_PER_RUN, Narration, OutputGeneration, RunId,
+    SegmentId,
 };
 
 use super::{Coordinator, Effect, Input, Notify, Run, Stale};
@@ -156,6 +157,10 @@ impl Coordinator {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one router for every speech input, a released run's decision receipt included"
+    )]
     pub(super) fn speech_input(
         &mut self,
         input: Input,
@@ -222,6 +227,19 @@ impl Coordinator {
             Input::SpeechDecision(key, _) => key.run,
             _ => unreachable!("only speech inputs are routed here"),
         };
+        // A run this connection started and already released still owes its decision receipt.
+        if let Input::SpeechDecision(key, _) = input
+            && self.narration == Some(Narration::Conducted)
+            && self.find(run).is_err()
+            && (self.session_start..=self.last_run).contains(&run)
+            && self
+                .output
+                .is_some_and(|(_, output, _)| output == key.output)
+            && key.segment.0 < MAX_SEGMENTS_PER_RUN
+        {
+            effects.push(Effect::Control(ControlToShell::SpeechDecisionTaken(key)));
+            return Ok(());
+        }
         let found = self.find(run)?;
         let reply = found.reply.as_mut().ok_or(Stale)?;
         let mut out = Vec::new();
