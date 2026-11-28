@@ -28,7 +28,9 @@ connection's id cannot be reused before the new view arrives.
 The shell also retains the submitted text until its named run ends. A named Failed state
 with SessionEnded, AccountRefused, SignInNeeded, ConnectionNeeded, ClaudeCodeSignedOut,
 AnthropicKeyRejected or RenewalUnconfirmed returns that text once before Answering, only while its captured selection revision and
-thread still match the current input target. The typing view restores it only into an empty
+thread still match the current input target. So do ConfigUnreadable and LocalOff, which the brain
+answers before it keeps a turn; their run's thread was never made, so a New target it named is New
+again. The typing view restores it only into an empty
 input; even whitespace is a newer draft. No frame resends a turn automatically. General
 account errors and TurnRefused cannot restore text because neither identifies a failed run.
 Esc, a new submit attempt, a target change, disconnect, a new brain incarnation, confirmed

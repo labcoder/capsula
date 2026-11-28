@@ -146,6 +146,47 @@ fn interleaved_origins_bind_only_their_turn_and_restore_that_text_once() {
     assert!(!runs.working());
 }
 
+/// A turn the brain refused before keeping it has its text back once, and a New target that
+/// named no kept thread is New again. A model that can't answer kept the turn, so neither.
+#[test]
+fn a_turn_refused_before_it_was_kept_returns_its_text_and_new_target() {
+    for (key, task, restored, target) in [
+        (ErrorKey::ConfigUnreadable, None, true, Target::New),
+        (ErrorKey::LocalOff, None, true, Target::New),
+        (
+            ErrorKey::LocalOff,
+            Some(ThreadId(5)),
+            true,
+            Target::Task(ThreadId(5)),
+        ),
+        (
+            ErrorKey::ModelUnavailable,
+            None,
+            false,
+            Target::Task(ThreadId(22)),
+        ),
+    ] {
+        let mut runs = answering(1);
+        assert!(runs.select_thread(task));
+        submit(&mut runs, "typed before the refusal");
+        let failed = |runs: &mut Runs| {
+            runs.apply_run_state(
+                RunId(11),
+                task.unwrap_or(ThreadId(22)),
+                Phase::Failed,
+                Some(key.into()),
+                Some(RunOrigin::Typed { turn: 1 }),
+            )
+            .0
+            .restore
+        };
+        let expected = restored.then_some("typed before the refusal");
+        assert_eq!(failed(&mut runs).as_deref(), expected, "{key:?}");
+        assert_eq!(runs.target(), target, "{key:?}");
+        assert_eq!(failed(&mut runs), None, "{key:?}");
+    }
+}
+
 #[test]
 fn newer_keyed_answers_never_borrow_older_cancelled_or_deleted_prefixes() {
     use kumochi_protocol::message::Deleted;
