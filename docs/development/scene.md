@@ -2437,6 +2437,21 @@ and installed once-state. A refused control ends the connection. Hidden, empty, 
 revoked or superseded observations cannot acknowledge; visibility-only epoch changes never
 reset an already acknowledged activation. Skipped semantic retirement fabricates no paint.
 
+A painter that finishes on another thread paints through `Frames::paint_with`, which hands it a
+`PaintTicket` per frame: the scene, its frame epoch and sampled bound, whether the paint can
+count (live, on a shown overlay, with something to paint) and, for a frozen picture, the
+retirement's expiry as `hold_until`. `Drawn::Now` records the bound inside the call, as
+`Frames::paint` always does; `Drawn::Later` records nothing until the owner hands the ticket
+back. `presented` records the bound only for a counting ticket whose scene still has a live,
+unfailed slot at that epoch, so a frozen picture's ticket never counts. `mark_failed` marks the
+live slot with that scene and epoch, or else the frozen picture with them, and `paint_failed`
+clears it as usual: a late failure for a picture frozen since it was painted retires only that
+picture. A view replacement, a slot reset and a hide each start a new epoch from one counter
+that a reconnect doesn't reset, so the epoch fences an answer about an older view, showing or
+connection. It doesn't change on a Stop, a cut applied to a view at rest or a re-placement, and
+a hide leaves frozen pictures alone, so the owner checks its connection, host and submission
+fence before it passes an answer on; the epoch is the last check, not the only one.
+
 With [drawing timing enabled](input.md#offline-drawing-timing), the shell saves a QPC
 stamp at the first successful paint for that scene, epoch and bound. It reports the
 stamp only when the presenter accepts the same sample for the live step. A paint

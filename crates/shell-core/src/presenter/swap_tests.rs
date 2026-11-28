@@ -3,6 +3,7 @@ use std::time::Instant;
 use kumochi_protocol::message::{DataToShell, SceneId};
 use kumochi_scene::{Step, limits::MAX_RESIDENT_BYTES, motion::FrameItem, record::Start};
 
+use super::super::{Drawn, PaintTicket};
 use super::{
     Broken, Charged, GENERATION, LIVE, Presenter, RUN, Shaper, Witness, begin, bound_everywhere,
     commit_as, controls, data, live, ms, only_job, paint_shown, recovering, rect, step,
@@ -878,4 +879,77 @@ fn four_retiring_frames_never_paint_a_fifth_and_their_failures_emit_no_old_ack()
     assert!(controls(&presenter.paint_failed()).is_empty());
     assert_eq!(presenter.frames.borrow().retirement_bytes(), 0);
     assert!(!presenter.sample_at(now).expect("a sample").0.visible);
+}
+
+fn later(presenter: &Presenter) -> Vec<PaintTicket> {
+    let mut tickets = Vec::new();
+    assert!(!presenter.frames.borrow().paint_with(|ticket, _, _| {
+        tickets.push(ticket);
+        Ok::<_, ()>(Drawn::Later)
+    }));
+    tickets
+}
+
+fn holds(tickets: &[PaintTicket]) -> Vec<(SceneId, Option<Instant>)> {
+    tickets.iter().map(|t| (t.scene, t.hold_until)).collect()
+}
+
+#[test]
+fn a_frozen_picture_s_ticket_holds_until_expiry_and_never_counts() {
+    const SURVIVOR: SceneId = SceneId(10);
+    let (mut presenter, now) = fixture(&[SURVIVOR, LIVE]);
+    assert_eq!(holds(&later(&presenter)), [(SURVIVOR, None), (LIVE, None)]);
+    replace(&mut presenter, &[LIVE], NEXT, now);
+    begin(&mut presenter, NEXT, now);
+    let frozen = later(&presenter);
+    assert_eq!(
+        holds(&frozen),
+        [(SURVIVOR, None), (LIVE, Some(ms(now, 250)))]
+    );
+    assert!(!presenter.frames.borrow().presented(frozen[1]));
+    assert_eq!(presenter.frames.borrow().painted(LIVE), None);
+    prepare(&mut presenter, 0, rect("new"), now);
+    presenter.advance(GENERATION, now).expect("activation");
+    assert!(presenter.sample_at(now).expect("a sample").0.visible);
+    assert_eq!(
+        holds(&later(&presenter)),
+        [(SURVIVOR, None), (NEXT, None)],
+        "after the handoff no frozen picture paints"
+    );
+    assert!(!presenter.frames.borrow().presented(frozen[1]));
+}
+
+#[test]
+fn a_late_failure_for_a_frozen_picture_retires_it_and_no_live_scene() {
+    const SURVIVOR: SceneId = SceneId(10);
+    for frozen_since in [false, true] {
+        let (mut presenter, now) = fixture(&[SURVIVOR, LIVE]);
+        let made_live = later(&presenter);
+        let survivor = picture(&presenter).swap_remove(0);
+        replace(&mut presenter, &[LIVE], NEXT, now);
+        begin(&mut presenter, NEXT, now);
+        let made_frozen = later(&presenter);
+        let ticket = if frozen_since {
+            made_live[1]
+        } else {
+            made_frozen[1]
+        };
+        assert_eq!(ticket.scene, LIVE);
+        assert!(!presenter.frames.borrow().presented(ticket));
+        assert!(presenter.frames.borrow().mark_failed(ticket));
+        assert!(!presenter.frames.borrow().presented(ticket));
+        assert!(
+            controls(&presenter.paint_failed()).is_empty(),
+            "no old-scene failure"
+        );
+        assert_eq!(presenter.frames.borrow().retirement_bytes(), 0);
+        assert_eq!(
+            picture(&presenter),
+            [survivor],
+            "frozen since {frozen_since}"
+        );
+        assert!(presenter.scenes.contains_key(&SURVIVOR));
+        assert_eq!(presenter.take_shown(GENERATION), [None; 4]);
+        assert!(!presenter.frames.borrow().mark_failed(ticket), "retired");
+    }
 }
