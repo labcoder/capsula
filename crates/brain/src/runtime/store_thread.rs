@@ -867,7 +867,7 @@ fn serve_op(
                     } else {
                         Input::TurnRefused {
                             run,
-                            reason: ErrorKey::ModelUnavailable.into(),
+                            reason: crate::coordinator::model_unavailable(),
                         }
                     });
                 }

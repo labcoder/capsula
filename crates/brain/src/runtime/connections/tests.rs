@@ -1119,9 +1119,62 @@ async fn a_pending_catalog_update_offers_no_models_once_the_fence_is_closed() {
     }
 }
 
+/// Whether the engine for a local run admitted under `tag` asks to send, as only a real engine
+/// does; a refusing one finishes without asking, so it never connects.
+async fn asks_to_send(
+    brain: &Brain,
+    tag: Option<crate::context::ConnectionTag>,
+    model: &kumochi_protocol::message::ModelSlug,
+) -> bool {
+    use crate::context::{InputItem, ModelRequest, Origin, Role};
+    use crate::coordinator::{BuildKey, Input, SendKey};
+    use crate::engines::{Asks, RunRequest, SendGate};
+    use kumochi_protocol::message::{Effort, ModelChoice, RunId, ThreadId};
+
+    let key = SendKey::Build(BuildKey {
+        run: RunId(1),
+        round: 1,
+        attempt: 1,
+    });
+    let request = RunRequest {
+        key,
+        run: RunId(1),
+        thread: ThreadId(2),
+        origin: Origin::Task(ThreadId(2)),
+        request: ModelRequest {
+            choice: Some(ModelChoice {
+                connection: ConnectionKind::LocalChat,
+                model: model.clone(),
+                effort: Effort::Low,
+            }),
+            instructions: String::new(),
+            input: vec![InputItem::Message {
+                role: Role::User,
+                text: "Hi".to_owned(),
+            }],
+            tools: Vec::new(),
+        },
+    };
+    let (events, _seen) = tokio::sync::mpsc::channel(1);
+    let (inputs, mut asks) = tokio::sync::mpsc::unbounded_channel();
+    let round = brain.local_engine_on(tag).start(
+        request,
+        events,
+        SendGate::new(key, Asks::default(), inputs),
+    );
+    timeout(Duration::from_secs(5), async {
+        tokio::select! {
+            input = asks.recv() => matches!(input, Some(Input::SendReady { .. })),
+            () = round => false,
+        }
+    })
+    .await
+    .expect("the engine asks or ends")
+}
+
 /// Replacing the local server revokes the old one's fence before the new one is heard, and an
-/// engine is built only for the server the current run is bound to: with no such run, even a
-/// ready server gets the refusing engine and no ask.
+/// engine is built only for the server the current run is bound to: with no such run, or one
+/// admitted under another server's tag, even a ready server gets the refusing engine and no ask.
 #[tokio::test]
 async fn a_replaced_local_server_is_retired_before_its_replacement_is_heard() {
     use crate::connections::local::endpoint::LoopbackEndpoint;
@@ -1138,6 +1191,10 @@ async fn a_replaced_local_server_is_retired_before_its_replacement_is_heard() {
     let old = brain.local.as_ref().expect("a server").fence.clone();
     assert!(old.open());
     assert_owned_refusal(&mut brain, ConnectionKind::LocalChat, model_unavailable()).await;
+    assert!(asks_to_send(&brain, Some(ConnectionTag(5)), &model).await);
+    for tag in [Some(ConnectionTag(9)), None] {
+        assert!(!asks_to_send(&brain, tag, &model).await, "{tag:?}");
+    }
     brain
         .set_local_server(Some((endpoint, model, ConnectionTag(9))))
         .expect("replaced");

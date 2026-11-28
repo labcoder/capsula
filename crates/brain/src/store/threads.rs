@@ -209,6 +209,7 @@ impl Store {
                 row.choice,
                 StoredChoice::Valid {
                     connection: ConnectionKind::LocalChat,
+                    effort: Some(_),
                     ..
                 }
             )

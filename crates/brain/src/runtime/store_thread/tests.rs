@@ -2023,7 +2023,7 @@ fn an_invalid_picture_authorization_leaves_an_owed_correction_for_the_next_valid
 /// keeps nothing.
 #[tokio::test]
 async fn a_local_turn_is_stored_only_bound_to_its_server() {
-    use kumochi_protocol::message::{ErrorKey, HeldScreen};
+    use kumochi_protocol::message::{Action, ErrorKey, HeldScreen, UserError};
 
     let scratch = Scratch::new("local-turn-bound");
     let store = Store::open(&scratch.db()).expect("store");
@@ -2053,12 +2053,19 @@ async fn a_local_turn_is_stored_only_bound_to_its_server() {
         (
             turn(RunId(3), "refusedmoved", Some(9), None),
             RunId(3),
-            Some(ErrorKey::ModelUnavailable),
+            Some(
+                UserError::new(
+                    ErrorKey::ModelUnavailable,
+                    Vec::new(),
+                    vec![Action::OpenSettings],
+                )
+                .expect("one action"),
+            ),
         ),
         (
             turn(RunId(4), "refusedoff", None, None),
             RunId(4),
-            Some(ErrorKey::LocalOff),
+            Some(ErrorKey::LocalOff.into()),
         ),
         (
             turn(
@@ -2068,16 +2075,13 @@ async fn a_local_turn_is_stored_only_bound_to_its_server() {
                 Some(HeldScreen::Attached),
             ),
             RunId(5),
-            Some(ErrorKey::ScreenUnavailable),
+            Some(ErrorKey::ScreenUnavailable.into()),
         ),
     ] {
         assert!(thread.send(op));
         let expected = match refused {
             None => Input::TurnStored { run },
-            Some(key) => Input::TurnRefused {
-                run,
-                reason: key.into(),
-            },
+            Some(reason) => Input::TurnRefused { run, reason },
         };
         assert_eq!(reply(&mut replies).await, expected);
     }

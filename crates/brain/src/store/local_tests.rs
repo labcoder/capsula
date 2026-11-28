@@ -61,16 +61,26 @@ fn a_fresh_local_task_binds_to_its_first_server_and_keeps_it() {
             .expect("refused")
     );
     drop(store);
-    let store = Store::open(&scratch.db()).expect("reopen");
+    let mut store = Store::open(&scratch.db()).expect("reopen");
+    assert!(
+        store
+            .begin_local_turn(ThreadId(2), first, RunId(4), "after restart")
+            .expect("stored")
+    );
+    assert!(
+        !store
+            .begin_local_turn(ThreadId(2), ConnectionTag(9), RunId(5), "moved")
+            .expect("refused")
+    );
     let conn = store.conn_for_tests();
     assert_eq!(tag_of(conn, 2), Some(7_u64.to_be_bytes().to_vec()));
-    assert_eq!(count(conn, "SELECT count(*) FROM runs WHERE thread = 2"), 2);
+    assert_eq!(count(conn, "SELECT count(*) FROM runs WHERE thread = 2"), 3);
     assert_eq!(
         count(
             conn,
             "SELECT count(*) FROM events WHERE thread = 2 AND kind = 'user'"
         ),
-        2
+        3
     );
     assert_eq!(
         count(conn, "SELECT count(*) FROM events WHERE text = 'moved'"),
@@ -199,4 +209,26 @@ fn a_failed_turn_leaves_its_task_unbound() {
         count(store.conn_for_tests(), "SELECT count(*) FROM runs"),
         0
     );
+}
+
+/// A local choice whose saved effort can't run, such as a spelling from a newer build, never
+/// binds its task: it stays unbound and stores nothing.
+#[test]
+fn a_local_task_whose_effort_cannot_run_never_binds() {
+    let scratch = Scratch::new("local-bind-effort");
+    let mut store = opened(&scratch);
+    fresh(store.conn_for_tests(), 2, "local_chat");
+    store
+        .conn_for_tests()
+        .execute("UPDATE threads SET effort = 'unheard' WHERE id = 2", [])
+        .expect("an unknown effort");
+    assert!(
+        !store
+            .begin_local_turn(ThreadId(2), ConnectionTag(7), RunId(1), "refused")
+            .expect("refused")
+    );
+    let conn = store.conn_for_tests();
+    assert_eq!(tag_of(conn, 2), None);
+    assert_eq!(count(conn, "SELECT count(*) FROM runs"), 0);
+    assert_eq!(count(conn, "SELECT count(*) FROM events"), 0);
 }

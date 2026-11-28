@@ -29,7 +29,12 @@ impl Brain {
     /// A local run's engine: only on the server whose tag the run's route carries, so a run never
     /// reaches a server that replaced its own.
     pub(super) fn local_engine(&self, request: &RunRequest) -> Box<dyn Engine> {
-        let tag = self.coordinator.local_tag(request);
+        self.local_engine_on(self.coordinator.local_tag(request))
+    }
+
+    /// The engine for a local run admitted under `tag`: a real one only while the server here is
+    /// still that tag's, so a run admitted before a replacement was heard never reaches the new one.
+    pub(super) fn local_engine_on(&self, tag: Option<ConnectionTag>) -> Box<dyn Engine> {
         match self.local.as_ref().filter(|server| Some(server.tag) == tag) {
             Some(server) => Box::new(LocalEngine::new(
                 server.endpoint,

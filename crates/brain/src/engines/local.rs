@@ -156,7 +156,7 @@ async fn deliver(
     let cut = matches!(
         finish,
         Finish::Failed(EngineFailure::Local(
-            Failure::Backpressure | Failure::Deadline
+            Failure::Backpressure | Failure::Deadline | Failure::Retired
         ))
     );
     let text = (!pending.is_empty() && !cut).then_some(TurnEvent::TextDelta(pending));
