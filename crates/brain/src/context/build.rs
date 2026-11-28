@@ -188,8 +188,8 @@ const CHECK_EVERY: usize = 256;
 
 /// Groups ordered items into whole runs, the current one last. Each call is followed by its
 /// result within its run, and no item repeats. One pass does it all, checking `snapshot`'s read
-/// control every [`CHECK_EVERY`] items and once more at the end, so a cancel or the deadline stops
-/// it however long the history is.
+/// control every [`CHECK_EVERY`] items and once more before it succeeds, so a cancel or the
+/// deadline stops it however long the history is.
 pub(super) fn runs(
     snapshot: &Snapshot<'_>,
     items: Vec<Item>,
@@ -225,7 +225,6 @@ pub(super) fn runs(
         }
         runs.last_mut().expect("a run was opened above").push(item);
     }
-    snapshot.check()?;
     if open.is_some() {
         return Err(BuildError::InvalidCut);
     }
@@ -242,6 +241,7 @@ pub(super) fn runs(
     if !last.iter().any(|item| matches!(item.body, Body::User(_))) {
         return Err(BuildError::NoTurn);
     }
+    snapshot.check()?;
     Ok(runs)
 }
 
