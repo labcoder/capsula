@@ -8,7 +8,10 @@
 - `ollama-0.40.19-thinking-text.sse` was recorded from an isolated Ollama 0.40.19 instance with its
   own models folder, home and port, serving `openbmb/minicpm5-2b:q4_K_M` as `local-model` on
   loopback, with temperature 0 and seed 1. It streams `reasoning` deltas before the answer and has
-  no `usage` object.
+  no `usage` object. To fetch the same build and model again: Ollama 0.40.19's
+  `ollama-windows-amd64.zip` has SHA-256
+  `0114b9f103d783b96f14390cf7f11d0fa360040b3ee9941f370fdee503cca308`, and the model tag is
+  `openbmb/minicpm5-2b:q4_K_M` (digest `71a44e98400f`).
 
 Both recordings answer the request the adapter sends (`model`, `messages`, `stream`) for the
 single prompt "Reply with exactly: Hello from loopback." Each was the only request sent, with the
