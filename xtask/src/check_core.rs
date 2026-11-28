@@ -2,6 +2,8 @@
 //! when the core depends on a crate that is not on its list, when a UI framework enters its
 //! tree, when its test support reaches a binary that ships, or when a test gate in the core is
 //! written in a form the shell's tests could miss: they build the core without `cfg(test)`.
+//! It holds `kumochi-render` the same way: listed dependencies, no UI framework or GPU crate
+//! in its tree, and no scene or presenter name on its stage side.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -41,6 +43,29 @@ const DEPENDENCIES: [&str; 24] = [
 /// Crate-name prefixes of the UI frameworks a front end may sit on. The whole tree is searched
 /// for them, because a listed dependency could bring one in.
 const FRAMEWORKS: [&str; 2] = ["gpui", "nsh"];
+
+/// The crates the renderer may depend on directly, dev-dependencies included.
+const RENDER_DEPENDENCIES: [&str; 5] = [
+    "kumochi-protocol",
+    "kumochi-scene",
+    "kumochi-shell-core",
+    "lyon",
+    "thiserror",
+];
+
+/// GPU crates, kept out of the renderer's tree until the unit that draws with one lists it.
+const GPU: [&str; 6] = ["ash", "d3d12", "glow", "metal", "naga", "wgpu"];
+
+/// Paths the renderer's stage side may not name: the scene and the presenter, directly or
+/// through the owner side's modules.
+const STAGE_FORBIDDEN: [&str; 4] = [
+    "kumochi_scene",
+    "kumochi_shell_core",
+    "crate::",
+    "super::super",
+];
+/// The crate paths the stage side may name: itself and the reserved sizes.
+const STAGE_ALLOWED: [&str; 2] = ["crate::stage", "crate::limits"];
 
 /// The gate that is on in the core's own tests and in the shell's.
 const SHARED: &str = "any(test, feature = \"test-support\")";
@@ -113,7 +138,83 @@ pub(crate) fn run() -> Result<()> {
         "kumochi-shell-core: only listed dependencies, no UI framework in its tree, no test \
          support in a shipped binary, and no test gate the shell's tests could miss"
     );
+    render(root)
+}
+
+fn render(root: &Path) -> Result<()> {
+    let direct = tree(
+        root,
+        &[
+            "--package",
+            "kumochi-render",
+            "--depth",
+            "1",
+            "--edges",
+            "normal,build,dev",
+        ],
+    )?;
+    let unlisted: Vec<&str> = direct
+        .lines()
+        .skip(1)
+        .filter_map(crate_name)
+        .filter(|name| !RENDER_DEPENDENCIES.contains(name))
+        .collect();
+    ensure!(
+        unlisted.is_empty(),
+        "kumochi-render depends on crates that are not on the list in xtask/src/check_core.rs: {}",
+        unlisted.join(", ")
+    );
+    let whole = tree(root, &["--package", "kumochi-render"])?;
+    let found: Vec<&str> = whole
+        .lines()
+        .filter(|line| names_framework(line) || names_gpu(line))
+        .collect();
+    ensure!(
+        found.is_empty(),
+        "kumochi-render must build without a UI framework or a GPU crate, but its tree holds: {}",
+        found.join(", ")
+    );
+    let render = root.join("crates/render/src");
+    let mut files = vec![render.join("stage.rs")];
+    sources(&render.join("stage"), &mut files)?;
+    let mut faults = Vec::new();
+    for file in &files {
+        let source =
+            fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+        for line in stage_faults(&source) {
+            faults.push(format!("{}:{line}", file.display()));
+        }
+    }
+    ensure!(
+        faults.is_empty(),
+        "kumochi-render's stage side names the scene, the presenter or the owner side:\n{}",
+        faults.join("\n")
+    );
+    println!(
+        "kumochi-render: only listed dependencies, no UI framework or GPU crate in its tree, and \
+         a stage side that names no scene or presenter type"
+    );
     Ok(())
+}
+
+fn names_gpu(line: &str) -> bool {
+    crate_name(line).is_some_and(|name| GPU.contains(&name) || name.starts_with("wgpu-"))
+}
+
+/// The lines, counted from 1, where stage-side source names a forbidden path.
+fn stage_faults(source: &str) -> Vec<usize> {
+    source
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| {
+            let mut line = (*line).to_owned();
+            for allowed in STAGE_ALLOWED {
+                line = line.replace(allowed, "");
+            }
+            STAGE_FORBIDDEN.iter().any(|path| line.contains(path))
+        })
+        .map(|(index, _)| index + 1)
+        .collect()
 }
 
 /// `cargo tree`'s lines for a selection on every target, one crate per line.
@@ -398,7 +499,7 @@ fn item(line: &str) -> Option<&str> {
 mod tests {
     use super::{
         LINT, MIXED, STATEMENT, SWITCH, UNCLOSED, carries_test_support, crate_name, gate_faults,
-        names_framework,
+        names_framework, names_gpu, stage_faults,
     };
 
     #[test]
@@ -411,6 +512,24 @@ mod tests {
         assert_eq!(crate_name("tracing v0.1.41 (*)"), Some("tracing"));
         assert_eq!(crate_name("[dev-dependencies]"), None);
         assert_eq!(crate_name(""), None);
+    }
+
+    #[test]
+    fn a_stage_line_that_reaches_the_scene_or_the_owner_is_a_fault() {
+        let source = "use super::{Color, push};\nuse crate::limits::RECORDS;\n\
+                      use kumochi_protocol::message::SceneId;\nuse kumochi_scene::Frame;\n\
+                      use crate::cache::RenderCache;\nuse super::super::input::color;\n\
+                      fn f(x: kumochi_shell_core::presenter::Stage) {}\n";
+        assert_eq!(stage_faults(source), [4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn a_gpu_line_is_found_and_a_lookalike_is_not() {
+        assert!(names_gpu("wgpu v29.0.1"));
+        assert!(names_gpu("wgpu-hal v29.0.1"));
+        assert!(names_gpu("naga v29.0.0"));
+        assert!(!names_gpu("ashpd v0.11.0"));
+        assert!(!names_gpu("metallic v1.0.0"));
     }
 
     #[test]
