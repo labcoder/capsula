@@ -11,6 +11,11 @@ separate binary, `kumochi-nsh`, so both shells can share one target folder. It i
 member but not a default member: at the workspace root, a plain `cargo build` or `cargo test`
 leaves it out, and `-p kumochi-shell-nsh` or `--workspace` includes it.
 
+CI checks this crate in its own steps and leaves it out of the shared gates with
+`--exclude kumochi-shell-nsh`. Cargo unifies features across every package one command
+selects, so the shared gates then resolve without NativeShell's feature requests. A local
+`--workspace` command still selects both shells and unifies their features.
+
 Until it replaces the GPUI shell, it refuses the release identity: a build of `kumochi-nsh`
 with the release identity exits with code 69 (unsupported) before it does anything, so it can
 never touch an installed Kumochi's folders, pipe, lock or credentials. Builds with the Dev or
