@@ -149,18 +149,18 @@ fn an_upload_charges_its_buffers_to_the_byte_and_nothing_when_refused() {
         Some(GpuFailure::Unfinished),
         "a build is open"
     );
+    built(&mut mesh, 2, 1, &[red_square([0.0, 0.0])]);
+    assert_eq!(
+        gpu.upload(&mesh).err(),
+        Some(GpuFailure::Budget),
+        "no room while the first is held"
+    );
     gpu.release_built(one).expect("its own geometry");
     assert_eq!(gpu.free_tables(), UPLOADED, "the slot comes back at once");
     assert_eq!(
         gpu.charged(),
         exact,
         "the GPU side holds the buffers until a submission carries their writes"
-    );
-    built(&mut mesh, 2, 1, &[red_square([0.0, 0.0])]);
-    assert_eq!(
-        gpu.upload(&mesh).err(),
-        Some(GpuFailure::Budget),
-        "the released charge still waits"
     );
     gpu.draw(&target, &FrameBuf::new(), None, &[], ORIGIN)
         .expect("it clears");
@@ -444,7 +444,7 @@ fn a_reservation_that_finds_a_loss_answers_lost_and_credits_nothing() {
     assert_eq!(
         gpu.charged(),
         exact,
-        "and credits nothing for a submission on a dead device"
+        "and the refused reservation credits nothing"
     );
     gpu.release_target(target).expect("its own target");
 }

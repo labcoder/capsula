@@ -126,8 +126,9 @@ stage side's one Direct3D 12 device. Only the stage side names wgpu.
   sample-rate shading (`DownlevelFlags::MULTISAMPLED_SHADING`) and storage buffers in the
   vertex stage. wgpu's native futures for the adapter, the device and its error scopes are ready
   when made, so each is polled once; one still pending fails closed as `NoDevice` and nothing
-  spins. A device lost or a pipeline refused while opening, which wgpu reports outside both
-  scopes, answers `NoDevice` too.
+  spins. A device lost while opening answers `NoDevice` too, and so does a pipeline that fails to
+  link: wgpu reports that as an internal error, which neither the validation scope nor the
+  out-of-memory scope catches, so it reaches the uncaptured-error handler and sets the flag.
 - **Loss.** The device-loss callback and the uncaptured-error handler are installed before any
   resource exists, and both set one sticky flag that carries nothing of the error. An upload or
   a draw sets it too when wgpu refuses a write with both error scopes clean: wgpu drops a lost
@@ -142,16 +143,18 @@ stage side's one Direct3D 12 device. Only the stage side names wgpu.
   wgpu holds a resource until the last submission that uses it, so a released charge waits for
   the last draw that read it, or for the device's next submission, which carries an upload's
   queued writes, when no draw read it; one that nothing read or queued comes back at once. Only
-  each draw's `Queue::on_submitted_work_done` callback moves what has retired: a returned
-  submission index proves nothing. Every submission runs inside both error scopes, and only one
-  they and the flag pass is counted and gets that callback: a refused one retires nothing, so
-  what it would have read stays charged. Nothing waits for it. A reservation that doesn't fit
-  submits the queued writes once, with no commands, when a waiting charge needs a submission
-  not yet made, as a released upload's does when nothing has drawn; then it polls the device
-  once without blocking, which runs finished work's callbacks, and tries again. So it can answer
-  `Budget` and a later reservation succeed. That poll runs the loss callback in the same pass
-  as stale work-done callbacks, so the flag is checked before anything is taken back, and a
-  reservation that finds a loss answers `Lost`. Eight waits are tracked one by one; past them a
+  the `Queue::on_submitted_work_done` callback of each counted submission, a draw's or a flush of
+  queued writes with no commands, moves what has retired: a returned submission index proves
+  nothing. Every submission runs inside both error scopes, and only one they and the flag pass is
+  counted and gets that callback: a refused one retires nothing, so what it would have read stays
+  charged. Nothing waits for it. A reservation that doesn't fit submits the queued writes once,
+  with no commands, when a waiting charge needs a submission not yet made, as a released upload's
+  does when nothing has drawn; then it polls the device once without blocking, which runs finished
+  work's callbacks, and tries again. So it can answer `Budget` and a later reservation succeed.
+  That poll runs the loss callback in the same pass as stale work-done callbacks, so the flag is
+  checked before anything is taken back, and a reservation that finds a loss answers `Lost`. After
+  a loss the balance is no longer kept: nothing can be reserved again, and wgpu runs the pending
+  work-done callbacks when it reports the loss. Eight waits are tracked one by one; past them a
   release merges into the newest, which only holds that charge longer.
 - **The one poll.** That poll is the one call here wired to wgpu's fatal handler, for a poll
   error wgpu can't convert. It can't reach it: a non-blocking poll on Direct3D 12 sets no wait,
@@ -192,10 +195,10 @@ stage side's one Direct3D 12 device. Only the stage side names wgpu.
   `Mismatch` before any GPU command. `View` places the frame: its origin is subtracted once,
   then everything is scaled. The answer, `Drawn`, counts commands, not ink: pictures for which
   an indexed draw was issued, built pictures that issued none (label text only, empty ranges,
-  or opacity 0 or not finite) and pictures whose geometry wasn't given. A reveal of 0 issues a
-  draw and covers nothing. It is provisional, as a `Built` is: submitted with no error and no
-  loss seen, not confirmed on the GPU, and never presented. Text primitives keep their range
-  boundaries, so the label unit can draw them, and draw nothing here.
+  or opacity 0 or not finite) and pictures whose geometry wasn't given. A stroke-only picture at a
+  reveal of 0 issues a draw and covers nothing. It is provisional, as a `Built` is: submitted with
+  no error and no loss seen, not confirmed on the GPU, and never presented. Text primitives keep
+  their range boundaries, so the label unit can draw them, and draw nothing here.
 
 The fragment stage runs per sample. `along`, `reveal` and `weight` are interpolated at each of
 the four samples, so the end of a reveal or a dash inside a pixel covers part of it, as an edge

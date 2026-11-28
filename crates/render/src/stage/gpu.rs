@@ -224,8 +224,9 @@ impl Gpu {
                 image(1, resolved),
             ]
         });
-        let [(_, samples), (image, view)] = made
-            .and_then(|made| self.live().map(|()| made))
+        let [(_, samples), (image, view)] = self
+            .live()
+            .and(made)
             .inspect_err(|_| self.budget.refund(bytes))?;
         Ok(Target {
             device: self.id,

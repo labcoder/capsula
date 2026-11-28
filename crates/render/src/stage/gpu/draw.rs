@@ -38,8 +38,8 @@ impl fmt::Debug for View {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Drawn {
     /// Pictures for which at least one indexed draw was issued: a record with a range, a
-    /// positive finite opacity and a finite reveal. That proves no visible ink: a reveal of 0
-    /// issues a draw and covers nothing.
+    /// positive finite opacity and a finite reveal. That proves no visible ink: a stroke-only
+    /// picture at a reveal of 0 issues a draw and covers nothing.
     pub drawn: u32,
     /// Pictures whose geometry was given built but that issued no draw: text only, empty
     /// ranges, or opacity 0 or not finite.
