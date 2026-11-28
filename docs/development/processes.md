@@ -74,7 +74,7 @@ back to uncontained workers.
 | Exit | When |
 |---|---|
 | 0 | NativeShell's message loop ended with 0, which its deadline's quit causes and so does its last window closing; or another shell holds this session's lock |
-| 1 | The lock's admission, the log, the flags or the lock failed; NativeShell's message loop ended with an error or its UI thread failed; or the deadline backstop couldn't start |
+| 1 | The lock's admission, the log, the flags or the lock failed; NativeShell's message loop ended with a nonzero result (its quit message's `wParam`), its main window couldn't be created (after its message box is dismissed), or its UI thread couldn't start; or the deadline backstop couldn't start |
 | 69 | A release-identity build, before anything else, or any system other than Windows, before the lock or the log |
 | 124 | The deadline backstop ended it, once its 15 s budget past `--quit-after-ms` ran out |
 

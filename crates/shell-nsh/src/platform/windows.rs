@@ -2,7 +2,7 @@
 //! window and no view that quits on its deadline.
 
 use std::process::ExitCode;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use kumochi_protocol::constants;
 use kumochi_shell_core::instance::InstanceLock;
@@ -15,7 +15,8 @@ use nsh_platform_windows::{AppOptions, AppSource, CacheOptions, Root, run_app};
 
 use crate::launch::{Launch, LaunchError};
 
-/// The root's one prop, in milliseconds: props take numbers, not a `Duration`.
+/// The root's one prop: the milliseconds left of the deadline when it mounts, since props take
+/// numbers, not a `Duration` or an `Instant`.
 #[derive(Clone, PartialEq, Props)]
 struct EmptyAppProps {
     quit_after_ms: u64,
@@ -47,14 +48,20 @@ pub(crate) fn start(
     .map_err(Refused::exit_code)
 }
 
-/// Runs the app until it quits, then ends the process: 0 after a quit, 1 if its UI thread failed.
-pub(crate) fn run(quit_after: Duration) -> ExitCode {
-    let quit_after_ms = u64::try_from(quit_after.as_millis()).unwrap_or(u64::MAX);
+/// Runs the app until it quits at `deadline`, then ends the process: 0 when its message loop
+/// ended with 0, else 1.
+pub(crate) fn run(deadline: Instant) -> ExitCode {
     let mut window = MainWindowOptions::default();
     window.default_visible = Some(false);
-    let root = Root::new::<EmptyApp>(move || EmptyAppProps { quit_after_ms })
-        .app_id(constants::SHELL_APP_ID)
-        .main_window(window);
+    // The engine makes the props as it mounts the root, which can come late: only what's left.
+    let root = Root::new::<EmptyApp>(move || {
+        let left = deadline.saturating_duration_since(Instant::now());
+        EmptyAppProps {
+            quit_after_ms: u64::try_from(left.as_millis()).unwrap_or(u64::MAX),
+        }
+    })
+    .app_id(constants::SHELL_APP_ID)
+    .main_window(window);
     // shortcut: NativeShell's own `log` lines go nowhere, since their content (paths, foreign
     // error text) isn't vetted for Kumochi's log; bridge them through an allow-list of targets
     // once the shell shows something worth diagnosing.
@@ -68,4 +75,23 @@ pub(crate) fn run(quit_after: Duration) -> ExitCode {
             ..AppOptions::default()
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+
+    use super::*;
+
+    #[test]
+    fn an_argument_that_isnt_unicode_is_unknown() {
+        // The flag with a valid delay, then an unpaired surrogate: a Windows argument, not Unicode.
+        let mut arg: Vec<u16> = "--quit-after-ms=2000".encode_utf16().collect();
+        arg.push(0xD800);
+        assert_eq!(
+            Launch::parse(std::iter::once(OsString::from_wide(&arg))),
+            Err(LaunchError::Unknown)
+        );
+    }
 }

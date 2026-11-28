@@ -7,7 +7,7 @@ mod launch;
 mod platform;
 
 use std::process::ExitCode;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use kumochi_protocol::constants::{self, ProductIdentity};
 
@@ -33,7 +33,7 @@ fn exit_code(identity: ProductIdentity) -> u8 {
 /// How long past its deadline the shell is allowed before the backstop ends it: a budget chosen above
 /// the pin's 10 s wait for a process it replaces and its 200 ms of quit hooks, not a bound, since
 /// window creation, mounting and the engine's join have no limit of their own.
-// shortcut: unmeasured, so a slow but healthy start can end with 1; set it from the native run.
+// shortcut: unmeasured, so a slow but healthy start can end with 124; set it from the native run.
 const BACKSTOP_GRACE: Duration = Duration::from_secs(15);
 
 /// Runs `expire` on a thread of its own once `after` has passed, whatever `NativeShell` is doing.
@@ -57,11 +57,13 @@ fn main() -> ExitCode {
         Ok(started) => started,
         Err(code) => return code,
     };
+    // One deadline for the app's quit and the backstop, both counted from taking the lock.
+    let deadline = Instant::now() + launch.quit_after;
     // NativeShell can keep running without the engine that holds the deadline, or wait on a
     // message box, and a log write can block: a hidden shell must never keep the session's lock
     // forever, so nothing comes between taking the lock and arming.
     let armed = arm_backstop(launch.quit_after + BACKSTOP_GRACE, || {
-        // `run_app` ends every run the same way: `std::process::exit` off its UI thread.
+        // `run_app` ends a run that got its UI thread this way too: `std::process::exit` off it.
         std::process::exit(i32::from(OVERDUE))
     });
     if armed.is_err() {
@@ -77,7 +79,7 @@ fn main() -> ExitCode {
     );
     // NativeShell usually ends the process itself, so the lock is held until it does.
     let _lock = lock;
-    platform::run(launch.quit_after)
+    platform::run(deadline)
 }
 
 #[cfg(test)]

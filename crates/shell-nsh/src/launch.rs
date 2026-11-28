@@ -87,6 +87,7 @@ mod tests {
             ("120000", Ok(after(120_000))),
             ("0", Err(LaunchError::QuitDelay)),
             ("120001", Err(LaunchError::QuitDelay)),
+            ("", Err(LaunchError::QuitDelay)),
         ] {
             assert_eq!(
                 parse(&[&format!("--quit-after-ms={value}")]),

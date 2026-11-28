@@ -61,12 +61,16 @@ under the app id `SHELL_APP_ID` (`ai.kumochi.dev.shell`, `ai.kumochi.gate.shell`
 `ai.kumochi.shell` stays unused while it's refused) and the title `DISPLAY_NAME`. NativeShell's
 image cache is off.
 
-Its one task waits the delay on NativeShell's `timer` and calls NativeShell's `quit()`. The
+`main` takes one deadline, `--quit-after-ms` from taking the lock, for the app's quit and the
+backstop. The engine makes the root's props as it mounts the root, which can come late (up to
+10 s after a replaced process), so the root's one task waits only what's left of the deadline on
+NativeShell's `timer`, none at all when it mounted late, and calls NativeShell's `quit()`. The
 engine stops and `run_app` usually ends the process itself with `std::process::exit`: 0 when its
-message loop ended with 0, 1 otherwise. A quit ends it with 0, but so does the last window
+message loop's result, the quit message's `wParam`, is 0, and 1 when it's nonzero. A quit ends it with 0, but so does the last window
 closing, so 0 doesn't prove the timer fired. Then nothing in `main` is dropped: the OS closes
 the lock's file handle at exit, and the log loses nothing because it writes synchronously. When
-the UI thread can't even start, `run_app` returns 1 instead, and `main` drops the lock normally.
+the main window can't be created, `run_app` exits 1 once its message box is dismissed; when the
+UI thread can't even start, `run_app` returns 1 instead, and `main` drops the lock normally.
 Release builds abort on a panic. The shell's own code uses no Tokio API; NativeShell runs its
 own runtime inside.
 
@@ -75,7 +79,7 @@ thread can't start, it only logs that and keeps a hidden window with no root and
 and a window or UI-thread failure waits on a message box for a person. Either way a hidden
 process would keep the session's lock, and the GPUI shell of that edition couldn't start. So
 right after taking the lock, before even its first log line (a log write can block), `main`
-starts its own thread that sleeps `--quit-after-ms` plus a 15-second grace and then exits 124.
+starts its own thread that sleeps until 15 seconds past that deadline and then exits 124.
 It writes nothing, since a log write can block; the code is how a run shows the backstop fired,
 because nothing else in this shell or in `run_app` exits with it.
 
