@@ -6,6 +6,7 @@ use std::{
     any::Any,
     cell::{Cell, RefCell},
     rc::Rc,
+    time::Instant,
 };
 
 use kumochi_protocol::message::{MAX_VISIBLE_SCENES, SceneId};
@@ -59,6 +60,27 @@ pub struct Sample {
     pub visible: bool,
     /// A frame was adopted, replaced, resampled at a new bound or removed since the last sample.
     pub changed: bool,
+}
+
+/// What one paint is of. The presenter makes it; a painter that answers later hands it back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PaintTicket {
+    pub scene: SceneId,
+    epoch: u64,
+    bound: Option<u32>,
+    /// Live, on a shown overlay, with something to paint.
+    counts: bool,
+    /// Set for a frozen picture: when it must be gone, the retirement's own deadline.
+    pub hold_until: Option<Instant>,
+}
+
+/// Whether the painter has finished with a frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Drawn {
+    /// Painted inside the call.
+    Now,
+    /// Answered later with [`Frames::presented`] or [`Frames::mark_failed`].
+    Later,
 }
 
 /// A bound a shown overlay painted, at the epoch of the view it sampled.
@@ -341,6 +363,111 @@ impl Frames {
         failed
     }
 
+    /// [`Frames::paint`] for a painter that may answer later: the same traversal, with each frame's
+    /// ticket. `Drawn::Now` records as `paint` does; a `Later` answer records nothing until
+    /// [`Frames::presented`] or [`Frames::mark_failed`] hands the ticket back. It logs nothing:
+    /// its caller logs a failure outside its paint.
+    pub fn paint_with<E>(
+        &self,
+        mut paint: impl FnMut(PaintTicket, &Frame, &mut dyn SceneCache) -> Result<Drawn, E>,
+    ) -> bool {
+        // shortcut: copies paint's traversal without its warning; once the renderer's host is the
+        // only painter, paint becomes a call to this and paint_failed logs each failure it clears.
+        let shown = self.shown;
+        let mut failed = false;
+        let mut draw = |scene: SceneId, slot: &Slot, hold_until: Option<Instant>| {
+            if slot.failed.get() {
+                return;
+            }
+            let ticket = PaintTicket {
+                scene,
+                epoch: slot.epoch,
+                bound: slot.sampled,
+                // A frozen picture never counts: it can't acknowledge an old step.
+                counts: hold_until.is_none() && shown && !slot.frame.items().is_empty(),
+                hold_until,
+            };
+            let result = paint(ticket, &slot.frame, &mut **slot.cache.borrow_mut());
+            match result {
+                Ok(Drawn::Now) if ticket.counts => slot.painted.set(ticket.bound),
+                Ok(_) => {}
+                Err(_) => {
+                    slot.failed.set(true);
+                    failed = true;
+                }
+            }
+        };
+        if let Some(retirement) = &self.retirement
+            && retirement.epoch.is_none()
+        {
+            let mut selected = [None; MAX_VISIBLE_SCENES];
+            let live = self
+                .slots
+                .iter()
+                .flatten()
+                .filter(|(id, _)| *id != retirement.successor)
+                .map(|(id, slot)| (*id, slot, None));
+            let frozen = retirement
+                .pictures
+                .iter()
+                .flatten()
+                .map(|p| (p.id, &p.slot, Some(retirement.expires)));
+            for (place, slot) in selected.iter_mut().zip(live.chain(frozen)) {
+                *place = Some(slot);
+            }
+            selected.sort_unstable_by_key(|slot| slot.map(|(id, _, _)| id));
+            for (id, slot, hold_until) in selected.into_iter().flatten() {
+                draw(id, slot, hold_until);
+            }
+        } else {
+            for (id, slot) in self.slots.iter().flatten() {
+                draw(*id, slot, None);
+            }
+        }
+        failed
+    }
+
+    /// A later answer: the ticket's picture reached the compositor. It records the painted bound
+    /// only for a counting ticket whose scene's live slot is still at its epoch and not failed.
+    /// Whether it counted. The ticket must come from this presenter's [`Frames::paint_with`];
+    /// which answers to hand back, and in what order, is the caller's to decide.
+    pub fn presented(&self, ticket: PaintTicket) -> bool {
+        let live = self.slots.iter().flatten().find(|(id, slot)| {
+            *id == ticket.scene && slot.epoch == ticket.epoch && !slot.failed.get()
+        });
+        match live {
+            Some((_, slot)) if ticket.counts => {
+                slot.painted.set(ticket.bound);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// A later answer: the ticket's picture couldn't be drawn. Marks the live slot with its
+    /// scene and epoch, or else the frozen picture with them, for [`Presenter::paint_failed`].
+    /// Whether it newly marked one. The ticket must come from this presenter's
+    /// [`Frames::paint_with`]; which answers to hand back, and in what order, is the caller's to
+    /// decide.
+    pub fn mark_failed(&self, ticket: PaintTicket) -> bool {
+        let made = |id: SceneId, slot: &Slot| id == ticket.scene && slot.epoch == ticket.epoch;
+        let live = self
+            .slots
+            .iter()
+            .flatten()
+            .find(|(id, slot)| made(*id, slot))
+            .map(|(_, slot)| slot);
+        let frozen = || {
+            self.retirement
+                .iter()
+                .flat_map(|retirement| retirement.pictures.iter().flatten())
+                .find(|picture| made(picture.id, &picture.slot))
+                .map(|picture| &picture.slot)
+        };
+        live.or_else(frozen)
+            .is_some_and(|slot| !slot.failed.replace(true))
+    }
+
     /// The scenes [`Frames::paint`] draws something for on a shown overlay: during a handoff the
     /// frozen pictures and not the successor, and never an empty or failed frame.
     fn on_screen(&self) -> [Option<SceneId>; MAX_VISIBLE_SCENES] {
@@ -461,7 +588,9 @@ impl Frames {
 }
 
 impl Presenter {
-    /// The frames the overlay paints. Borrow them only inside its paint callback.
+    /// The frames the overlay paints. Borrow them only to paint, to show or hide them, or to
+    /// hand back a later answer, and release the borrow before `paint_failed`, `take_shown` or
+    /// any other presenter call.
     pub fn frames(&self) -> Rc<RefCell<Frames>> {
         Rc::clone(&self.frames)
     }

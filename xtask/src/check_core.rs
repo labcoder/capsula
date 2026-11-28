@@ -2,8 +2,12 @@
 //! when the core depends on a crate that is not on its list, when a UI framework enters its
 //! tree, when its test support reaches a binary that ships, or when a test gate in the core is
 //! written in a form the shell's tests could miss: they build the core without `cfg(test)`.
-//! It holds `kumochi-render` the same way: listed dependencies, no UI framework or GPU crate
-//! in its tree, and no scene or presenter name on its stage side.
+//! It holds `kumochi-render` too. On every target: only listed direct dependencies (normal,
+//! build and dev edges) and no UI framework in its tree. On `x86_64-pc-windows-msvc`'s normal
+//! edges: none of the GPU crate names ash, d3d12, glow, khronos-egl or metal. On those and
+//! `x86_64-unknown-linux-gnu`'s: exactly the wgpu features listed here for each. In its
+//! source: no scene, presenter or owner path spelled on its stage side (`stage.rs` and
+//! `stage/`), and `wgpu` spelled nowhere else.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -45,16 +49,37 @@ const DEPENDENCIES: [&str; 24] = [
 const FRAMEWORKS: [&str; 2] = ["gpui", "nsh"];
 
 /// The crates the renderer may depend on directly, dev-dependencies included.
-const RENDER_DEPENDENCIES: [&str; 5] = [
+const RENDER_DEPENDENCIES: [&str; 6] = [
     "kumochi-protocol",
     "kumochi-scene",
     "kumochi-shell-core",
     "lyon",
     "thiserror",
+    "wgpu",
 ];
 
-/// GPU crates, kept out of the renderer's tree until the unit that draws with one lists it.
-const GPU: [&str; 6] = ["ash", "d3d12", "glow", "metal", "naga", "wgpu"];
+/// GPU crates, kept out of the core's tree; `wgpu-` prefixes count too.
+const GPU: [&str; 7] = [
+    "ash",
+    "d3d12",
+    "glow",
+    "khronos-egl",
+    "metal",
+    "naga",
+    "wgpu",
+];
+/// GPU crate names the renderer's Windows tree may not hold. A list of names: a GPU crate not
+/// on it passes.
+const RENDER_GPU_BANNED: [&str; 5] = ["ash", "d3d12", "glow", "khronos-egl", "metal"];
+/// The wgpu features the renderer enables on Windows, sorted: Direct3D 12 and WGSL on wgpu's
+/// standard library build. A change to them is a reviewed line.
+const WGPU_FEATURES: [&str; 4] = ["dx12", "parking_lot", "std", "wgsl"];
+/// The same on Linux, which has no back end.
+const WGPU_FEATURES_LINUX: [&str; 3] = ["parking_lot", "std", "wgsl"];
+/// The target whose tree holds the renderer's GPU back end.
+const WINDOWS: &str = "x86_64-pc-windows-msvc";
+/// A target without it.
+const LINUX: &str = "x86_64-unknown-linux-gnu";
 
 /// Paths the renderer's stage side may not name: the scene and the presenter, directly or
 /// through the owner side's modules. This reads spellings, so it is a lint that catches a
@@ -68,6 +93,8 @@ const STAGE_FORBIDDEN: [&str; 4] = [
 /// The same for `stage.rs` itself, whose parent is the owner side: no `super::` path at all.
 const STAGE_TOP_FORBIDDEN: [&str; 4] =
     ["kumochi_scene", "kumochi_shell_core", "crate::", "super::"];
+/// What the renderer's owner side, everything outside `stage.rs` and `stage/`, may not spell.
+const OWNER_FORBIDDEN: [&str; 1] = ["wgpu"];
 /// The crate paths the stage side may name: itself and the reserved sizes.
 const STAGE_ALLOWED: [&str; 2] = ["crate::stage", "crate::limits"];
 
@@ -90,6 +117,7 @@ pub(crate) fn run() -> Result<()> {
         .context("xtask lives inside the workspace")?;
     let direct = tree(
         root,
+        "all",
         &[
             "--package",
             "kumochi-shell-core",
@@ -111,14 +139,22 @@ pub(crate) fn run() -> Result<()> {
          xtask/src/check_core.rs: {}",
         unlisted.join(", ")
     );
-    let whole = tree(root, &["--package", "kumochi-shell-core"])?;
-    let found: Vec<&str> = whole.lines().filter(|line| names_framework(line)).collect();
+    let whole = tree(root, "all", &["--package", "kumochi-shell-core"])?;
+    let found: Vec<&str> = whole
+        .lines()
+        .filter(|line| names_framework(line) || names_gpu(line))
+        .collect();
     ensure!(
         found.is_empty(),
-        "kumochi-shell-core must build without a UI framework, but its tree holds: {}",
+        "kumochi-shell-core must build without a UI framework or a GPU crate, but its tree \
+         holds: {}",
         found.join(", ")
     );
-    let shipped = tree(root, &["--workspace", "--edges", "features,normal,build"])?;
+    let shipped = tree(
+        root,
+        "all",
+        &["--workspace", "--edges", "features,normal,build"],
+    )?;
     ensure!(
         !shipped.lines().any(carries_test_support),
         "kumochi-shell-core's test-support may only be a dev-dependency's feature"
@@ -139,8 +175,8 @@ pub(crate) fn run() -> Result<()> {
         faults.join("\n")
     );
     println!(
-        "kumochi-shell-core: only listed dependencies, no UI framework in its tree, no test \
-         support in a shipped binary, and no test gate the shell's tests could miss"
+        "kumochi-shell-core: only listed dependencies, no UI framework or GPU crate in its tree, \
+         no test support in a shipped binary, and no test gate the shell's tests could miss"
     );
     render(root)
 }
@@ -148,6 +184,7 @@ pub(crate) fn run() -> Result<()> {
 fn render(root: &Path) -> Result<()> {
     let direct = tree(
         root,
+        "all",
         &[
             "--package",
             "kumochi-render",
@@ -168,17 +205,58 @@ fn render(root: &Path) -> Result<()> {
         "kumochi-render depends on crates that are not on the list in xtask/src/check_core.rs: {}",
         unlisted.join(", ")
     );
-    let whole = tree(root, &["--package", "kumochi-render"])?;
-    let found: Vec<&str> = whole
-        .lines()
-        .filter(|line| names_framework(line) || names_gpu(line))
-        .collect();
+    let whole = tree(root, "all", &["--package", "kumochi-render"])?;
+    let found: Vec<&str> = whole.lines().filter(|line| names_framework(line)).collect();
     ensure!(
         found.is_empty(),
-        "kumochi-render must build without a UI framework or a GPU crate, but its tree holds: {}",
+        "kumochi-render must build without a UI framework, but its tree holds: {}",
         found.join(", ")
     );
-    let render = root.join("crates/render/src");
+    let windows = tree(
+        root,
+        WINDOWS,
+        &["--package", "kumochi-render", "--edges", "features,normal"],
+    )?;
+    let banned: Vec<&str> = windows
+        .lines()
+        .filter_map(crate_name)
+        .filter(|name| RENDER_GPU_BANNED.contains(name))
+        .collect();
+    ensure!(
+        banned.is_empty(),
+        "kumochi-render's Windows tree holds a banned GPU crate name: {}",
+        banned.join(", ")
+    );
+    let linux = tree(
+        root,
+        LINUX,
+        &["--package", "kumochi-render", "--edges", "features,normal"],
+    )?;
+    for (target, tree, listed) in [
+        (WINDOWS, &windows, &WGPU_FEATURES[..]),
+        (LINUX, &linux, &WGPU_FEATURES_LINUX[..]),
+    ] {
+        let features = wgpu_features(tree);
+        ensure!(
+            features == listed,
+            "kumochi-render enables the wgpu features {} on {target}, but \
+             xtask/src/check_core.rs lists {}",
+            features.join(", "),
+            listed.join(", ")
+        );
+    }
+    render_source(&root.join("crates/render/src"))?;
+    println!(
+        "kumochi-render: on every target, only listed direct dependencies and no UI framework in \
+         its tree; on {WINDOWS}'s normal edges, none of the banned GPU crate names; on those and \
+         {LINUX}'s, exactly the wgpu features listed for each; no scene, presenter or owner path \
+         spelled on its stage side, and no wgpu spelled outside it"
+    );
+    Ok(())
+}
+
+/// The renderer's source lints: what its stage side names and where `wgpu` is spelled.
+fn render_source(render: &Path) -> Result<()> {
     let mut files = vec![render.join("stage.rs")];
     sources(&render.join("stage"), &mut files)?;
     let mut faults = Vec::new();
@@ -201,9 +279,20 @@ fn render(root: &Path) -> Result<()> {
         "kumochi-render's stage side names the scene, the presenter or the owner side:\n{}",
         faults.join("\n")
     );
-    println!(
-        "kumochi-render: only listed dependencies, no UI framework or GPU crate in its tree, and \
-         no scene, presenter or owner path spelled on its stage side"
+    let mut owner = Vec::new();
+    sources(render, &mut owner)?;
+    let mut spelled = Vec::new();
+    for file in owner.iter().filter(|file| !files.contains(file)) {
+        let source =
+            fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+        for line in stage_faults(&source, &OWNER_FORBIDDEN) {
+            spelled.push(format!("{}:{line}", file.display()));
+        }
+    }
+    ensure!(
+        spelled.is_empty(),
+        "kumochi-render spells wgpu outside its stage side:\n{}",
+        spelled.join("\n")
     );
     Ok(())
 }
@@ -212,7 +301,20 @@ fn names_gpu(line: &str) -> bool {
     crate_name(line).is_some_and(|name| GPU.contains(&name) || name.starts_with("wgpu-"))
 }
 
-/// The lines, counted from 1, where stage-side source names one of the `forbidden` paths.
+/// The wgpu features a `--edges features` tree enables, sorted, each once.
+fn wgpu_features(tree: &str) -> Vec<&str> {
+    let mut features: Vec<&str> = tree
+        .lines()
+        .filter_map(|line| line.strip_prefix("wgpu feature \""))
+        .filter_map(|rest| rest.split('"').next())
+        .collect();
+    features.sort_unstable();
+    features.dedup();
+    features
+}
+
+/// The lines, counted from 1, where source names one of the `forbidden` paths, once the
+/// stage side's allowed paths are taken out.
 fn stage_faults(source: &str, forbidden: &[&str]) -> Vec<usize> {
     source
         .lines()
@@ -228,11 +330,11 @@ fn stage_faults(source: &str, forbidden: &[&str]) -> Vec<usize> {
         .collect()
 }
 
-/// `cargo tree`'s lines for a selection on every target, one crate per line.
-fn tree(root: &Path, selection: &[&str]) -> Result<String> {
+/// `cargo tree`'s lines for a selection on `target` (`all` for every one), one per line.
+fn tree(root: &Path, target: &str, selection: &[&str]) -> Result<String> {
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let output = Command::new(cargo)
-        .args(["tree", "--locked", "--target", "all", "--prefix", "none"])
+        .args(["tree", "--locked", "--target", target, "--prefix", "none"])
         .args(selection)
         .current_dir(root)
         .output()
@@ -509,8 +611,9 @@ fn item(line: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        LINT, MIXED, STAGE_FORBIDDEN, STAGE_TOP_FORBIDDEN, STATEMENT, SWITCH, UNCLOSED,
-        carries_test_support, crate_name, gate_faults, names_framework, names_gpu, stage_faults,
+        LINT, MIXED, OWNER_FORBIDDEN, STAGE_FORBIDDEN, STAGE_TOP_FORBIDDEN, STATEMENT, SWITCH,
+        UNCLOSED, carries_test_support, crate_name, gate_faults, names_framework, names_gpu,
+        stage_faults,
     };
 
     #[test]
@@ -534,6 +637,12 @@ mod tests {
         assert_eq!(stage_faults(source, &STAGE_FORBIDDEN), [4, 5, 6, 7]);
         assert_eq!(stage_faults(source, &STAGE_TOP_FORBIDDEN), [1, 4, 5, 6, 7]);
         assert!(stage_faults("use super::input;\n", &STAGE_FORBIDDEN).is_empty());
+    }
+
+    #[test]
+    fn an_owner_line_that_spells_wgpu_is_a_fault() {
+        let source = "use crate::stage::Gpu;\nfn f(d: &wgpu::Device) {}\n// on Direct3D 12\n";
+        assert_eq!(stage_faults(source, &OWNER_FORBIDDEN), [2]);
     }
 
     #[test]

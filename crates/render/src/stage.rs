@@ -3,12 +3,14 @@
 //! the presenter or the rest of the crate; it reads spellings, so it is a lint, not a proof.
 
 mod frame;
+mod gpu;
 mod input;
 mod mesh;
 
 use std::fmt;
 
 pub use frame::{FrameBuf, Picture, Record};
+pub use gpu::{Built, Gpu, GpuFailure};
 pub use input::{Align, BuildInput, Object, Part, Shape, Span};
 #[cfg(test)]
 pub(crate) use mesh::earliest;
