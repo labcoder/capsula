@@ -104,9 +104,14 @@ exclude or restore next and takes each answer whenever it comes, so its surfaces
 other threads. The GPUI shell answers at once: `acquire`, `attach`, `cleanup` and `expire` ask,
 call the surface and answer, one call at a time and in the same order as before. An exclude that
 fails, or is still unanswered 250 ms after the acquire began, revokes the lease, and every
-receipt it holds is restored, because an unanswered exclude may have been applied. A restore that
-fails or never comes is restoration debt: the lease refuses the next one as `Busy` until that
-restore is confirmed, however late, or its surface is proved gone. No timer forgives it.
+receipt it holds is restored, because an unanswered exclude may have been applied. A snapshot or
+exclude answer that comes at or after the bound is dropped, whether or not the timer has fired
+yet. A restore that fails or never comes is restoration debt: the lease refuses the next one as
+`Busy` until that restore is confirmed, however late, or its surface is proved gone. No timer
+forgives it. A surface opened under the lease is snapshotted and excluded on its own, and the
+lease isn't live until that's confirmed. A driver applies each surface's asks in the order it
+took them, reads a slot's receipt when it takes the ask, and drives a lease one way only: by the
+four calls or by asks and answers.
 
 Drawing keeps the overlay's `Visibility` recovery lifecycle, paint scratch and paint notices.
 Its GPUI surface adapter attaches the drawing receipt before show, including a replacement

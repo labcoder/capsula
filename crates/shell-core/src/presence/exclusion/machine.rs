@@ -70,7 +70,9 @@ pub trait Surfaces {
     fn same(&self, slot: Slot, receipt: &Self::Receipt) -> bool;
 }
 
-/// One question for one surface. Its answer quotes `id`.
+/// One question for one surface. Its answer quotes `id`. A driver applies one surface's asks in
+/// the order it took them: a restore applied before an earlier exclude leaves the surface excluded
+/// with no receipt held.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Ask {
     pub id: AskId,
@@ -102,7 +104,7 @@ pub enum Stand {
     Idle,
     /// Snapshots or excludes are still out, and nothing is granted.
     Acquiring,
-    /// Every bound surface's exclude is confirmed.
+    /// Every bound surface's exclude is confirmed, a surface opened since included.
     Granted,
     /// Revoked, with restores still to ask or to answer.
     Restoring,
@@ -154,6 +156,16 @@ pub struct ExclusionLease<R> {
 }
 
 impl<R> ExclusionLease<R> {
+    fn covered(&self) -> bool {
+        self.slots
+            .iter()
+            .all(|bound| matches!(bound, Bound::Free | Bound::Held(_, Step::Covered)))
+    }
+
+    fn granted(&self) -> bool {
+        matches!(self.stage, Stage::Granted) && self.covered()
+    }
+
     /// Once the excludes have begun, every receipt held is restored, asked or not, as cleanup
     /// always has; a restore already out keeps waiting. Before then nothing has changed.
     fn revoke(&mut self) {
@@ -214,7 +226,9 @@ impl<R> Exclusion<R> {
     }
 
     /// A surface opened in `slot` under the lease, to be snapshotted and excluded before it
-    /// shows. A slot already bound revokes the lease; a revoked lease refuses as `Busy`.
+    /// shows. The two phases cover the acquire's own snapshots; this one is snapshotted and
+    /// excluded on its own, and until that's confirmed the lease isn't live. A slot already bound
+    /// revokes the lease; a revoked lease refuses as `Busy`.
     pub fn opened(&mut self, slot: Slot) -> Result<(), Error> {
         let Some(lease) = &mut self.lease else {
             return Ok(());
@@ -253,7 +267,8 @@ impl<R> Exclusion<R> {
         None
     }
 
-    /// The receipt `slot` holds, which its exclude and restore asks carry.
+    /// The receipt `slot` holds, which its exclude and restore asks carry. A driver reads it when
+    /// it takes the ask, not when the surface gets to it.
     pub fn receipt(&self, slot: Slot) -> Option<&R> {
         match &self.lease.as_ref()?.slots[slot as usize] {
             Bound::Held(receipt, _) => Some(receipt),
@@ -261,8 +276,14 @@ impl<R> Exclusion<R> {
         }
     }
 
-    /// A snapshot's answer. A failure, or no surface in a slot opened under the lease, revokes it.
-    pub fn snapshot(&mut self, id: AskId, read: Result<Option<R>, Error>) {
+    /// A snapshot's answer at `now`, which counts only before the acquire's bound. A failure, or
+    /// no surface in a slot opened under the lease, revokes it.
+    pub fn snapshot(&mut self, id: AskId, read: Result<Option<R>, Error>, now: Instant) {
+        self.overdue(now);
+        self.snapshot_in(id, read);
+    }
+
+    fn snapshot_in(&mut self, id: AskId, read: Result<Option<R>, Error>) {
         let Some((lease, index)) = self.waiting(id, Op::Snapshot) else {
             return;
         };
@@ -280,8 +301,14 @@ impl<R> Exclusion<R> {
         self.settle();
     }
 
-    /// An exclude's answer. A failure revokes the lease.
-    pub fn excluded(&mut self, id: AskId, done: Result<(), Error>) {
+    /// An exclude's answer at `now`, which counts only before the acquire's bound. A failure
+    /// revokes the lease.
+    pub fn excluded(&mut self, id: AskId, done: Result<(), Error>, now: Instant) {
+        self.overdue(now);
+        self.excluded_in(id, done);
+    }
+
+    fn excluded_in(&mut self, id: AskId, done: Result<(), Error>) {
         let Some((lease, index)) = self.waiting(id, Op::Exclude) else {
             return;
         };
@@ -306,12 +333,22 @@ impl<R> Exclusion<R> {
         self.settle();
     }
 
-    /// `slot`'s surface is proved gone, so whatever it waited for is settled without a restore.
-    pub fn gone(&mut self, slot: Slot) {
-        if let Some(lease) = &mut self.lease {
-            lease.slots[slot as usize] = Bound::Free;
+    /// Settles `slot` without a restore when `proved` shows the surface of the receipt it holds now
+    /// is gone, and says whether it did. A slot holding no receipt is left as it is.
+    pub fn gone(&mut self, slot: Slot, proved: impl FnOnce(&R) -> bool) -> bool {
+        let Some(lease) = &mut self.lease else {
+            return false;
+        };
+        let bound = &mut lease.slots[slot as usize];
+        let Bound::Held(receipt, _) = bound else {
+            return false;
+        };
+        if !proved(receipt) {
+            return false;
         }
+        *bound = Bound::Free;
         self.settle();
+        true
     }
 
     /// At or after the acquire's bound, every snapshot or exclude still out has failed.
@@ -350,9 +387,11 @@ impl<R> Exclusion<R> {
         let Some(lease) = &self.lease else {
             return Stand::Idle;
         };
+        if lease.granted() {
+            return Stand::Granted;
+        }
         match lease.stage {
-            Stage::Snapshots(_) | Stage::Excludes(_) => Stand::Acquiring,
-            Stage::Granted => Stand::Granted,
+            Stage::Snapshots(_) | Stage::Excludes(_) | Stage::Granted => Stand::Acquiring,
             Stage::Revoked
                 if lease
                     .slots
@@ -397,11 +436,7 @@ impl<R> Exclusion<R> {
                 }
             }
         }
-        if lease
-            .slots
-            .iter()
-            .all(|bound| matches!(bound, Bound::Free | Bound::Held(_, Step::Covered)))
-        {
+        if lease.covered() {
             match lease.stage {
                 Stage::Excludes(_) => lease.stage = Stage::Granted,
                 Stage::Revoked => self.lease = None,
@@ -411,6 +446,8 @@ impl<R> Exclusion<R> {
     }
 }
 
+// The four calls drive the core through `Surfaces`. A lease is driven one way: by these calls,
+// or by asks and answers, never both.
 impl<R> Exclusion<R> {
     pub fn acquire(
         &mut self,
@@ -439,13 +476,11 @@ impl<R> Exclusion<R> {
             return Ok(());
         };
         if self.live(generation)
+            && !self.gone(slot, S::gone)
             && let Some(prior) = self.receipt(slot)
+            && surfaces.same(slot, prior)
         {
-            if S::gone(prior) {
-                self.gone(slot);
-            } else if surfaces.same(slot, prior) {
-                return Ok(());
-            }
+            return Ok(());
         }
         let opened = self.opened(slot);
         if opened == Err(Error::Busy) {
@@ -481,6 +516,7 @@ impl<R> Exclusion<R> {
     /// Takes one ask at a time and answers it through `surfaces` before taking the next, so the
     /// surfaces see the calls in the order the synchronous machine always made them. Fails with
     /// the first snapshot or exclude that failed, or with `Surface` while restoration debt remains.
+    /// It answers at the instant it asks, so its answers skip the acquire's bound.
     fn answer_at_once(
         &mut self,
         surfaces: &mut impl Surfaces<Receipt = R>,
@@ -493,12 +529,12 @@ impl<R> Exclusion<R> {
                     if let Err(error) = &read {
                         failed = failed.and(Err((op, *error)));
                     }
-                    self.snapshot(id, read);
+                    self.snapshot_in(id, read);
                 }
                 Op::Exclude => {
                     let done = surfaces.exclude(slot, self.held(slot));
                     failed = failed.and(done.map_err(|error| (op, error)));
-                    self.excluded(id, done);
+                    self.excluded_in(id, done);
                 }
                 Op::Restore => {
                     let done = surfaces.restore(slot, self.held(slot));
@@ -534,11 +570,12 @@ impl<R> Exclusion<R> {
         self.lease.as_ref().map(|lease| lease.deadline)
     }
 
-    /// Whether `generation`'s lease still protects capture: granted and not revoked.
+    /// Whether `generation`'s lease still protects capture: granted, every bound surface
+    /// covered, and not revoked.
     pub fn live(&self, generation: LeaseGeneration) -> bool {
-        self.lease.as_ref().is_some_and(|lease| {
-            lease.key.generation == generation && matches!(lease.stage, Stage::Granted)
-        })
+        self.lease
+            .as_ref()
+            .is_some_and(|lease| lease.key.generation == generation && lease.granted())
     }
 }
 
