@@ -226,7 +226,7 @@ struct Presence {
     /// A local submission refusal, shown only in the typing panel.
     refusal: Option<Text>,
     /// The pair whose `TextReady` sends the Enter pressed before its pair admitted turns.
-    held_submit: Option<u64>,
+    held_submit: Option<text::HeldSubmit>,
 }
 
 impl Presence {

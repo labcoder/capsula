@@ -83,10 +83,11 @@ pub enum Admission {
 
 /// Checks the current session without dismissing voice or touching the draft.
 pub fn admit(link: &LinkHandle, session: Option<&Session>) -> Admission {
-    if link.admits_text(session) {
-        Admission::Proceed
-    } else if session.is_some_and(|session| link.awaits_text_ready(session)) {
+    // Waiting is read first: an acknowledgement landing between the reads then still admits.
+    if session.is_some_and(|session| link.awaits_text_ready(session)) {
         Admission::Wait
+    } else if link.admits_text(session) {
+        Admission::Proceed
     } else if session.is_some() {
         Admission::Refused(Text::TurnBusy)
     } else {

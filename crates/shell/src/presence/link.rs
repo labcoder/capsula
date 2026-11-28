@@ -331,9 +331,7 @@ impl Presence {
                 LinkEvent::TextReady { generation } => {
                     #[cfg(any(debug_assertions, all(windows, feature = "gate-draw-replay")))]
                     self.submit_draw_fixture(cx);
-                    if self.held_submit.take() == Some(generation) && !self.link.is_quitting() {
-                        self.submit(cx)?;
-                    }
+                    self.send_held(generation, cx);
                 }
                 LinkEvent::ModelChoice { reply, .. } => {
                     self.runs.apply_model(&reply, std::time::Instant::now());

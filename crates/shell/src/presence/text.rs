@@ -305,12 +305,52 @@ impl Presence {
     }
 }
 
+/// An Enter pressed before its pair admitted turns: what it would have sent, and where.
+pub(super) struct HeldSubmit {
+    generation: u64,
+    draft: SharedString,
+    revision: u64,
+    thread: Option<kumochi_protocol::message::ThreadId>,
+}
+
 impl Presence {
+    /// Sends the Enter held for pair `generation` once it admits turns, only while the draft and
+    /// its destination are the ones that Enter saw; otherwise the draft waits for another Enter.
+    pub(super) fn send_held(&mut self, generation: u64, cx: &mut Context<'_, Self>) {
+        let Some(held) = self.held_submit.take() else {
+            return;
+        };
+        let draft = self.text.as_ref().map(|text| text.input.read(cx).value());
+        if held.generation != generation
+            || self.link.is_quitting()
+            || draft.as_ref() != Some(&held.draft)
+            || held.revision != self.runs.revision()
+            || held.thread != self.runs.thread()
+        {
+            return;
+        }
+        if let Err(error) = self.submit(cx) {
+            tracing::error!(%error, "can't send the turn held for its pair");
+        }
+    }
+
     pub(super) fn submit(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
         match typing::admit(&self.link, self.session.as_ref()) {
             Admission::Ignore => return Ok(()),
             Admission::Wait => {
-                self.held_submit = self.session.as_ref().map(crate::link::Session::generation);
+                self.held_submit =
+                    self.session
+                        .as_ref()
+                        .zip(self.text.as_ref())
+                        .and_then(|(session, text)| {
+                            let draft = text.input.read(cx).value();
+                            (!draft.trim().is_empty()).then(|| HeldSubmit {
+                                generation: session.generation(),
+                                draft,
+                                revision: self.runs.revision(),
+                                thread: self.runs.thread(),
+                            })
+                        });
                 return Ok(());
             }
             Admission::Refused(text) => {

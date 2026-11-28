@@ -3,7 +3,7 @@ use crate::link::{Batch, LinkEvent, fixture};
 use crate::platform::work_area_fixture;
 use crate::presence::{run_fence_tests, test_fixture};
 use gpui_kit::{App, Entity, TestAppContext};
-use kumochi_protocol::message::Phase;
+use kumochi_protocol::message::{Phase, RunOrigin};
 use std::sync::mpsc::Receiver;
 
 const DRAFT: &str = "Hello there";
@@ -79,8 +79,16 @@ fn an_enter_before_the_pair_admits_turns_is_sent_once_it_does(cx: &mut TestAppCo
     owner.read_with(cx, |owner, cx| assert_eq!(draft(owner, cx), ""));
     loop {
         match fixture::next(&events) {
-            LinkEvent::RunState { phase, error, .. } => {
-                assert_eq!((phase, error), (Phase::Thinking, None));
+            LinkEvent::RunState {
+                phase,
+                error,
+                origin,
+                ..
+            } => {
+                assert_eq!(
+                    (phase, error, origin),
+                    (Phase::Thinking, None, Some(RunOrigin::Typed { turn: 1 }))
+                );
                 break;
             }
             LinkEvent::State(state) => panic!("the pair ended before the turn's run: {state:?}"),
@@ -107,6 +115,40 @@ fn quit_drops_an_enter_still_waiting_for_the_pair(cx: &mut TestAppContext) {
     let owner = test_fixture::presence(cx);
     let (pipe, _events, ready) = early_enter(&owner, cx);
     assert!(pipe.handle.begin_quit());
+    apply(&owner, ready, cx);
+    owner.read_with(cx, |owner, cx| assert_eq!(draft(owner, cx), DRAFT));
+}
+
+#[gpui::test]
+fn an_edited_draft_waits_for_another_enter(cx: &mut TestAppContext) {
+    const EDITED: &str = "Something else";
+    let _area = work_area_fixture::set([0, 0, 2560, 1400]);
+    let owner = test_fixture::presence(cx);
+    let (_pipe, _events, ready) = early_enter(&owner, cx);
+    owner.update(cx, |owner, cx| {
+        let text = owner.text.as_ref().expect("the composer");
+        text.window
+            .update(cx, |_, window, cx| {
+                text.input
+                    .update(cx, |input, cx| input.set_value(EDITED, window, cx));
+            })
+            .expect("the composer window");
+    });
+    apply(&owner, ready, cx);
+    owner.read_with(cx, |owner, cx| assert_eq!(draft(owner, cx), EDITED));
+}
+
+#[gpui::test]
+fn a_changed_destination_waits_for_another_enter(cx: &mut TestAppContext) {
+    let _area = work_area_fixture::set([0, 0, 2560, 1400]);
+    let owner = test_fixture::presence(cx);
+    let (_pipe, _events, ready) = early_enter(&owner, cx);
+    owner.update(cx, |owner, _| {
+        assert!(
+            owner.runs.select_thread(None),
+            "the target moves to a new thread"
+        );
+    });
     apply(&owner, ready, cx);
     owner.read_with(cx, |owner, cx| assert_eq!(draft(owner, cx), DRAFT));
 }
