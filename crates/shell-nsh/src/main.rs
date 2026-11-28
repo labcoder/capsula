@@ -23,15 +23,16 @@ fn exit_code(identity: ProductIdentity) -> u8 {
     }
 }
 
-/// How long past its deadline the shell may run before the backstop ends it: longer than the pin's
-/// 10 s wait for a process it replaces plus its 200 ms of quit hooks.
-// shortcut: unmeasured; set it from the native run's start-to-exit times.
+/// How long past its deadline the shell is allowed before the backstop ends it: a budget chosen above
+/// the pin's 10 s wait for a process it replaces and its 200 ms of quit hooks, not a bound, since
+/// window creation, mounting and the engine's join have no limit of their own.
+// shortcut: unmeasured, so a slow but healthy start can end with 1; set it from the native run.
 const BACKSTOP_GRACE: Duration = Duration::from_secs(15);
 
 /// Runs `expire` on a thread of its own once `after` has passed, whatever `NativeShell` is doing.
 fn arm_backstop(after: Duration, expire: impl FnOnce() + Send + 'static) -> std::io::Result<()> {
     std::thread::Builder::new()
-        .name("kumochi-backstop".to_owned())
+        .name("shell-backstop".to_owned())
         .spawn(move || {
             std::thread::sleep(after);
             expire();
@@ -49,6 +50,18 @@ fn main() -> ExitCode {
         Ok(started) => started,
         Err(code) => return code,
     };
+    // NativeShell can keep running without the engine that holds the deadline, or wait on a
+    // message box, and a log write can block: a hidden shell must never keep the session's lock
+    // forever, so nothing comes between taking the lock and arming.
+    let armed = arm_backstop(launch.quit_after + BACKSTOP_GRACE, || {
+        // `run_app` ends every run the same way: `std::process::exit` off its UI thread.
+        std::process::exit(1)
+    });
+    if armed.is_err() {
+        drop(lock);
+        tracing::error!("can't start the deadline backstop");
+        return ExitCode::FAILURE;
+    }
     tracing::info!(
         build = kumochi_protocol::BUILD_ID,
         identity = constants::DATA_DIR,
@@ -57,45 +70,32 @@ fn main() -> ExitCode {
     );
     // NativeShell usually ends the process itself, so the lock is held until it does.
     let _lock = lock;
-    // NativeShell can keep running without the engine that holds the deadline, or wait on a
-    // message box; a hidden shell must never keep the session's lock forever.
-    let armed = arm_backstop(launch.quit_after + BACKSTOP_GRACE, || {
-        tracing::error!("the shell outlived its deadline; ending it");
-        std::process::exit(1);
-    });
-    if armed.is_err() {
-        tracing::error!("can't start the deadline backstop");
-        return ExitCode::FAILURE;
-    }
     platform::run(launch.quit_after)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::mpsc::{self, RecvTimeoutError};
+    use std::sync::mpsc;
+    use std::time::Instant;
 
     use super::*;
 
     #[test]
-    fn the_backstop_expires_after_its_delay() {
+    fn the_backstop_runs_its_action_once_its_delay_has_passed() {
         let (expired, heard) = mpsc::channel();
-        arm_backstop(Duration::from_millis(5), move || {
-            expired.send(()).expect("the test is listening");
+        let armed = Instant::now();
+        arm_backstop(Duration::from_millis(50), move || {
+            expired
+                .send(armed.elapsed())
+                .expect("the test is listening");
         })
         .expect("the backstop starts");
-        assert_eq!(heard.recv_timeout(Duration::from_secs(10)), Ok(()));
-    }
-
-    #[test]
-    fn the_backstop_waits_for_its_delay() {
-        let (expired, heard) = mpsc::channel();
-        arm_backstop(Duration::from_secs(10), move || {
-            expired.send(()).ok();
-        })
-        .expect("the backstop starts");
-        assert_eq!(
-            heard.recv_timeout(Duration::from_millis(100)),
-            Err(RecvTimeoutError::Timeout)
+        let waited = heard
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the action runs");
+        assert!(
+            waited >= Duration::from_millis(50),
+            "it ran after {waited:?}"
         );
     }
 

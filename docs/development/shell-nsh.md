@@ -37,8 +37,8 @@ On Windows, `main` goes in this order:
    log (a failure exits 1), logs bad flags once as `invalid launch flags` with the parser's fixed
    text (exit 1), and takes the lock. A lock another shell holds logs `another shell is running
    in this session` and exits 0.
-4. It logs `shell started` with the build, the identity and the edition.
-5. It arms the deadline backstop (below).
+4. It arms the deadline backstop (below), before anything else can block.
+5. It logs `shell started` with the build, the identity and the edition.
 6. `platform::run` runs the app.
 
 Off Windows, `platform::start` exits 69 (unsupported) at step 3, before anything is admitted,
@@ -74,12 +74,17 @@ own runtime inside.
 thread can't start, it only logs that and keeps a hidden window with no root and so no timer,
 and a window or UI-thread failure waits on a message box for a person. Either way a hidden
 process would keep the session's lock, and the GPUI shell of that edition couldn't start. So
-before the app runs, `main` starts its own thread that sleeps `--quit-after-ms` plus a
-15-second grace, then logs `the shell outlived its deadline; ending it` and exits 1. The grace
-is longer than what the pin can spend around the timer on a healthy run (up to 10 s waiting for
-a process it replaces, only when `NSH_RESTART_AFTER` is set, and 200 ms of quit hooks); it's
-unmeasured until the native run. If that thread can't start, the shell logs
-`can't start the deadline backstop` and exits 1 without running the app.
+right after taking the lock, before even its first log line (a log write can block), `main`
+starts its own thread that sleeps `--quit-after-ms` plus a 15-second grace and then exits 1. It
+writes nothing, so an exit of 1 with `shell started` as the run's last line is the sign it fired.
+
+The grace is a budget, not a bound: it's how long past its deadline the shell is allowed, chosen
+above the pin's 10 s wait for a process it replaces (only when `NSH_RESTART_AFTER` is set) and
+its 200 ms of quit hooks. Window creation, mounting and the engine's join have no time limit of
+their own, so a start that is slow but healthy can end with 1 instead of 0. The sleep is a
+minimum, and a suspended machine stretches it. It's unmeasured until the native run. If the
+thread can't start, the shell lets go of the lock, logs `can't start the deadline backstop`
+and exits 1 without running the app.
 
 NativeShell's `log` lines go nowhere: no logger is installed, and no NativeShell crate uses
 `tracing`, so none reach Kumochi's log. Their content isn't vetted for it.
