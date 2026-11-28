@@ -1,4 +1,4 @@
-//! Dormant policy for one live drawing assignment.
+//! Policy for one live drawing assignment.
 
 use std::time::Duration;
 

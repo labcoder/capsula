@@ -26,9 +26,10 @@ admission selects session authorization yet.
 
 ## Queued-required session mode
 
-Ordinary launch selects queued-required with Plain output and sends QueuedHello on both
-pipes. The brain still accepts Legacy: control Hello, Welcome, then data Hello, with their
-existing bytes. Both modes follow their data Hello with one drawing-font startup frame.
+The Windows connected launcher selects queued-required with Conducted output and sends
+QueuedHello on both pipes. The brain still accepts Legacy: control Hello, Welcome, then data
+Hello, with their existing bytes. Both modes follow their data Hello with one drawing-font
+startup frame.
 The queued data Hello echoes this Welcome's incarnation and issue epoch. The brain
 checks the executable, matching build and capability on both legs and the existing same-process
 pairing. It refuses a mixed mode or a data Hello from another session. In either mode, one
@@ -157,8 +158,8 @@ while both slots are occupied; neither quiet nor a different run's marker releas
 the predecessor. For a natural end, the exact data `RunEnd` and settled drawing binding
 release the run's narration for the next reply. That releases the audio binding, not an
 already installed frame or its outstanding paint receipt. Decision receipts remain on the
-control pipe. Link preparation takes the narration mode explicitly; the ordinary launcher
-prepares `Plain` on its queued-required session, so it never selects the narrated adapter.
+control pipe. Link preparation takes the narration mode explicitly; the Windows connected launcher
+prepares `Conducted` on its queued-required session, so it selects the narrated adapter.
 
 ## Voice-only hold messages
 
@@ -1087,8 +1088,8 @@ records only their operation and length.
 | Shell to brain | control | `SpeechRetired` (queued output) | `run`, logical `output`, `segment`, cumulative `retired`, `heard`, `final_segment` |
 | Shell to brain | control | `AudioOutput` | `rate`, `generation` |
 | Shell to brain | control | `QueuedAudioOutput` | `rate`, `generation`, narration (`Plain` or `Conducted`); selects retirement receipts before a run is admitted |
-| Shell to brain | control | `SpeechDecision` (dormant) | `run`, logical `output`, `segment`, Allow or Discard |
-| Brain to shell | control | `SpeechDecisionTaken` (dormant) | the same run, output and segment, after consumption or terminal |
+| Shell to brain | control | `SpeechDecision` | `run`, logical `output`, `segment`, Allow or Discard |
+| Brain to shell | control | `SpeechDecisionTaken` | the same run, output and segment, after consumption or terminal |
 | Shell to brain | control | `AudioOutputUnavailable` | `generation` |
 | Brain to shell | control | `SpeechRevoked` | `run` |
 

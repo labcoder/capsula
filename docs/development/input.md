@@ -291,7 +291,8 @@ Shell-core exposes the ownership facts an Esc press can capture: the audio pair 
 the latest submitted turn (even before the brain names it), and the drawing and
 selection owners. A run that already sent a terminal state can still have an audible
 tail; that tail is a local speaker stop, not permission to stop another brain run.
-The speech route uses these audio facts on the queued Plain session selected by ordinary launch.
+The speech route uses these audio facts on the queued Conducted session that the Windows connected
+launcher selects.
 
 An Esc captured by an admitted voice gesture consumes only that gesture's receipt and held
 words. It takes screen marks, then compares the receipt's run with the ordinary effective

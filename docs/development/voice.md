@@ -240,7 +240,7 @@ stateDiagram-v2
   the next callback resumes at the same device frame. Stop retains its existing cutoff and
   conservative heard cursor. It fences copying immediately and the callback's fade and physical
   quiet acknowledgement do not depend on presentation-ring space.
-- **Speech-start admission (dormant).** The producer holds the next queued Speech-start segment
+- **Speech-start admission.** The producer holds the next queued Speech-start segment
   until a keyed Allow or Discard joins it at the normal synthesis window. An early decision sticks
   to its announced segment; a duplicate cannot dispatch it again. Discard still owes the ordered
   final. A closed reply waiting only on eligibility invalidates its drain timer; resolving that
@@ -358,8 +358,8 @@ sequenceDiagram
   the dispatch even if unload already moved its TTS generation, and ends the reply's remaining
   narration with ordered empty finals. Earlier audio and the text reply continue.
   An empty final releases its own picture to authored timing without claiming it was heard.
-  This fences late output but does not interrupt a blocked native call. The ordinary launcher
-  prepares `Plain`, so conducted output stays off.
+  This fences late output but does not interrupt a blocked native call. The Windows connected
+  launcher prepares `Conducted`, so conducted output is on.
 - **Draining.** When the engine finishes, the reply closes. The run ends `done` only once its
   speech is final, so it can sit finished with its speech still playing; see
   [runs.md](runs.md#draining-a-spoken-run).

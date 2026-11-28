@@ -97,11 +97,11 @@ admitting another turn; a refused live report ends the pair. After an earlier re
 is refused, the original worker can observe its fenced callback for at most 500 ms without
 feeding audio or sending another report. That local proof doesn't release the device permit;
 the backend still owns disposal. Unknown tails still block replacement. An
-absolute startup deadline ends the same pair even while control traffic continues. Ordinary launch
-selects queued Plain, with no Legacy fallback. A Legacy session starts quiet and never opens a
-playback device; unexpected speech PCM is wiped, credited and dropped.
+absolute startup deadline ends the same pair even while control traffic continues. The Windows
+connected launcher selects queued Conducted, with no Legacy fallback. A Legacy session starts
+quiet and never opens a playback device; unexpected speech PCM is wiped, credited and dropped.
 
-## Dormant segment gate
+## Segment gate
 
 A hold blocks native staging and virtual pacing at one segment, not its predecessor.
 Releasing it does not catch up elapsed hold time. Discard keeps PCM ingress in sequence
@@ -113,9 +113,9 @@ unstaged line without touching the device; accepting the first source packet for
 staging commits the line, even if the callback hasn't taken it. The eight transport
 blocks hold about 160 ms of source, but staging is not a time bound: a committed
 line can wait seconds during a pause and play on resume unless its run is stopped
-or replaced. No production caller enables this gate yet.
+or replaced. Only a conducted pair's drawing conductor sets this gate.
 
-## Dormant drawing conductor
+## Drawing conductor
 
 A queued pair prepared as `Conducted` uses an exact source reservation at queued ingress.
 A matching presenter level can be replaced or disappear, but cannot erase ownership
@@ -130,7 +130,7 @@ opening an idle route. It does not shorten an already committed physical tail, a
 neither it nor virtual source proves Played. Quiet remains a separate result from
 the original route's tail. Plain and Legacy do not select this mode.
 
-The dormant drawing conductor decides only an assignment's audio gate and picture timing.
+The drawing conductor decides only an assignment's audio gate and picture timing.
 The presenter supplies readiness and fences, the worker supplies actual handoff and the
 current physical route's source span, the link reports worker absence, and the brain supplies
 synthesis finals. It doesn't infer submission from staged or virtually consumed samples.
@@ -139,7 +139,7 @@ whole line is allowed and the picture takes silent timing. On rebuild, an unshow
 step has 250 ms to receive a handoff from the new route before taking silent timing.
 A route rebuild mid-line ends speech-following for that shown step; it takes authored
 timing immediately. A shown or fenced step can't show again. Step-level Drop uses the
-staging commitment above. These defaults aren't measured. The dormant worker now uses
+staging commitment above. These defaults aren't measured. The worker uses
 one reducer and the session clock supplied by its caller. It reads the keyed view and
 applies the matching hold before feeding source, services hold and rebuild deadlines on
 its own wake, and publishes one keyed picture. An accepted first handoff on the current
@@ -157,8 +157,14 @@ Missing owner, backend startup failure and worker exit
 are reported to the pair's bridge, which supplies keyed Unavailable when there's no
 onset to preserve. An ordered Applied for the exact binding lets the bridge send
 Allow; only then can that assignment's PCM reach the worker. An unresolved assignment is
-not unassigned. A queued pair prepared as `Conducted` selects the adapter; the ordinary
-launcher prepares `Plain`.
+not unassigned. The worker narrates one step at a time: the bridge hands it the next step only
+after the previous one ended, was fenced or was revoked, and a revoked predecessor is fenced
+before its successor starts. The local command goes first and its wire decision follows, so a
+full worker mailbox defers the bridge to its next wake without publishing anything, and a run
+whose speaker input isn't installed yet waits for the install's wake. An Allow whose run the
+brain revokes, or whose exact `RunEnd` arrives, before it reaches the worker is dropped without
+a decision, and the pair stays up; a failed command or wire decision still ends it. A queued pair prepared as
+`Conducted` selects the adapter, and the Windows connected launcher prepares that pair.
 
 ## The output owner
 
