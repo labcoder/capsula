@@ -9,10 +9,10 @@ use kumochi_protocol::message::{ChoiceRead, ChoiceRev, EventId, RunId, ThreadId,
 use rusqlite::{Connection, OptionalExtension as _, Transaction, params};
 
 use super::choice::StoredChoice;
-use super::threads::kind_of;
+use super::threads::{kind_of, local_tag};
 use super::{Generation, StoreError, rounds, row_id, sql_id};
 use crate::config::tuning::ContextTuning;
-use crate::context::{Body, Item, Summary};
+use crate::context::{Body, ConnectionTag, Item, Summary};
 use crate::engines::CallId;
 
 /// A thread as a reference finds it.
@@ -22,6 +22,8 @@ pub(crate) struct Source {
     /// False while it's being deleted.
     pub(crate) live: bool,
     pub(crate) title: String,
+    /// A local task: its saved route is the local server, so no other route reads it.
+    pub(crate) local: bool,
 }
 
 impl fmt::Debug for Source {
@@ -30,6 +32,7 @@ impl fmt::Debug for Source {
             .field("kind", &self.kind)
             .field("live", &self.live)
             .field("title_bytes", &self.title.len())
+            .field("local", &self.local)
             .finish()
     }
 }
@@ -177,13 +180,15 @@ impl Snapshot<'_> {
         let found = self
             .0
             .query_row(
-                "SELECT kind, state = 'live', title FROM threads WHERE id = ?1",
+                "SELECT kind, state = 'live', title, connection IS 'local_chat' FROM threads
+                 WHERE id = ?1",
                 params![id],
                 |row| {
                     Ok(Source {
                         kind: kind_of(row.get_ref(0)?.as_str()?)?,
                         live: row.get(1)?,
                         title: row.get(2)?,
+                        local: row.get(3)?,
                     })
                 },
             )
@@ -585,6 +590,30 @@ impl Snapshot<'_> {
             )
             .optional()?;
         choice.ok_or(StoreError::NoThread)
+    }
+
+    /// Whether live task `thread` is bound to the local server `tag` names; false for an
+    /// unbound task and for the zero tag.
+    ///
+    /// # Errors
+    /// Fails when SQLite fails.
+    pub(crate) fn bound_to(
+        &self,
+        thread: ThreadId,
+        tag: ConnectionTag,
+    ) -> Result<bool, StoreError> {
+        let (Ok(id), Some(tag)) = (sql_id(thread.0, StoreError::NoThread), local_tag(tag)) else {
+            return Ok(false);
+        };
+        let bound = self
+            .0
+            .query_row(
+                "SELECT 1 FROM threads WHERE id = ?1 AND state = 'live' AND local_tag = ?2",
+                params![id, tag],
+                |_| Ok(()),
+            )
+            .optional()?;
+        Ok(bound.is_some())
     }
 
     /// The local date and time to the minute when `run` started, from the system's time zone, so

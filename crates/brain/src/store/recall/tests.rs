@@ -3,6 +3,7 @@ use crate::store::{RunEnd, Store};
 use crate::test_support::Scratch;
 
 mod diagnostics;
+mod local;
 mod read;
 mod search;
 mod tasks;

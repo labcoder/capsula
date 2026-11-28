@@ -858,6 +858,7 @@ fn a_new_turn_while_draining_revokes_the_old_speech_and_starts_at_once() {
                 text: "next".into(),
                 screen: None,
                 local_default: crate::config::DefaultIntent::Other,
+                local: None,
             }),
             Effect::Control(ControlToShell::RunState {
                 run: next,

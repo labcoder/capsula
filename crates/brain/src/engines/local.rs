@@ -18,21 +18,31 @@ use crate::connections::local::endpoint::LoopbackEndpoint;
 use crate::connections::local::request::{ChatBody, ChatMessage, Role as Wire};
 use crate::connections::local::{self, Failure, Sink};
 use crate::connections::model::budget::Budget;
+use crate::connections::model::fence::Fence;
 use crate::context::{InputItem, ModelRequest, Role};
 
-/// Answers a local task's runs on one endpoint and model, which never change.
+/// Answers a local task's runs on one endpoint and model, which never change, while the server's
+/// `fence` is open: replacing or removing the server revokes it.
+#[derive(Clone)]
 pub(crate) struct LocalEngine {
     endpoint: LoopbackEndpoint,
     model: ModelSlug,
     budget: Budget,
+    fence: Fence,
 }
 
 impl LocalEngine {
-    pub(crate) fn new(endpoint: LoopbackEndpoint, model: ModelSlug, budget: Budget) -> Self {
+    pub(crate) fn new(
+        endpoint: LoopbackEndpoint,
+        model: ModelSlug,
+        budget: Budget,
+        fence: Fence,
+    ) -> Self {
         Self {
             endpoint,
             model,
             budget,
+            fence,
         }
     }
 }
@@ -47,19 +57,10 @@ impl fmt::Debug for LocalEngine {
 
 impl Engine for LocalEngine {
     fn start(&self, request: RunRequest, events: mpsc::Sender<TurnEvent>, gate: SendGate) -> Round {
-        let (endpoint, model, budget) = (self.endpoint, self.model.clone(), self.budget.clone());
+        let engine = self.clone();
         Box::pin(async move {
             let mut pending = String::new();
-            let finish = round(
-                endpoint,
-                &model,
-                &budget,
-                &request.request,
-                &events,
-                gate,
-                &mut pending,
-            )
-            .await;
+            let finish = round(&engine, &request.request, &events, gate, &mut pending).await;
             deliver(
                 &events,
                 pending,
@@ -74,14 +75,13 @@ impl Engine for LocalEngine {
 /// The pinned request's body, then the ask inside the send, then the stream. A Rebuild was
 /// never written, so the coordinator builds it again.
 async fn round(
-    endpoint: LoopbackEndpoint,
-    model: &ModelSlug,
-    budget: &Budget,
+    engine: &LocalEngine,
     request: &ModelRequest,
     events: &mpsc::Sender<TurnEvent>,
     gate: SendGate,
     pending: &mut String,
 ) -> Finish {
+    let model = &engine.model;
     let failed = |failure| Finish::Failed(EngineFailure::Local(failure));
     let pinned = request.choice.as_ref().is_some_and(|choice| {
         choice.connection == ConnectionKind::LocalChat && choice.model == *model
@@ -103,7 +103,16 @@ async fn round(
         text: pending,
         events,
     };
-    match local::stream(endpoint, &body, ask, budget, out).await {
+    match local::stream(
+        engine.endpoint,
+        &engine.fence,
+        &body,
+        ask,
+        &engine.budget,
+        out,
+    )
+    .await
+    {
         Ok(()) => Finish::Completed,
         Err(Failure::Rebuild) => Finish::ReceiptOrdered,
         Err(failure) => failed(failure),
@@ -147,7 +156,7 @@ async fn deliver(
     let cut = matches!(
         finish,
         Finish::Failed(EngineFailure::Local(
-            Failure::Backpressure | Failure::Deadline
+            Failure::Backpressure | Failure::Deadline | Failure::Retired
         ))
     );
     let text = (!pending.is_empty() && !cut).then_some(TurnEvent::TextDelta(pending));

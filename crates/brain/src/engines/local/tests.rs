@@ -16,6 +16,7 @@ use super::{LocalEngine, deliver};
 use crate::connections::local::Failure;
 use crate::connections::local::endpoint::LoopbackEndpoint;
 use crate::connections::model::budget::Budget;
+use crate::connections::model::fence::Fence;
 use crate::context::{InputItem, Role, ToolSchema};
 use crate::coordinator::{Input, LeaseId};
 use crate::engines::{
@@ -120,6 +121,7 @@ fn engine(endpoint: LoopbackEndpoint) -> LocalEngine {
         endpoint,
         ModelSlug::new(MODEL).expect("slug"),
         Budget::default(),
+        Fence::default(),
     )
 }
 
@@ -299,11 +301,11 @@ async fn a_consumer_that_never_takes_gets_nothing_late() {
     assert_eq!(events.recv().await, None);
 }
 
-/// A read whose wait for room was cut, by its own cutoff or the round's deadline, already had
-/// its wait: only the failure follows.
+/// A read whose wait for room was cut, by its own cutoff, the round's deadline or its server's
+/// retirement, already had its wait: only the failure follows.
 #[tokio::test]
 async fn text_cut_by_its_own_wait_is_never_offered_again() {
-    for failure in [Failure::Backpressure, Failure::Deadline] {
+    for failure in [Failure::Backpressure, Failure::Deadline, Failure::Retired] {
         let (events_tx, mut events) = mpsc::channel(2);
         let cut = Finish::Failed(EngineFailure::Local(failure));
         timeout(BOUND, deliver(&events_tx, "cut".to_owned(), cut, QUIET))
@@ -437,4 +439,115 @@ fn no_local_failure_offers_an_action() {
             "{failure:?}"
         );
     }
+}
+
+/// A gate that revokes `fence` as the coordinator would on a replacement, then grants the ask
+/// anyway, as a grant already on its way would arrive.
+fn retiring(request: &RunRequest, fence: Fence) -> SendGate {
+    let key = request.key;
+    let asks = Asks::default();
+    let (inputs_tx, mut inputs) = mpsc::unbounded_channel();
+    let gate = SendGate::new(key, Arc::clone(&asks), inputs_tx.clone());
+    tokio::spawn(async move {
+        while let Some(input) = inputs.recv().await {
+            if matches!(input, Input::SendReady { .. }) {
+                fence.revoke();
+                let (_, answer) = asks.lock().expect("asks").pop().expect("an ask");
+                let lease = SendLease::new(LeaseId { key, send: 1 }, inputs_tx.clone());
+                answer.send(Answer::Grant(lease)).ok();
+            }
+        }
+    });
+    gate
+}
+
+fn fenced(endpoint: LoopbackEndpoint, fence: &Fence) -> LocalEngine {
+    LocalEngine::new(
+        endpoint,
+        ModelSlug::new(MODEL).expect("slug"),
+        Budget::default(),
+        fence.clone(),
+    )
+}
+
+/// A server replaced before its engine's round starts gets no connection, and the round ends
+/// retired.
+#[tokio::test]
+async fn a_retired_server_is_never_connected_to() {
+    let (listener, endpoint) = listener().await;
+    let fence = Fence::default();
+    fence.revoke();
+    let request = request(vec![message(Role::User, "Hi")]);
+    let gate = granting(&request);
+    let events = played(&fenced(endpoint, &fence), request, gate, Duration::ZERO).await;
+    assert_eq!(events, [failed(Failure::Retired)]);
+    assert!(
+        timeout(QUIET, listener.accept()).await.is_err(),
+        "no connection"
+    );
+}
+
+/// A grant that arrives after its server was replaced never connects. The narrower race, a
+/// revocation between the connect and the write, rests on the shared fence's own tests.
+#[tokio::test]
+async fn a_grant_arriving_after_retirement_never_connects() {
+    let (listener, endpoint) = listener().await;
+    let fence = Fence::default();
+    let request = request(vec![message(Role::User, "Hi")]);
+    let gate = retiring(&request, fence.clone());
+    let events = played(&fenced(endpoint, &fence), request, gate, Duration::ZERO).await;
+    assert_eq!(events, [failed(Failure::Retired)]);
+    assert!(
+        timeout(QUIET, listener.accept()).await.is_err(),
+        "no connection"
+    );
+}
+
+/// A server replaced mid-stream has its connection closed, nothing more is read or delivered,
+/// and nothing is sent anywhere again.
+#[tokio::test]
+async fn a_server_retired_mid_stream_is_closed_and_heard_no_more() {
+    let (listener, endpoint) = listener().await;
+    let (accepted_tx, accepted) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept");
+        read_request(&mut socket).await;
+        let first = b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n\n";
+        socket
+            .write_all(&[EVENTS.as_bytes(), first].concat())
+            .await
+            .expect("write");
+        let mut rest = [0; 64];
+        let closed = socket.read(&mut rest).await.unwrap_or(0);
+        accepted_tx.send(listener).ok();
+        closed
+    });
+    let fence = Fence::default();
+    let request = request(vec![message(Role::User, "Hi")]);
+    let gate = granting(&request);
+    let (events_tx, mut events) = mpsc::channel(1);
+    let round = tokio::spawn(fenced(endpoint, &fence).start(request, events_tx, gate));
+    assert_eq!(
+        timeout(BOUND, events.recv()).await.expect("text"),
+        Some(TurnEvent::TextDelta("Hi".to_owned()))
+    );
+    fence.revoke();
+    let mut rest = Vec::new();
+    while let Some(event) = timeout(BOUND, events.recv()).await.expect("an event") {
+        rest.push(event);
+    }
+    assert_eq!(rest, [failed(Failure::Retired)]);
+    timeout(BOUND, round).await.expect("ended").expect("round");
+    assert_eq!(
+        timeout(BOUND, server)
+            .await
+            .expect("closed")
+            .expect("server"),
+        0
+    );
+    let listener = accepted.await.expect("the listener");
+    assert!(
+        timeout(QUIET, listener.accept()).await.is_err(),
+        "no new request"
+    );
 }

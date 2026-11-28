@@ -1443,6 +1443,7 @@ impl Coordinator {
         )
     }
 
+    #[expect(clippy::too_many_lines, reason = "one run's whole starting state")]
     fn start_turn(
         &mut self,
         origin: kumochi_protocol::message::RunOrigin,
@@ -1465,14 +1466,6 @@ impl Coordinator {
             self.last_thread = ThreadId(self.last_thread.0 + 1);
             (self.last_thread, Some(title(&text).into()))
         };
-        let begin = StoreOp::BeginTurn {
-            thread,
-            title,
-            run,
-            text,
-            screen: screen.as_ref().map(crate::context::Screen::held),
-            local_default: self.local_default,
-        };
         if let Some(hold) = &mut hold {
             hold.defaults.origin = admission::origin(thread, self.main_thread);
         }
@@ -1487,6 +1480,15 @@ impl Coordinator {
         let arrived = hold
             .as_ref()
             .map_or_else(|| self.arrived_now(), |hold| hold.arrived);
+        let begin = StoreOp::BeginTurn {
+            thread,
+            title,
+            run,
+            text,
+            screen: screen.as_ref().map(crate::context::Screen::held),
+            local_default: self.local_default,
+            local: arrived.get(ConnectionKind::LocalChat).map(|tag| tag.0),
+        };
         let finding = (hold.is_none() && *self.claude_code() == Availability::Finding)
             .then_some(availability::Finding::Due);
         self.current = Some(Run {

@@ -192,6 +192,10 @@ pub(super) fn read(
                             })
                             .map_err(StoreError::from);
                     }
+                    // A task saved local never reaches a cloud read, whatever its snapshot says.
+                    if read.source(thread)?.is_some_and(|source| source.local) {
+                        return Ok(Err(BuildError::Origin));
+                    }
                     let answers_chatgpt = snapshot
                         .choice
                         .as_ref()
@@ -286,7 +290,10 @@ pub(super) fn read_compact(
                     let read = Snapshot::begin(conn)?.controlled(scope.clone());
                     #[cfg(test)]
                     hold();
-                    if is_local(&snapshot) {
+                    // A local task is never compacted, whatever choice the run was pinned to.
+                    if is_local(&snapshot)
+                        || read.source(thread)?.is_some_and(|source| source.local)
+                    {
                         return Ok(Err(BuildError::LocalContent));
                     }
                     let found = rewrite(&read, &snapshot, thread, room);

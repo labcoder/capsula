@@ -2,14 +2,15 @@
 //! model choice. Neither change moves a thread in the list.
 
 use kumochi_protocol::message::{
-    ChoiceRead, ChoiceRev, ConnectionKind, ModelChoice, SavedChoice, ThreadId, ThreadKind,
+    ChoiceRead, ChoiceRev, ConnectionKind, ModelChoice, RunId, SavedChoice, ThreadId, ThreadKind,
     ThreadTitle,
 };
 use rusqlite::{OptionalExtension as _, TransactionBehavior, params};
 
 use super::choice::{StoredChoice, connection_text, effort_text};
-use super::{Generation, Store, StoreError, now_ms, row_id, sql_id};
+use super::{Generation, Store, StoreError, insert_turn, now_ms, row_id, sql_id};
 use crate::connections::facts;
+use crate::context::ConnectionTag;
 
 /// Who set a task's title. A first-words title is `BeginTurn`'s, and only it can be replaced by
 /// a model's.
@@ -160,6 +161,91 @@ impl Store {
             .flatten();
         Ok(saved.as_deref().and_then(facts::stored))
     }
+
+    /// Stores a local task's turn bound to the local server `tag` names, in one transaction:
+    /// a task with no binding takes `tag` only while it has no runs or events, and a bound one
+    /// only under the same tag. Answers false, with nothing written, for anything else: a thread
+    /// that isn't a live task with a valid saved local choice, an unbound task with history, or
+    /// another server's tag.
+    ///
+    /// # Errors
+    /// As [`Store::begin_turn`].
+    pub(crate) fn begin_local_turn(
+        &mut self,
+        thread: ThreadId,
+        tag: ConnectionTag,
+        run: RunId,
+        text: &str,
+    ) -> Result<bool, StoreError> {
+        let (thread, run) = (
+            sql_id(thread.0, StoreError::NoThread)?,
+            sql_id(run.0, StoreError::NoRun)?,
+        );
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let row: Option<LocalRow> = tx
+            .query_row(
+                "SELECT model, effort, connection, local_tag,
+                 EXISTS(SELECT 1 FROM runs WHERE thread = ?1)
+                 OR EXISTS(SELECT 1 FROM events WHERE thread = ?1)
+                 FROM threads WHERE id = ?1 AND state = 'live' AND kind = 'thread'",
+                params![thread],
+                |row| {
+                    Ok(LocalRow {
+                        choice: StoredChoice::decode(
+                            row.get_ref(0)?.as_str_or_null()?,
+                            row.get_ref(1)?.as_str_or_null()?,
+                            row.get_ref(2)?.as_str_or_null()?,
+                        ),
+                        bound: row.get(3)?,
+                        used: row.get(4)?,
+                    })
+                },
+            )
+            .optional()?;
+        let Some(row) = row.filter(|row| {
+            matches!(
+                row.choice,
+                StoredChoice::Valid {
+                    connection: ConnectionKind::LocalChat,
+                    effort: Some(_),
+                    ..
+                }
+            )
+        }) else {
+            return Ok(false);
+        };
+        let wanted = local_tag(tag);
+        match (row.bound, wanted) {
+            (_, None) => return Ok(false),
+            (Some(bound), Some(wanted)) if bound != wanted => return Ok(false),
+            (Some(_), Some(_)) => {}
+            (None, Some(_)) if row.used => return Ok(false),
+            (None, Some(wanted)) => {
+                tx.execute(
+                    "UPDATE threads SET local_tag = ?2 WHERE id = ?1",
+                    params![thread, wanted],
+                )?;
+            }
+        }
+        insert_turn(&tx, thread, run, text, None, now_ms())?;
+        tx.commit()?;
+        Ok(true)
+    }
+}
+
+/// What a local turn's write reads of its thread first.
+struct LocalRow {
+    choice: StoredChoice,
+    bound: Option<Vec<u8>>,
+    used: bool,
+}
+
+/// A local server's tag as its thread stores it: eight bytes, big-endian; `None` for the zero
+/// tag, which names no server.
+pub(super) fn local_tag(tag: ConnectionTag) -> Option<Vec<u8>> {
+    (tag.0 != 0).then(|| tag.0.to_be_bytes().to_vec())
 }
 
 /// A stored `kind`. One no build wrote fails the read rather than being guessed at.

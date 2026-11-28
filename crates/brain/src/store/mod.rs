@@ -29,6 +29,8 @@ mod held_tests;
 mod history_failure;
 #[cfg(test)]
 mod issue_scope_tests;
+#[cfg(test)]
+mod local_tests;
 mod pages;
 mod purge;
 #[cfg(test)]
@@ -549,27 +551,7 @@ impl Store {
                 return Err(StoreError::StaleId);
             }
         }
-        if !touch(&tx, thread, now)? {
-            return Err(StoreError::NoThread);
-        }
-        let inserted = tx.execute(
-            "INSERT INTO runs (id, thread, state, started_ms, screen)
-             SELECT ?1, ?2, 'active', ?3, ?4
-             WHERE ?1 > coalesce((SELECT seq FROM sqlite_sequence WHERE name = 'runs'), 0)",
-            params![run, thread, now, screen.map(held::begun)],
-        )?;
-        if inserted == 0 {
-            return Err(StoreError::StaleId);
-        }
-        insert_event(
-            &tx,
-            thread,
-            Some(run),
-            EventKind::User,
-            Some(text),
-            None,
-            now,
-        )?;
+        insert_turn(&tx, thread, run, text, screen, now)?;
         tx.commit()?;
         Ok(())
     }
@@ -916,6 +898,38 @@ fn touch(conn: &Connection, thread: i64, now: i64) -> Result<bool, StoreError> {
         "UPDATE threads SET updated_ms = ?2 WHERE id = ?1 AND state = 'live'",
         params![thread, now],
     )? == 1)
+}
+
+/// A turn's run, with what a hold carried into it, and its user text, in a live thread.
+fn insert_turn(
+    conn: &Connection,
+    thread: i64,
+    run: i64,
+    text: &str,
+    screen: Option<HeldScreen>,
+    now: i64,
+) -> Result<(), StoreError> {
+    if !touch(conn, thread, now)? {
+        return Err(StoreError::NoThread);
+    }
+    let inserted = conn.execute(
+        "INSERT INTO runs (id, thread, state, started_ms, screen)
+         SELECT ?1, ?2, 'active', ?3, ?4
+         WHERE ?1 > coalesce((SELECT seq FROM sqlite_sequence WHERE name = 'runs'), 0)",
+        params![run, thread, now, screen.map(held::begun)],
+    )?;
+    if inserted == 0 {
+        return Err(StoreError::StaleId);
+    }
+    insert_event(
+        conn,
+        thread,
+        Some(run),
+        EventKind::User,
+        Some(text),
+        None,
+        now,
+    )
 }
 
 fn insert_event(

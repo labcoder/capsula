@@ -5,8 +5,9 @@ use rusqlite::Connection;
 use super::StoreError;
 
 /// Each entry moves the schema up one version; append, never edit.
-pub(super) const MIGRATIONS: &[&str] =
-    &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14];
+pub(super) const MIGRATIONS: &[&str] = &[
+    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15,
+];
 const ORDINARY_VERSION: usize = MIGRATIONS.len();
 /// The newest version a build from before the profile's writer lock knows.
 const PRE_LOCK_NEWEST: usize = 12;
@@ -222,6 +223,14 @@ const V13: &str = "";
 const V14: &str = "
 ALTER TABLE threads ADD COLUMN model_choice_rev INTEGER NOT NULL DEFAULT 0
     CHECK (model_choice_rev >= 0);
+";
+
+/// A local task is bound to the local server its first stored turn arrived under, by that
+/// server's eight-byte tag, so its history never reaches another server. Older rows have none,
+/// and builds that know V14 refuse this file rather than store a local turn unbound.
+const V15: &str = "
+ALTER TABLE threads ADD COLUMN local_tag BLOB
+    CHECK (local_tag IS NULL OR (length(local_tag) = 8 AND local_tag != zeroblob(8)));
 ";
 
 /// Brings the schema up to date.
