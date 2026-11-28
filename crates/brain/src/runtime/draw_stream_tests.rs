@@ -1339,6 +1339,119 @@ async fn a_conducted_registration_promises_the_step_and_times_a_later_pump() {
 #[tokio::test]
 #[expect(
     clippy::too_many_lines,
+    reason = "a real run makes the scene, reconnects and draws on it again"
+)]
+async fn a_turn_on_a_recovered_scene_queues_its_snapshot_before_the_promise() {
+    use crate::voice::pump::Pump;
+    use crate::voice::tts::{Engine, TtsError, TtsHandle};
+
+    struct Silence;
+    impl Engine for Silence {
+        type Stream = std::iter::Empty<Result<Vec<f32>, TtsError>>;
+        fn stream(&self, _text: &str) -> Result<Self::Stream, TtsError> {
+            Ok(std::iter::empty())
+        }
+    }
+
+    let scratch = Scratch::new("recovered-scene-promise");
+    let mut brain = brain(&scratch);
+    brain.offline(Input::SpokenReplies { loaded: true });
+    let (out, mut controls) = mpsc::channel(64);
+    let ready = Notify::new();
+    let mut tap = Tap::from_env();
+    let queue = RefCell::new(DataQueue::new(window()));
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    link.recovery = brain.describe(&mut link).expect("initial membership");
+    let key = start(&mut brain, &mut link).await;
+    let thread = loop {
+        let bytes = controls.try_recv().expect("the first run is named");
+        if let Some(ControlToShell::RunState { run, thread, .. }) =
+            frame::read(&mut bytes.as_slice(), Pipe::Control).expect("control frame")
+            && run == key.run
+        {
+            break thread;
+        }
+    };
+    submit_unspoken_step(&mut brain, &mut link, key);
+    let scene = step_landed(&mut brain, &mut link).await;
+    brain.offline(Input::ShellLost);
+    settled(&mut brain, &mut link).await;
+
+    let queue = RefCell::new(DataQueue::new(window()));
+    brain.coordinator.begin_session();
+    let registration = std::cell::Cell::new(super::Registration::Awaiting);
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    link.registration = Some(&registration);
+    link.recovery = brain.describe(&mut link).expect("reconnect membership");
+    let register = kumochi_protocol::message::ControlToBrain::QueuedAudioOutput(
+        24_000,
+        OutputGeneration(17),
+        Narration::Conducted,
+    );
+    assert!(matches!(
+        brain.control_frame(register, 0, &mut link, &mut None),
+        Ok(None)
+    ));
+    let (reports, _) = crate::voice::Reports::new();
+    let tts = TtsHandle::spawn_with(
+        tokio::runtime::Handle::current(),
+        reports,
+        |_: &std::path::Path| Ok(Silence),
+    )
+    .expect("synthetic owner");
+    tts.load("models".into(), 1);
+    brain.pump = Some(Pump::new(tts));
+    let key = start_on(&mut brain, &mut link, Some(thread)).await.key;
+    apply(
+        &mut brain,
+        &mut link,
+        Input::Engine {
+            key,
+            event: TurnEvent::ToolCallStarted {
+                call: CallId::new("provider-draw").expect("call id"),
+                name: ToolName::Draw,
+            },
+        },
+    );
+    let begin = FIRST.split_once(",{\"step\"").expect("first record").0;
+    let record = json!({"step":{
+        "id": "s2", "say": "Narrate this.",
+        "put": [{"shape":{"id":"b","kind":"rect","box":[20,0,10,10]}}]
+    }});
+    apply(
+        &mut brain,
+        &mut link,
+        Input::Engine {
+            key,
+            event: delta(&format!("{begin},{record}")),
+        },
+    );
+    assert_eq!(step_landed(&mut brain, &mut link).await, scene);
+    while Brain::feeds(&link) {
+        brain.queue_recovery(&mut link).expect("snapshot");
+    }
+    let order: Vec<_> = all_frames(&queue)
+        .into_iter()
+        .filter_map(|frame| match frame {
+            DataToShell::SceneSnapshotV1 { chunk } if chunk.scene == scene => {
+                Some(("snapshot", u32::from(chunk.ordinal), chunk.last))
+            }
+            DataToShell::SceneStepCommit {
+                scene: owner,
+                index,
+                speech,
+                ..
+            } if owner == scene => Some(("commit", index, speech.is_some())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(order, [("snapshot", 0, true), ("commit", 1, true)]);
+    brain.close().await;
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
     reason = "the same real replacement runs at each data-writer boundary"
 )]
 async fn same_run_replacement_keeps_the_promised_delivery_boundary() {

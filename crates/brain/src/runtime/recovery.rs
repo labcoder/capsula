@@ -124,6 +124,41 @@ impl Recovery {
         !self.scenes.is_empty() || !self.drawings.is_empty()
     }
 
+    /// The scene a live frame depends on, while its snapshot is still to go out.
+    pub(super) fn owed(&self, message: &DataToShell) -> Option<SceneId> {
+        let scene = match message {
+            DataToShell::SceneStepCommit { scene, .. }
+            | DataToShell::SceneCutApplied { scene, .. }
+            | DataToShell::SceneEnd { scene, .. } => *scene,
+            DataToShell::SegmentQueued {
+                step: Some(step), ..
+            } => step.scene,
+            _ => return None,
+        };
+        self.owes(scene).then_some(scene)
+    }
+
+    pub(super) fn owes(&self, scene: SceneId) -> bool {
+        self.drawings.iter().any(|chunk| chunk.scene == scene)
+            || self.scenes.iter().any(|(owed, _, _)| *owed == scene)
+    }
+
+    /// Puts `scene`'s remaining chunks first, each scene keeping its own order.
+    pub(super) fn prefer(&mut self, scene: SceneId) {
+        if self
+            .drawings
+            .front()
+            .is_some_and(|chunk| chunk.scene != scene)
+        {
+            let (mut first, rest): (VecDeque<_>, VecDeque<_>) = self
+                .drawings
+                .drain(..)
+                .partition(|chunk| chunk.scene == scene);
+            first.extend(rest);
+            self.drawings = first;
+        }
+    }
+
     /// The next chunk: whole steps up to the target, never empty.
     pub(super) fn next_chunk(&mut self) -> Option<DataToShell> {
         if let Some(chunk) = self.drawings.pop_front() {
