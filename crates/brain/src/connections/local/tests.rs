@@ -430,3 +430,31 @@ async fn stopping_a_round_closes_its_connection_after_its_request_was_written() 
     assert!(join(server).await, "the server sees the close");
     assert!(wrote.load(Ordering::SeqCst));
 }
+
+/// A read whose text is parsed only after the round's deadline ends the round by that deadline.
+/// Its one event hands out text and also fails the stream, so however the socket splits it, only
+/// the check after the feed can turn that failure into `Deadline`.
+#[tokio::test]
+async fn text_parsed_past_the_deadline_ends_the_round_by_it() {
+    let (listener, endpoint) = listener().await;
+    let stream_bytes =
+        b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":\"length\"}]}\n\n";
+    let server = serve(listener, events(stream_bytes));
+    let deadline = BOUND / 4;
+    let mut text = String::new();
+    let ended = stream_by(
+        endpoint,
+        &body(),
+        async { Some(()) },
+        &Budget::default(),
+        |delta: &str| {
+            // The round's deadline was set before this call, so it has passed once this returns.
+            std::thread::sleep(deadline);
+            text.push_str(delta);
+        },
+        deadline,
+    )
+    .await;
+    assert_eq!((text.as_str(), ended), ("Hi", Err(Failure::Deadline)));
+    join(server).await;
+}

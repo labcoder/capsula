@@ -57,7 +57,7 @@ fn assemble(
     let instructions = instructions(run);
     let mut total = fixed_bytes(&instructions, &[]);
     let mut kept: Vec<Vec<InputItem>> = Vec::new();
-    for segment in runs(items, current)?.iter().rev() {
+    for segment in runs(snapshot, items, current)?.iter().rev() {
         let mut input: Vec<InputItem> = Vec::new();
         for item in segment {
             match &item.body {

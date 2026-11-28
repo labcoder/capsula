@@ -143,6 +143,10 @@ pub(crate) struct ReadScope {
 }
 
 impl ReadScope {
+    pub(crate) fn check(&self) -> Result<(), Error> {
+        self.control.check()
+    }
+
     pub(crate) fn query<T>(
         &self,
         conn: &Connection,
