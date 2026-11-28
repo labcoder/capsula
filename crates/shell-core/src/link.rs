@@ -2842,8 +2842,9 @@ impl<R: Read> Read for Counted<R> {
     }
 }
 
-/// The scene frames whose disposal is deferred, so they arrive as [`LinkEvent::SceneData`], and
-/// what each names for a shell that draws nothing; `None` for every other frame.
+/// What a data frame names for a shell that draws nothing. It must name exactly the kinds
+/// `read_data` tags as [`LinkEvent::SceneData`], and `None` for every other frame; a test
+/// runs the real reader to hold the two together.
 #[must_use]
 pub fn scene_naming(message: &DataToShell) -> Option<Naming<'_>> {
     Some(match message {
@@ -2903,7 +2904,16 @@ fn read_data(
                     }
                     message => message,
                 };
-                let event = if scene_naming(&message).is_some() {
+                let event = if matches!(
+                    &message,
+                    DataToShell::SceneSnapshotV1 { .. }
+                        | DataToShell::SceneBegin { .. }
+                        | DataToShell::SceneStepCommit { .. }
+                        | DataToShell::SceneCutApplied { .. }
+                        | DataToShell::SceneEnd { .. }
+                        | DataToShell::ScenesRemoved { .. }
+                        | DataToShell::ScenesReplaced { .. }
+                ) {
                     LinkEvent::SceneData {
                         generation,
                         frame: Deferred::new(message, reader.bytes),

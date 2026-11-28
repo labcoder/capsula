@@ -77,7 +77,7 @@ use admit::Lane;
 pub use paint::{Frames, Sample, SceneCache, Stage};
 pub use prepare::{AdmitJob, Completion, PrepareJob, RecoveryJob};
 use recovery::Phase;
-pub use refuse::{Naming, Refuser};
+pub use refuse::{Disposal, Naming, Refuser};
 use scene::{Cut, Out, Ready, Running, Scene, Ticket};
 use screen::{left, on_screen};
 use snapshot::Assembler;

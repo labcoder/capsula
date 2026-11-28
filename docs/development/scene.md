@@ -2208,27 +2208,31 @@ that still names a locally cleared scene causes its idempotent clear to be sent 
 ### A shell that can't draw
 
 A shell with no drawing surface still receives scene traffic, because an empty text profile
-doesn't stop the brain drawing. It answers it with `presenter::Refuser` instead of a
-`Presenter`, so every shell disposes of scenes the same way. The link's `scene_naming` is
-the same test that tags `SceneData`, and says what a frame names:
+doesn't stop the brain drawing. `presenter::Refuser` is the contract such a shell follows in
+place of a `Presenter`, so every shell disposes of scenes the same way; nothing calls it
+yet. The caller passes every delivered `Data` and `SceneData` frame once. The link's
+`scene_naming` names exactly the kinds the data reader tags as `SceneData`, and the caller
+uses `Naming::Other` when it returns `None`:
 
-| Frame | Naming | Refuser answers |
+| Frame | `scene_naming` | Refuser returns |
 |---|---|---|
-| `SceneBegin`, `SceneStepCommit` | draws | credit, then `SceneFailed` the first time for that scene |
-| `SceneSnapshotV1` chunk | retained | credit only |
-| zero-activated `SceneCutApplied`, `ScenesRemoved`, `ScenesReplaced` victims | retires | credit; the scenes are forgotten |
-| `SceneEnd`, a nonzero cut, any other data frame (legacy `SceneSnapshot`, `StepCommit`) | other | credit only |
+| `SceneBegin`, `SceneStepCommit` | `Draws` | the credit, and the scene to refuse the first time |
+| `SceneSnapshotV1` chunk | `Retained` | the credit |
+| zero-activated `SceneCutApplied`, `ScenesRemoved`, `ScenesReplaced` victims | `Retires` | the credit; the scenes are forgotten |
+| `SceneEnd`, a nonzero cut | `Other` | the credit |
+| any other data frame, legacy `SceneSnapshot` and `StepCommit` included | `None`, passed as `Other` | the credit |
 
-Each frame of the open connection is credited exactly once, so the brain's data window never
-stalls; a stale generation or a closed connection gets nothing. `ScenesV1` and legacy
-`Scenes` are control lists: they owe no credit and are ignored, so the user's stored
-drawings survive the connect. `SceneFailed` ends the brain's whole scene, so a call that
-draws onto a retained scene clears it; only Dev and Gate data can see that, because
-`kumochi-nsh` refuses the release identity. Refusals are remembered until retirement, at most
-64 (the presenter's tombstone count); a late repeat for a forgotten scene is inert, since the
-brain ignores `SceneFailed` for a scene it no longer holds. `SceneFailed` takes no outbox
-lock on either audio mode, so a UI thread can send it. Route B's real presenter replaces the
-refuser.
+For the open connection each frame's wire bytes come back once, for the caller to grant; a
+stale generation or a closed connection gets nothing. `ScenesV1` and legacy `Scenes` are
+control lists: they owe nothing and never reach the refuser, so the user's stored drawings
+survive the connect. `SceneFailed` ends the brain's whole scene, so a call that draws onto a
+retained scene clears it; only Dev and Gate data can see that, because `kumochi-nsh` refuses
+the release identity. Refusals are remembered until retirement, at most 64 (the presenter's
+tombstone count); a late repeat for a forgotten scene is inert, since the brain ignores
+`SceneFailed` for a scene it no longer holds. `SceneFailed` takes no outbox lock on either
+audio mode, so a UI thread can send it. `true` from `send_control` means the mailbox took the
+refusal, not that it was delivered: a pipe that ends first can still drop it, and the
+connection is ending then anyway. Route B's real presenter replaces the refuser.
 
 ### Screen scenes in the shell
 

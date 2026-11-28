@@ -1,14 +1,14 @@
-//! Scene traffic for a shell that draws nothing: credit every frame, refuse what a call draws.
+//! The contract for scene traffic in a shell without a drawing surface: return every frame's
+//! credit, and refuse a scene a call draws on.
 
 use std::collections::VecDeque;
 
-use kumochi_protocol::message::{ControlToBrain, SceneId};
+use kumochi_protocol::message::SceneId;
 
-use super::{CLEARED_KEPT, Effect};
+use super::CLEARED_KEPT;
 
 /// What one delivered data frame means to a shell that draws nothing. The link's
-/// [`scene_naming`](crate::link::scene_naming) builds it from the borrowed frame, beside the
-/// test that tags scene frames, so the two can't disagree about a kind.
+/// [`scene_naming`](crate::link::scene_naming) builds it from the borrowed frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Naming<'a> {
     /// A call draws on this scene: `SceneBegin`, `SceneStepCommit`.
@@ -18,15 +18,30 @@ pub enum Naming<'a> {
     /// These scenes are gone: a zero-activated cut, `ScenesRemoved`, the victims of
     /// `ScenesReplaced`.
     Retires(&'a [SceneId]),
-    /// `SceneEnd`, a nonzero cut, and every frame that isn't scene traffic: credit only.
+    /// `SceneEnd`, a nonzero cut, and every frame `scene_naming` doesn't name: credit only.
     Other,
 }
 
-/// Answers scene traffic for a shell with no drawing surface, so the brain is never stalled by
-/// it: every data frame the open connection delivers is credited back exactly once, or the data
-/// writer stops after one window, and a scene a call draws on is refused with `SceneFailed` the
-/// first time, or that call waits on a scene nobody shows. Plain state with no clock and no I/O;
-/// the caller runs the returned effects in order.
+/// What the caller does with one frame, in order: grant `credit` on the frame's connection, then
+/// queue `SceneFailed` for `refuse`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use = "the brain's data writer waits for this credit"]
+pub struct Disposal {
+    /// The frame's wire bytes.
+    pub credit: u32,
+    /// A scene a call draws on, refused for the first time.
+    pub refuse: Option<SceneId>,
+}
+
+/// The contract for a shell with no drawing surface: how it answers scene traffic so the brain
+/// isn't stalled by it. Nothing calls it yet. The caller passes every delivered `Data` and
+/// `SceneData` frame once, with [`Naming::Other`] when `scene_naming` returns `None`; control
+/// lists such as `ScenesV1` and legacy `Scenes` owe nothing and never reach it. For the open
+/// connection each frame's credit comes back for the caller to grant, or the data writer stops
+/// after one window, and a scene a call draws on is refused the first time, or that call waits
+/// on a scene nobody shows. Plain state with no clock, no I/O and no allocation per frame.
+/// `true` from `LinkHandle::send_control` means the mailbox took a refusal, not that it was
+/// delivered: a pipe that ends first can still drop it, and the connection is ending then anyway.
 ///
 /// The brain's `SceneFailed` ends the whole scene, so a call that draws onto a retained scene
 /// loses that stored drawing with it. That is acceptable only because `kumochi-nsh` refuses the
@@ -44,10 +59,12 @@ pub struct Refuser {
 }
 
 impl Refuser {
-    /// A new connection opened; the last connection's refusals are forgotten.
+    /// A new connection opened; the last connection's refusals are forgotten, and room for every
+    /// refusal is reserved here rather than per frame.
     pub fn connected(&mut self, generation: u64) {
         self.generation = Some(generation);
         self.refused.clear();
+        self.refused.reserve(CLEARED_KEPT);
     }
 
     /// The connection ended; nothing more is credited or refused until the next one.
@@ -56,26 +73,29 @@ impl Refuser {
         self.refused.clear();
     }
 
-    /// One delivered `Data` or `SceneData` frame of `bytes` on the wire: exactly one
-    /// `Credit(bytes)` for the open generation, then `SceneFailed` the first time a call draws on
-    /// a scene. A stale generation, or no connection, gets nothing.
-    pub fn data(&mut self, generation: u64, naming: Naming<'_>, bytes: u32) -> Vec<Effect> {
+    /// One delivered frame of `bytes` on the wire: for the open generation, its credit and the
+    /// scene to refuse the first time a call draws on it. `None` for a stale generation or no
+    /// connection.
+    pub fn data(&mut self, generation: u64, naming: Naming<'_>, bytes: u32) -> Option<Disposal> {
         if self.generation != Some(generation) {
-            return Vec::new();
+            return None;
         }
-        let mut effects = vec![Effect::Credit(bytes)];
+        let mut refuse = None;
         match naming {
             Naming::Draws(scene) if !self.refused.contains(&scene) => {
                 if self.refused.len() == CLEARED_KEPT {
                     self.refused.pop_front();
                 }
                 self.refused.push_back(scene);
-                effects.push(Effect::Control(ControlToBrain::SceneFailed { scene }));
+                refuse = Some(scene);
             }
             Naming::Retires(scenes) => self.refused.retain(|scene| !scenes.contains(scene)),
             Naming::Draws(_) | Naming::Retained(_) | Naming::Other => {}
         }
-        effects
+        Some(Disposal {
+            credit: bytes,
+            refuse,
+        })
     }
 }
 
