@@ -105,7 +105,7 @@ use frame_rate::FrameLoop;
 use geometry::{Layout, PanelVisibility, Position};
 use kumo::Mood;
 use kumo_view::KumoView;
-pub(crate) use launch::{Launch, LaunchError};
+pub(crate) use launch::Launch;
 use line::{Dock, Line, LineFrame, Placement};
 pub(crate) use observer::Observer;
 use observer::{Drawn, Surface};

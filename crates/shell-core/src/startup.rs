@@ -1,5 +1,6 @@
-//! How a shell starts before its frontend runs, shared by every shell: the lock is admitted before
-//! the log opens, bad launch flags are logged once, then the lock is taken.
+//! How a shell starts before its frontend runs, shared by every shell. Off macOS, [`start`] admits
+//! the lock before the log opens, logs bad launch flags once, then takes the lock; macOS composes
+//! [`acquire`] and [`logged_flags`] in its own order, lock first.
 
 use std::fmt::Display;
 use std::process::ExitCode;
@@ -34,13 +35,25 @@ pub fn start<F, E: Display>(
     flags: Result<F, E>,
     init_logging: impl FnOnce() -> Result<(), LoggingError>,
 ) -> Result<(F, InstanceLock), Refused> {
-    // The lock's folder and name are admitted before the log opens, so a refusal writes nothing.
+    start_with(admit, flags, init_logging, acquire)
+}
+
+/// [`start`] with its acquisition step, so tests can see whether a refusal reaches the lock.
+fn start_with<F, E: Display, L>(
+    admit: impl FnOnce() -> Result<(), SessionLockError>,
+    flags: Result<F, E>,
+    init_logging: impl FnOnce() -> Result<(), LoggingError>,
+    acquire: impl FnOnce() -> Result<L, Refused>,
+) -> Result<(F, L), Refused> {
+    // The lock's folder and name are admitted before the log opens, so a refusal opens neither the
+    // log nor the lock; admission itself may create the product folder.
     admit().map_err(|_| Refused::Failed)?;
     let flags = logged_flags(flags, init_logging).ok_or(Refused::Failed)?;
     Ok((flags, acquire()?))
 }
 
 /// Starts logging, then logs a flag error once by its fixed text; `None` when either failed.
+/// The error's Display must be fixed text with no argument value; each shell's parser test holds it.
 pub fn logged_flags<F, E: Display>(
     flags: Result<F, E>,
     init_logging: impl FnOnce() -> Result<(), LoggingError>,
@@ -85,6 +98,7 @@ pub fn quit_after_ms(value: &str) -> Option<Duration> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::fmt;
     use std::fs;
     use std::sync::{Arc, Mutex};
@@ -142,19 +156,79 @@ mod tests {
 
     const MARKER: &str = "private-fixture-value";
 
+    /// The steps `start_with` took, in order.
+    type Steps = RefCell<Vec<&'static str>>;
+
     #[test]
-    fn an_admission_refusal_fails_before_logging_starts() {
-        let mut logging_started = false;
-        let started = start(
-            || Err(SessionLockError::DataDirectory),
-            Ok::<(), Flaw>(()),
+    fn a_refusal_never_reaches_the_lock() {
+        type Admit = fn() -> Result<(), SessionLockError>;
+        type Log = fn() -> Result<(), LoggingError>;
+        let admitted: Admit = || Ok(());
+        let refused: Admit = || Err(SessionLockError::DataDirectory);
+        let opened: Log = || Ok(());
+        let unopened: Log = || Err(LoggingError::NoLocalAppData);
+        for (case, admit, flags, init_logging, expected) in [
+            ("admission refused", refused, Ok(()), opened, vec!["admit"]),
+            (
+                "bad flags",
+                admitted,
+                Err(Flaw { _value: MARKER }),
+                opened,
+                vec!["admit", "log"],
+            ),
+            (
+                "logging failed",
+                admitted,
+                Ok(()),
+                unopened,
+                vec!["admit", "log"],
+            ),
+        ] {
+            let steps = Steps::default();
+            let started = start_with(
+                || {
+                    steps.borrow_mut().push("admit");
+                    admit()
+                },
+                flags,
+                || {
+                    steps.borrow_mut().push("log");
+                    init_logging()
+                },
+                || {
+                    steps.borrow_mut().push("acquire");
+                    Ok("lock")
+                },
+            );
+            assert_eq!(started.err(), Some(Refused::Failed), "{case} refuses");
+            assert_eq!(*steps.borrow(), expected, "{case} stops before the lock");
+        }
+    }
+
+    #[test]
+    fn an_admitted_start_takes_the_lock_once_and_last() {
+        let steps = Steps::default();
+        let started = start_with(
             || {
-                logging_started = true;
+                steps.borrow_mut().push("admit");
                 Ok(())
             },
+            Ok::<u8, Flaw>(7),
+            || {
+                steps.borrow_mut().push("log");
+                Ok(())
+            },
+            || {
+                steps.borrow_mut().push("acquire");
+                Ok("lock")
+            },
         );
-        assert_eq!(started.err(), Some(Refused::Failed), "admission refuses");
-        assert!(!logging_started, "nothing is written, the log included");
+        assert_eq!(started, Ok((7, "lock")), "the flags and the lock come back");
+        assert_eq!(
+            *steps.borrow(),
+            ["admit", "log", "acquire"],
+            "the lock is taken once, last"
+        );
     }
 
     #[test]
@@ -169,19 +243,14 @@ mod tests {
         let bytes = out.lock().unwrap();
         let log = std::str::from_utf8(&bytes).unwrap();
         assert_eq!(flags, None, "bad flags stop the start");
-        assert_eq!(log.lines().count(), 1, "expected one startup diagnostic");
-        assert!(
-            log.contains("invalid launch flags"),
-            "the diagnostic names flags"
-        );
-        assert!(
-            log.contains("--quit-after-ms must be between 1 and 120000"),
-            "the diagnostic says how to fix them"
+        assert_eq!(
+            log, "ERROR invalid launch flags error=--quit-after-ms must be between 1 and 120000\n",
+            "one fixed diagnostic"
         );
         assert!(!log.contains(MARKER), "no argument value is logged");
         assert!(
-            !bytes.windows(MARKER.len()).any(|w| w == MARKER.as_bytes()),
-            "no argument value is logged, as bytes"
+            !log.contains(&format!("{:?}", MARKER.as_bytes())),
+            "no argument value is logged as a byte list"
         );
     }
 
@@ -220,8 +289,7 @@ mod tests {
             "deferring is a success"
         );
         assert_eq!(
-            log.trim_end(),
-            " INFO another shell is running in this session",
+            log, " INFO another shell is running in this session\n",
             "one fixed line"
         );
     }
@@ -230,10 +298,14 @@ mod tests {
     fn a_lock_that_cannot_open_fails_with_exit_failure() {
         let dir = scratch::dir("startup-broken");
         fs::create_dir_all(dir.join("shell-1.lock")).expect("a directory where the file goes");
-        let refused = held(
-            InstanceLock::try_acquire(&dir.join("shell-1.lock")).map_err(SessionLockError::Lock),
-        )
-        .err();
+        let mut refused = None;
+        let log = logged(|| {
+            refused = held(
+                InstanceLock::try_acquire(&dir.join("shell-1.lock"))
+                    .map_err(SessionLockError::Lock),
+            )
+            .err();
+        });
         assert_eq!(
             refused,
             Some(Refused::Failed),
@@ -244,6 +316,12 @@ mod tests {
             ExitCode::FAILURE,
             "a failure exits with failure"
         );
+        // The OS error's text varies by system and language, so only its line's start is fixed.
+        assert!(
+            log.starts_with("ERROR can't take the single-instance lock error="),
+            "one error line names the failure: {log:?}"
+        );
+        assert_eq!(log.lines().count(), 1, "one line");
     }
 
     #[test]

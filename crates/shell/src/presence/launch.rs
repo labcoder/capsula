@@ -198,6 +198,51 @@ mod tests {
         }
     }
 
+    /// Debug and release give the same refusal for each: release refuses at the first accounts
+    /// flag, and test builds carry the recorder, so `--gate-observer` passes.
+    #[test]
+    fn malformed_flags_refuse_with_fixed_text_and_no_argument_value() {
+        const ACCOUNTS: &str = "--accounts-fixture requires a debug build, one fixed state and a \
+                                quit deadline; --accounts-appearance is optional and accepts \
+                                light, dark, large or constrained once";
+        for (flags, variant, text) in [
+            (
+                &["--accounts-fixture=private-fixture-value", "--smoke"][..],
+                "AccountsFixture",
+                ACCOUNTS,
+            ),
+            (
+                &[
+                    "--accounts-fixture=enabled",
+                    "--accounts-appearance=private-fixture-value",
+                    "--smoke",
+                ][..],
+                "AccountsFixture",
+                ACCOUNTS,
+            ),
+            (
+                &[
+                    "--gate-observer=C:/private-fixture-value/observer.log",
+                    "--quit-after-ms=private-fixture-value",
+                ][..],
+                "QuitDelay",
+                "--quit-after-ms must be between 1 and 120000",
+            ),
+        ] {
+            let error = launch(args(flags)).expect_err("malformed flags are refused");
+            let debug = format!("{error:?}");
+            let display = error.to_string();
+            assert_eq!(debug, variant, "{flags:?} gives its exact variant");
+            assert_eq!(display, text, "{flags:?} gives its fixed text");
+            for shown in [&debug, &display] {
+                assert!(
+                    !shown.contains("private-fixture-value") && !shown.contains("observer.log"),
+                    "{flags:?} keeps its values out of {shown:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn the_esc_fixture_only_runs_with_a_quit_deadline() {
         assert!(matches!(
