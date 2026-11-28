@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
-members = ["crates/audio", "crates/protocol", "crates/scene", "crates/brain", "crates/shell-core", "crates/shell", "crates/storage", "crates/session", "xtask"]
+members = ["crates/audio", "crates/protocol", "crates/scene", "crates/brain", "crates/shell-core", "crates/shell", "crates/storage", "crates/session", "crates/shell-nsh", "xtask"]
+# Builds and tests at the workspace root leave out the unshipped NativeShell shell; -p or --workspace adds it.
+default-members = ["crates/audio", "crates/protocol", "crates/scene", "crates/brain", "crates/shell-core", "crates/shell", "crates/storage", "crates/session", "xtask"]
 # Vendored third-party crates build as dependencies, not members, so workspace lints skip them.
 exclude = ["vendor"]
 
@@ -20,6 +22,10 @@ fluent-bundle = "0.16"
 getrandom = { version = "0.3", features = ["std"] }
 gpui-kit = "0.8.1"
 keyring = { version = "3", features = ["windows-native", "apple-native"] }
+# NativeShell v0.6.1, the approved pin (docs/development/shell-nsh.md); moving it is its own change.
+# nsh-core has no default features; the Windows backend's are all off, since the shell uses none yet.
+nsh-core = { git = "https://github.com/longbridge/nsh", rev = "2f51d8611677c8a6bbad937b39756e8d0cc45350" }
+nsh-platform-windows = { git = "https://github.com/longbridge/nsh", rev = "2f51d8611677c8a6bbad937b39756e8d0cc45350", default-features = false }
 serde = { version = "1", features = ["derive"] }
 smallvec = "=1.16.4"
 thiserror = "2"
