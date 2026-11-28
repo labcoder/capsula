@@ -15,12 +15,15 @@ use crate::{
 impl BuildInput {
     /// Copies a staged view's primitives from `from` on, in order and each whole, until the
     /// view ends or a part of this batch is full. Returns where the next batch must start, or
-    /// none once the view is whole; a batch that took nothing returns `from` and keeps nothing
-    /// of this view. Whoever owns the batch wipes it once it is built, on every path.
+    /// none once the view is whole. A batch whose view table, headers or other parts can't take
+    /// the next primitive returns `from` and keeps nothing of this view. Whoever owns the batch
+    /// wipes it once it is built, on every path.
     ///
     /// # Errors
-    /// [`Failure::Build`] when a primitive doesn't fit an empty batch, or a rect needs more
-    /// corner pieces than one outline holds. The batch is then as it was.
+    /// [`Failure::Order`] for a cursor no copy of this view returns, or a view the batch
+    /// already holds a part of; [`Failure::Build`] when a primitive doesn't fit an empty
+    /// batch, or a rect needs more corner pieces than one outline holds. The batch is then as
+    /// it was.
     pub fn add(&mut self, cache: &RenderCache, from: Cursor) -> Result<Option<Cursor>, Failure> {
         let mark = self.mark();
         let empty = self.is_empty();
@@ -39,24 +42,27 @@ impl BuildInput {
     }
 
     fn copy(&mut self, cache: &RenderCache, from: Cursor) -> Result<Option<Cursor>, Failure> {
-        if !self.fits(0, 0, 0) {
+        let sources = cache.sources();
+        let first = usize::try_from(from.object).map_err(|_| Failure::Order)?;
+        let start = usize::try_from(from.prim).map_err(|_| Failure::Order)?;
+        let issued = match sources.get(first) {
+            Some((_, _, prims)) => start == 0 || start < prims.len(),
+            None => sources.is_empty() && from == Cursor::START,
+        };
+        if !issued || self.holds(cache.id()) {
+            return Err(Failure::Order);
+        }
+        if !self.has_room() {
             return Ok(Some(from));
         }
-        let first = usize::try_from(from.object).map_err(|_| Failure::Build)?;
-        if first > cache.sources().len() {
-            return Err(Failure::Build);
-        }
         self.begin(cache.id(), from)?;
-        for (object, (_, paint_scale, prims)) in cache.sources().iter().enumerate().skip(first) {
-            let start = if object == first {
-                usize::try_from(from.prim).map_err(|_| Failure::Build)?
-            } else {
-                0
-            };
-            if start >= prims.len() {
+        for (object, (_, paint_scale, prims)) in sources.iter().enumerate().skip(first) {
+            let start = if object == first { start } else { 0 };
+            if prims.is_empty() {
                 if !self.fits(0, 0, 1) {
-                    self.end(Some(at(object, start)?))?;
-                    return Ok(Some(at(object, start)?));
+                    let to = at(object, 0)?;
+                    self.end(Some(to))?;
+                    return Ok(Some(to));
                 }
                 self.object()?;
                 continue;

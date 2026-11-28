@@ -73,7 +73,7 @@ pub(crate) fn sample(view: &SceneView) -> Frame {
     frame
 }
 
-/// `count` small filled squares, 150 to a step.
+/// `count` small stroked squares, 150 to a step: four segments and no fill vertex each.
 pub(crate) fn squares(count: usize) -> Vec<String> {
     (0..count)
         .step_by(150)
@@ -82,7 +82,7 @@ pub(crate) fn squares(count: usize) -> Vec<String> {
                 .map(|n| {
                     let (x, y) = (n % 30 * 10, n / 30 * 10);
                     format!(
-                        r#"{{"shape":{{"id":"s{n}","kind":"polygon","fill":"blue","points":[[{x},{y}],[{},{y}],[{},{}],[{x},{}]]}}}}"#,
+                        r#"{{"shape":{{"id":"s{n}","kind":"polygon","points":[[{x},{y}],[{},{y}],[{},{}],[{x},{}]]}}}}"#,
                         x + 8,
                         x + 8,
                         y + 8,
@@ -116,7 +116,8 @@ pub(crate) fn fills() -> String {
 }
 
 /// Geometry at the global paint caps: 2,048 fill points in four 512-point polygons, 756
-/// outline points in 36 bordered boxes, and 19,955 of the 20,000 path segments.
+/// outline points in 36 bordered boxes, and 19,955 of the 20,000 path segments. It doesn't reach
+/// the dash cap.
 pub(crate) fn at_limits() -> Vec<String> {
     let mut steps = Vec::new();
     let fills: Vec<String> = (0..4)

@@ -10,6 +10,8 @@ use std::fmt;
 
 pub use frame::{FrameBuf, Picture, Record};
 pub use input::{Align, BuildInput, Object, Part, Shape, Span};
+#[cfg(test)]
+pub(crate) use mesh::earliest;
 pub use mesh::{Mesh, Piece, Vertex};
 
 /// One staged view's geometry, numbered by the stager that staged it.
@@ -55,7 +57,8 @@ pub enum Failure {
     /// The geometry doesn't fit its reserved buffers, or lyon refused it.
     #[error("a drawing's geometry doesn't fit its reserved buffers")]
     Build,
-    /// A batch isn't the next part of the geometry the mesh is building.
+    /// A batch isn't the next part of the geometry the mesh is building, or a copy names a
+    /// cursor no copy returned or a view its batch already holds.
     #[error("a drawing's batch arrived out of order")]
     Order,
 }

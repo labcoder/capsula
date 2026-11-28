@@ -236,6 +236,16 @@ impl BuildInput {
         self.views.is_empty()
     }
 
+    /// Whether the batch holds a part of the view staged as `id`.
+    pub(crate) fn holds(&self, id: GeometryId) -> bool {
+        self.views.iter().any(|view| view.id == id)
+    }
+
+    /// Whether the view table and the headers have room for one more view's first primitive.
+    pub(crate) fn has_room(&self) -> bool {
+        self.views.len() < PICTURES && self.shapes.len() < INPUT_PRIMS
+    }
+
     /// Whether one more shape with `points` points and `text` label bytes fits, with `objects`
     /// new object entries, 0 or 1.
     pub(crate) fn fits(&self, points: usize, text: usize, objects: usize) -> bool {

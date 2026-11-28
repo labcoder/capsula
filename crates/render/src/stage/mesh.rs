@@ -25,17 +25,23 @@ use crate::limits::{
     STROKE_JOIN, TOLERANCE,
 };
 
-/// One mesh vertex in primitive space.
+/// One mesh vertex in primitive space. A consumer interpolates `along`, `reveal` and `weight`
+/// across a triangle and reads `skip` flat from the triangle's first index.
 #[derive(Clone, Copy, PartialEq)]
 pub struct Vertex {
     /// Position.
     pub at: [f32; 2],
-    /// Distance along its stroke in primitive units, for dashes; 0 off a stroke.
+    /// Distance along its stroke's kept points in primitive units; 0 off a stroke. A stroke
+    /// pixel's source distance, which dashes and reveal walk, is this interpolated plus
+    /// `skip` of its triangle's first vertex.
     pub along: f32,
-    /// Where it lies in its primitive's reveal, 0 to 1, times [`Vertex::weight`]; 0 for what
-    /// is never revealed.
+    /// Source length that lyon's merges dropped before this vertex's point, read flat: a stroke
+    /// triangle's first index is the vertex at its earliest point. 0 off a stroke.
+    pub skip: f32,
+    /// A border's place in its reveal, 0 to 1, times [`Vertex::weight`]; 0 elsewhere. A
+    /// stroke pixel's reveal is its source distance over its piece's `length`.
     pub reveal: f32,
-    /// What the interpolated reveal is divided by per pixel: 1, except on a border band's inner
+    /// What a border's interpolated reveal is compared through: 1, except on a band's inner
     /// edge, where it is that edge's length over the outer edge's, so the cut stays straight.
     pub weight: f32,
     /// Its piece, for paint.
@@ -49,7 +55,7 @@ impl fmt::Debug for Vertex {
     }
 }
 
-/// One painted part of a primitive: a rect has up to two, a fill or a line one.
+/// One painted part of a primitive: a rect has up to two, a fill one, a line one or two.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Piece {
     /// Its prepared paint.
@@ -58,6 +64,11 @@ pub struct Piece {
     pub dashed: bool,
     /// Drawn in by the record's reveal: strokes and borders.
     pub revealed: bool,
+    /// A stroke's source length, which its reveal divides; 0 for any other piece.
+    pub length: f32,
+    /// The return leg of a closed line of two points, drawn over its outward leg: skip it when
+    /// the line is drawn whole and undashed, as main draws that leg once.
+    pub retrace: bool,
 }
 
 /// One geometry's mesh, built into buffers reserved once and reused for the next geometry.
@@ -248,49 +259,60 @@ impl Mesh {
                 dashed,
             } => {
                 let points = input.points(points).ok_or(Failure::Build)?;
-                if points.len() < 2 {
+                let line = Polyline { points, closed };
+                let Some((mut walk, turn)) = Walk::new(line, width) else {
                     return Ok(());
-                }
-                let piece = self.piece(Piece {
+                };
+                let piece = Piece {
                     color,
                     dashed,
                     revealed: true,
-                })?;
+                    length: narrow(walk.total),
+                    retrace: false,
+                };
                 // shortcut: a reveal's moving end bends through a join's miter, not main's butt
                 // cut (render.md); emit our own joins when that difference has to go.
-                let close = closed && points.len() > 2;
-                let line = Polyline {
-                    points,
-                    ends: points.len() + usize::from(closed && !close),
-                    close,
-                };
                 let options = StrokeOptions::default()
                     .with_line_width(width)
                     .with_line_join(STROKE_JOIN)
                     .with_line_cap(STROKE_CAP)
                     .with_miter_limit(MITER_LIMIT)
                     .with_tolerance(TOLERANCE);
-                let mut walk = Walk {
-                    line,
-                    merge: (TOLERANCE * TOLERANCE * 0.5)
-                        .min(width * width * 0.05)
-                        .max(1e-8),
-                    total: 0.0,
-                    arc: (0, 0.0),
+                let ends = index(points.len())?;
+                let out = self.piece(piece)?;
+                self.stroke(walk.events(0..ends), line, &options, out, &mut walk)?;
+                let Some(turn) = turn else {
+                    return Ok(());
                 };
-                walk.total = walk.arc(line.ends - usize::from(!close));
-                let mut sink = Sink::new(&mut self.vertices, &mut self.indices, piece, Some(walk));
-                let result = self.stroke.tessellate_with_ids(
-                    line.events()?,
-                    &line,
-                    None,
+                let back = self.piece(Piece {
+                    retrace: true,
+                    ..piece
+                })?;
+                self.stroke(
+                    walk.events([index(turn)?, ends].into_iter()),
+                    line,
                     &options,
-                    &mut sink,
-                );
-                finished(&result, &sink)
+                    back,
+                    &mut walk,
+                )
             }
             Shape::Text { .. } => Ok(()),
         }
+    }
+
+    fn stroke(
+        &mut self,
+        events: impl IntoIterator<Item = IdEvent>,
+        line: Polyline<'_>,
+        options: &StrokeOptions,
+        piece: u32,
+        walk: &mut Walk<'_>,
+    ) -> Result<(), Failure> {
+        let mut sink = Sink::new(&mut self.vertices, &mut self.indices, piece, Some(walk));
+        let result = self
+            .stroke
+            .tessellate_with_ids(events, &line, None, options, &mut sink);
+        finished(&result, &sink)
     }
 
     fn piece(&mut self, piece: Piece) -> Result<u32, Failure> {
@@ -309,6 +331,8 @@ impl Mesh {
             color,
             dashed: false,
             revealed: false,
+            length: 0.0,
+            retrace: false,
         })?;
         let options = FillOptions::default()
             .with_fill_rule(FillRule::NonZero)
@@ -329,6 +353,8 @@ impl Mesh {
             color,
             dashed: false,
             revealed: true,
+            length: 0.0,
+            retrace: false,
         })?;
         let points = outer.len();
         if self.vertices.len() + 4 * points > MESH_VERTICES
@@ -361,6 +387,7 @@ impl Mesh {
                 self.vertices.push(Vertex {
                     at: corner,
                     along: 0.0,
+                    skip: 0.0,
                     reveal,
                     weight,
                     piece,
@@ -403,49 +430,24 @@ impl fmt::Debug for Mesh {
     }
 }
 
-fn finished(result: &TessellationResult, sink: &Sink<'_>) -> Result<(), Failure> {
+fn finished(result: &TessellationResult, sink: &Sink<'_, '_>) -> Result<(), Failure> {
     if result.is_err() || sink.full {
         return Err(Failure::Build);
     }
     Ok(())
 }
 
-/// A stroke's source points as lyon endpoints. A closed line of two points goes out and back as
-/// two open lines, so its return leg keeps its own distance and full width: endpoint 2 is the
-/// first point again.
+/// A stroke's source points as lyon endpoints; endpoint `points.len()` is the first point again.
 #[derive(Clone, Copy)]
 struct Polyline<'a> {
     points: &'a [[f32; 2]],
-    /// Endpoints, the return one included.
-    ends: usize,
-    /// Whether lyon closes it, joining the last point to the first.
-    close: bool,
+    /// Drawn back to its first point.
+    closed: bool,
 }
 
 impl Polyline<'_> {
     fn at(self, id: usize) -> [f32; 2] {
         self.points[id % self.points.len()]
-    }
-
-    fn events(self) -> Result<impl Iterator<Item = IdEvent>, Failure> {
-        let ends = index(self.ends)?;
-        let back = self.ends > self.points.len();
-        let run = |first: u32, last: u32, close: bool| {
-            std::iter::once(IdEvent::Begin {
-                at: EndpointId(first),
-            })
-            .chain((first + 1..=last).map(|to| IdEvent::Line {
-                from: EndpointId(to - 1),
-                to: EndpointId(to),
-            }))
-            .chain(std::iter::once(IdEvent::End {
-                last: EndpointId(last),
-                first: EndpointId(first),
-                close,
-            }))
-        };
-        let out = run(0, if back { 1 } else { ends - 1 }, self.close);
-        Ok(out.chain(back.then(|| run(1, 2, false)).into_iter().flatten()))
     }
 }
 
@@ -460,28 +462,100 @@ impl PositionStore for Polyline<'_> {
     }
 }
 
-/// A stroke's distances along its source points, for the vertices lyon emits at them.
+/// A stroke's distances over the points lyon keeps. lyon drops a point closer than its merge
+/// distance to the last one kept, and decides closure from the kept count, so this walk keeps
+/// the same points. A kept point's `L` sums each kept edge's source length, from the last
+/// point merged into the one before to this one; its `G` is the source length its own merged
+/// run adds. So an edge arriving at a point reaches `L + G` of the point before, and an edge
+/// leaving it starts at its own `L + G`: both main's source distances there.
 struct Walk<'a> {
     line: Polyline<'a>,
-    /// lyon's squared merge distance: a point this close to the last one kept is dropped.
+    /// lyon's squared merge distance.
     merge: f32,
+    /// Endpoints lyon is given, the return to the first point included when there is one.
+    ends: usize,
+    /// Whether lyon closes it: three or more kept points of a closed line.
+    close: bool,
     /// The source length, closing edge included.
     total: f64,
-    /// The last distance asked for, `(endpoint, distance)`, so a walk in order sums each edge once.
+    /// The last source distance summed, `(endpoint, distance)`.
     arc: (usize, f64),
+    /// The kept point last reached: its endpoint, the last endpoint merged into it, and `L`.
+    kept: (usize, usize, f64),
+    /// `L` and `G` of a closed line's opening vertices, which lyon emits last.
+    opening: [f64; 2],
+    /// `L` and `G` of a closed line's closing vertices at its first point.
+    closing: [f64; 2],
 }
 
-impl Walk<'_> {
-    /// The distance of a vertex at endpoint `id`. A run of points lyon merged into `id` takes
-    /// the run's last distance, as main's walk reaches it, and lyon's closing join at the first
-    /// point is past the whole length, which its own advancement tells apart from the start.
-    fn along(&mut self, id: usize, advancement: f32) -> f64 {
-        if self.line.close && id == 0 && advancement > 0.0 {
-            return self.total;
+impl<'a> Walk<'a> {
+    /// The walk of `line`, and where a closed line of two kept points turns back; none when
+    /// fewer than two points are kept, which lyon draws as nothing.
+    fn new(line: Polyline<'a>, width: f32) -> Option<(Self, Option<usize>)> {
+        let (count, closed) = (line.points.len(), line.closed);
+        let mut walk = Self {
+            line,
+            merge: (TOLERANCE * TOLERANCE * 0.5)
+                .min(width * width * 0.05)
+                .max(1e-8),
+            ends: count,
+            close: false,
+            total: 0.0,
+            arc: (0, 0.0),
+            kept: (0, 0, 0.0),
+            opening: [0.0; 2],
+            closing: [0.0; 2],
+        };
+        let (mut kept, mut last) = (1, 0);
+        let mut at = walk.run(0);
+        while at + 1 < count {
+            last = at + 1;
+            at = walk.run(last);
+            kept += 1;
         }
+        if count < 2 || kept < 2 {
+            return None;
+        }
+        walk.close = closed && kept > 2;
+        let turn = (closed && kept == 2).then_some(last);
+        walk.ends = count + usize::from(turn.is_some());
+        walk.total = walk.arc(if closed { count } else { count - 1 });
+        walk.kept = (0, walk.run(0), 0.0);
+        walk.opening = walk.seek(0);
+        if walk.close {
+            let [l, g] = walk.seek(last);
+            let leave = l + g;
+            walk.closing = [l + walk.total - leave, g];
+        }
+        Some((walk, turn))
+    }
+
+    /// Endpoints `ids` as one run of lyon events, without allocating, closed when lyon closes
+    /// this line; a return leg's line never closes.
+    fn events<I: Iterator<Item = u32> + Clone>(
+        &self,
+        ids: I,
+    ) -> impl Iterator<Item = IdEvent> + use<I> {
+        let close = self.close;
+        let first = EndpointId(ids.clone().next().unwrap_or(0));
+        let last = EndpointId(ids.clone().last().unwrap_or(0));
+        let lines = ids
+            .clone()
+            .zip(ids.skip(1))
+            .map(|(from, to)| IdEvent::Line {
+                from: EndpointId(from),
+                to: EndpointId(to),
+            });
+        std::iter::once(IdEvent::Begin { at: first })
+            .chain(lines)
+            .chain(std::iter::once(IdEvent::End { last, first, close }))
+    }
+
+    /// The last endpoint lyon merges into the kept point `id`.
+    fn run(&self, id: usize) -> usize {
         let kept = self.line.at(id);
         let mut last = id;
-        while last + 1 < self.line.ends {
+        while last + 1 < self.ends {
             let [x, y] = self.line.at(last + 1);
             let [dx, dy] = [kept[0] - x, kept[1] - y];
             if dx * dx + dy * dy >= self.merge {
@@ -489,7 +563,33 @@ impl Walk<'_> {
             }
             last += 1;
         }
-        self.arc(last)
+        last
+    }
+
+    /// `L` and `G` of the vertex lyon emits at endpoint `id`. A closed line's opening vertices
+    /// carry no advancement and its closing ones at the first point some, whatever id lyon
+    /// reports for them.
+    fn vertex(&mut self, id: usize, advancement: f32) -> [f64; 2] {
+        if self.close && advancement <= 0.0 {
+            return self.opening;
+        }
+        if self.close && id == 0 {
+            return self.closing;
+        }
+        self.seek(id)
+    }
+
+    fn seek(&mut self, id: usize) -> [f64; 2] {
+        if id < self.kept.0 {
+            self.kept = (0, self.run(0), 0.0);
+        }
+        while self.kept.0 < id && self.kept.1 + 1 < self.ends {
+            let (_, last, l) = self.kept;
+            let edge = -self.arc(last) + self.arc(last + 1);
+            self.kept = (last + 1, self.run(last + 1), l + edge);
+        }
+        let (_, last, l) = self.kept;
+        [l, self.arc(last) - l]
     }
 
     fn arc(&mut self, to: usize) -> f64 {
@@ -550,23 +650,35 @@ impl Rounded {
     }
 }
 
+/// Which of a stroke triangle's corners comes first: one at its earliest point, ties included,
+/// since an edge's two vertices at a point carry the same distance.
+pub(crate) fn earliest([a, b, c]: [f32; 3]) -> usize {
+    if a <= b && a <= c {
+        0
+    } else if b <= c {
+        1
+    } else {
+        2
+    }
+}
+
 /// Writes lyon's output straight into the mesh's reserved buffers, refusing what wouldn't fit.
-struct Sink<'a> {
+struct Sink<'a, 'w> {
     vertices: &'a mut Vec<Vertex>,
     indices: &'a mut Vec<u32>,
     piece: u32,
     /// A stroke's distances; none for a fill.
-    walk: Option<Walk<'a>>,
+    walk: Option<&'a mut Walk<'w>>,
     mark: [usize; 2],
     full: bool,
 }
 
-impl<'a> Sink<'a> {
+impl<'a, 'w> Sink<'a, 'w> {
     fn new(
         vertices: &'a mut Vec<Vertex>,
         indices: &'a mut Vec<u32>,
         piece: u32,
-        walk: Option<Walk<'a>>,
+        walk: Option<&'a mut Walk<'w>>,
     ) -> Self {
         let mark = [vertices.len(), indices.len()];
         Self {
@@ -579,28 +691,36 @@ impl<'a> Sink<'a> {
         }
     }
 
-    fn vertex(&mut self, at: [f32; 2], along: f64) -> Result<VertexId, GeometryBuilderError> {
+    fn vertex(
+        &mut self,
+        at: [f32; 2],
+        [along, skip]: [f64; 2],
+    ) -> Result<VertexId, GeometryBuilderError> {
         if self.vertices.len() >= MESH_VERTICES {
             return Err(GeometryBuilderError::TooManyVertices);
         }
         let id = u32::try_from(self.vertices.len())
             .map_err(|_| GeometryBuilderError::TooManyVertices)?;
-        let reveal = match &self.walk {
-            Some(walk) if walk.total > 0.0 => narrow(along / walk.total),
-            _ => 0.0,
-        };
         self.vertices.push(Vertex {
             at,
             along: narrow(along),
-            reveal,
+            skip: narrow(skip),
+            reveal: 0.0,
             weight: 1.0,
             piece: self.piece,
         });
         Ok(VertexId(id))
     }
+
+    fn along(&self, id: VertexId) -> f32 {
+        usize::try_from(id.0)
+            .ok()
+            .and_then(|id| self.vertices.get(id))
+            .map_or(f32::INFINITY, |vertex| vertex.along)
+    }
 }
 
-impl GeometryBuilder for Sink<'_> {
+impl GeometryBuilder for Sink<'_, '_> {
     fn begin_geometry(&mut self) {
         self.mark = [self.vertices.len(), self.indices.len()];
     }
@@ -610,7 +730,14 @@ impl GeometryBuilder for Sink<'_> {
             self.full = true;
             return;
         }
-        self.indices.extend([a.0, b.0, c.0]);
+        let corners = [a, b, c];
+        let first = if self.walk.is_none() {
+            0
+        } else {
+            earliest(corners.map(|corner| self.along(corner)))
+        };
+        self.indices
+            .extend((0..3).map(|at| corners[(first + at) % 3].0));
     }
 
     fn abort_geometry(&mut self) {
@@ -619,16 +746,16 @@ impl GeometryBuilder for Sink<'_> {
     }
 }
 
-impl FillGeometryBuilder for Sink<'_> {
+impl FillGeometryBuilder for Sink<'_, '_> {
     fn add_fill_vertex(
         &mut self,
         vertex: FillVertex<'_>,
     ) -> Result<VertexId, GeometryBuilderError> {
-        self.vertex(vertex.position().to_array(), 0.0)
+        self.vertex(vertex.position().to_array(), [0.0; 2])
     }
 }
 
-impl StrokeGeometryBuilder for Sink<'_> {
+impl StrokeGeometryBuilder for Sink<'_, '_> {
     fn add_stroke_vertex(
         &mut self,
         vertex: StrokeVertex<'_, '_>,
@@ -636,11 +763,11 @@ impl StrokeGeometryBuilder for Sink<'_> {
         let id = match vertex.source() {
             VertexSource::Endpoint { id } | VertexSource::Edge { from: id, .. } => id,
         };
-        let along = match &mut self.walk {
-            Some(walk) => walk.along(id.to_usize(), vertex.advancement()),
-            None => 0.0,
+        let distance = match &mut self.walk {
+            Some(walk) => walk.vertex(id.to_usize(), vertex.advancement()),
+            None => [0.0; 2],
         };
-        self.vertex(vertex.position().to_array(), along)
+        self.vertex(vertex.position().to_array(), distance)
     }
 }
 

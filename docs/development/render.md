@@ -25,6 +25,12 @@ The renderer works on two threads that share nothing.
   batch leaves the mesh as it was before it. A `Record` names an object, a range of its
   primitives and the sampled pose, and `Mesh::range` resolves it to indices inside that object.
 
+A `Mesh` builds one geometry at a time, and `Mesh::begin` discards whatever it held. So all of
+one geometry's batches must arrive before another geometry begins on the same mesh, or the
+first is copied again from its start. A copy names only cursors `add` returned, `Cursor::START`
+included, and a batch holds at most one part of a view; anything else is `Failure::Order`. A
+batch whose view table, headers or other parts are full returns the cursor it was given.
+
 Whoever owns a batch wipes it with `BuildInput::wipe`, which overwrites its points and text, on
 every path: after its build, when a copy or a build is refused, and before dropping it. The mesh
 never wipes a batch, because the batch may hold other views' parts.
@@ -61,17 +67,29 @@ lines stroke with lyon's default joins, ends, miter limit and tolerance (`src/li
 border is the band between a rect's outline and its inset, one quad of its own per outline
 edge. Main fills that band even-odd, which covers the same area.
 
-Every stroke vertex carries its distance along the stroke's source points and its place in the
-reveal, so a draw-in or a dash phase changes per frame without a rebuild. The mesh tessellates
-by endpoint ids, so each vertex names the source point it came from and takes that point's
-distance. Where lyon merges points closer than its merge distance, the kept point takes the
-distance of the last point merged into it, as main's walk reaches it. A closed line of two
-points goes out and back as two open lines, so its return leg keeps its distance. A border
-vertex carries its reveal times a weight, 1 on the outer edge and the inner edge's length over
-the outer edge's on the inner one. A rasterizer interpolates both and divides per pixel, which
-gives main's cut exactly: a straight line joining the same fraction of the outer and the inner
-edge. Where the inset collapses a corner, the inner edge has length 0 and weight 0, and every
-cut there meets at the inner corner.
+A draw-in or a dash phase changes per frame without a rebuild, so each vertex carries what a
+rasterizer needs to place it. A consumer interpolates `along`, `reveal` and `weight` across a
+triangle, and reads `skip` flat from the triangle's first index:
+
+- **Strokes.** A pixel's source distance, which dashes and reveal walk, is the interpolated
+  `along` plus the first vertex's `skip`, and its reveal is that distance over its piece's
+  `length`. The mesh tessellates by endpoint ids, so each vertex names the source point it
+  came from. lyon drops a point closer than its merge distance to the last one it kept, and
+  decides closure from the points it kept, so the mesh walks the same kept points. `along` is
+  continuous across a join: each kept edge adds the source length from the last point merged
+  into the point before to this one. `skip` is the source length merged into the vertex's
+  point. Each stroke triangle's first index is the vertex at its earliest point, so an edge
+  arriving at a merged run reaches main's distance there, and the edge leaving it starts past
+  the run, as main's walk does. A closed line keeps its seam however its last point is
+  written; a closed line lyon keeps two points of goes out and back as two open lines, the
+  return leg a piece of its own marked `retrace`.
+- **Borders.** A vertex carries its reveal times a weight, 1 on the outer edge and the inner
+  edge's length over the outer edge's on the inner one. A pixel is revealed when the
+  interpolated `reveal` is at most the frame's draw fraction times the interpolated `weight`,
+  which gives main's cut exactly: a straight line joining the same fraction of the outer and
+  the inner edge. Don't divide: where the inset collapses a corner, the inner edge has length
+  0, so `reveal` and `weight` are both 0 there and every cut meets at the inner corner. Draw a
+  full reveal whole and an empty one not at all, without the comparison.
 
 Known differences from main's painter:
 
@@ -79,9 +97,11 @@ Known differences from main's painter:
   it with a butt cap along the last segment's perpendicular. The mesh is built once, so the
   moving end of a reveal, and a dash end inside a join, interpolate across the join's own
   triangles instead: the cut bends through the miter's vertices. Away from joins the two agree.
-- **The out-and-back line, whole.** A closed line of two points drawn whole and undashed is one
-  rectangle in main and two overlapping ones here, so a translucent one blends twice. Main's
-  partial and dashed walk overlaps the same way.
+- **The turn of an out-and-back line.** Where a dash run or the reveal's end crosses the turn
+  of a closed line of two kept points, main strokes that run as one open polyline with lyon's
+  folded join, and this mesh draws both legs at full width, so the two cover different areas
+  near the turn. Drawn whole and undashed, a consumer skips the `retrace` piece and draws the
+  line once, as main does.
 
 Main counts a rect's corner pieces at the pose's scale, and refuses a pose that needs more than
 the scale the scene crate charged. The mesh is built once for every pose, so the owner counts
@@ -103,9 +123,9 @@ returns its sum, a constant (`limits::FIXED_BYTES`):
 |---|---|---|
 | Three `FrameBuf`s | 4 pictures and 3,000 64-byte records: both passes of 1,500 objects | 3 × 192,144 |
 | One `BuildInput` batch | 1,500 objects, 27,449 primitive headers, 42,048 points, 262,144 bytes of text | 2,038,156 |
-| One `Mesh` | 165,120 24-byte vertices, 376,896 indices, 27,602 pieces | 5,918,024 |
+| One `Mesh` | 165,120 28-byte vertices, 376,896 indices, 47,602 16-byte pieces | 7,008,912 |
 | lyon's working memory | an allowance, main's 2 MiB for the same tessellators | 2,097,152 |
-| Total | | 10,629,764 |
+| Total | | 11,720,652 |
 
 Objects, points and mesh sizes follow from the global caps in `kumochi_scene::limits`: the
 object cap, the fill-vertex and outline-point caps, and the path-segment cap, which bounds

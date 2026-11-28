@@ -203,7 +203,7 @@ fn render(root: &Path) -> Result<()> {
     );
     println!(
         "kumochi-render: only listed dependencies, no UI framework or GPU crate in its tree, and \
-         a stage side that names no scene or presenter type"
+         no scene, presenter or owner path spelled on its stage side"
     );
     Ok(())
 }

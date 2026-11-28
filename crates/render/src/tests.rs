@@ -9,7 +9,7 @@ use std::{any::Any, sync::Arc};
 use kumochi_protocol::message::SceneId;
 use kumochi_scene::{
     GlobalBudget, Handle, Text,
-    display::{DASH, Paint, Prim, TextStyle},
+    display::{DASH, Paint, PaintWork, Prim, TextStyle},
     geom::{Rect, Vec2},
     record::{Align, Rgb},
 };
@@ -149,8 +149,9 @@ fn build(input: &mut BuildInput, mesh: &mut Mesh, cache: &RenderCache) -> Result
     Ok(batches)
 }
 
-/// What a rasterizer interpolates at `at` in every triangle of `piece` that covers it: the
-/// distance along, and the reveal divided by the weight.
+/// What a rasterizer reads at `at` in every triangle of `piece` that covers it: the source
+/// distance, interpolated `along` plus the first vertex's flat `skip`, and the border reveal,
+/// interpolated `reveal` over interpolated `weight`.
 fn sampled(mesh: &Mesh, piece: u32, at: [f32; 2]) -> Vec<[f64; 2]> {
     let vertex = |id: &u32| mesh.vertices()[usize::try_from(*id).expect("a vertex index")];
     mesh.indices()
@@ -175,7 +176,10 @@ fn sampled(mesh: &Mesh, piece: u32, at: [f32; 2]) -> Vec<[f64; 2]> {
             let mix = |f: fn(&crate::Vertex) -> f32| {
                 wa * f64::from(f(&a)) + wb * f64::from(f(&b)) + wc * f64::from(f(&c))
             };
-            Some([mix(|v| v.along), mix(|v| v.reveal) / mix(|v| v.weight)])
+            Some([
+                mix(|v| v.along) + f64::from(a.skip),
+                mix(|v| v.reveal) / mix(|v| v.weight),
+            ])
         })
         .collect()
 }
@@ -256,8 +260,51 @@ fn every_part_of_a_batch_holds_its_limit_and_stops_before_one_more() {
     }
     assert_eq!(
         input.add(&cache(5, 0, &[]), Cursor::START),
-        Err(Failure::Build),
-        "a fifth view"
+        Ok(Some(Cursor::START)),
+        "a fifth view waits for the next batch, as any full part does"
+    );
+}
+
+#[test]
+fn a_copy_starts_only_at_a_cursor_add_returned_and_once_per_view() {
+    let mut input = BuildInput::new();
+    let two = cache(6, 2, &[label("a")]);
+    let empty_first = RenderCache::of(
+        7,
+        vec![
+            (handle(0), 1.0, Arc::from(Vec::<Prim>::new())),
+            (handle(1), 1.0, Arc::from(vec![label("b")])),
+        ],
+    );
+    for (view, cursor) in [
+        (&two, Cursor { object: 0, prim: 1 }),
+        (&two, Cursor { object: 2, prim: 0 }),
+        (&two, Cursor { object: 2, prim: 1 }),
+        (
+            &empty_first,
+            Cursor {
+                object: 0,
+                prim: 999,
+            },
+        ),
+        (&cache(8, 0, &[]), Cursor { object: 0, prim: 1 }),
+    ] {
+        assert_eq!(
+            input.add(view, cursor),
+            Err(Failure::Order),
+            "{cursor:?} is no cursor a copy returns"
+        );
+    }
+    assert_eq!(input.add(&empty_first, Cursor::START), Ok(None));
+    assert_eq!(
+        input.add(&empty_first, Cursor { object: 1, prim: 0 }),
+        Err(Failure::Order),
+        "a second part of a view the batch holds"
+    );
+    assert_eq!(
+        input.add(&cache(9, 0, &[]), Cursor::START),
+        Ok(None),
+        "an empty view"
     );
 }
 
@@ -314,7 +361,7 @@ fn a_batch_out_of_order_or_for_another_geometry_or_refused_leaves_the_mesh_as_it
         .into(),
         color: paint(),
     };
-    let refused = cache(1, 1, &[nan]);
+    let refused = cache(1, 1, std::slice::from_ref(&nan));
     let (mut input, mut mesh) = (BuildInput::new(), Mesh::new());
     assert_eq!(mesh.extend(&input), Err(Failure::Order), "no build is open");
     mesh.begin(first.id());
@@ -334,9 +381,26 @@ fn a_batch_out_of_order_or_for_another_geometry_or_refused_leaves_the_mesh_as_it
     assert_eq!((mesh.vertices().to_vec(), mesh.indices().to_vec()), built);
     mesh.finish().expect("the view was whole");
     assert_eq!(mesh.finish(), Err(Failure::Order), "finished once");
+    let mut prims = vec![line([Vec2::new(0.0, 0.0), Vec2::new(10.0, 0.0)])];
+    prims.extend(vec![label(&"🙂".repeat(400)); BATCH_TEXT_BYTES / 1600]);
+    prims.push(label(&"🙂".repeat(BATCH_TEXT_BYTES % 1600 / 4)));
+    prims.extend([label("a"), nan]);
+    let later = cache(2, 1, &prims);
     input.wipe();
-    mesh.begin(refused.id());
-    input.add(&refused, Cursor::START).expect("it copies");
+    mesh.begin(later.id());
+    let rest = input
+        .add(&later, Cursor::START)
+        .expect("the first batch copies");
+    mesh.extend(&input).expect("the first batch builds");
+    let built = (
+        mesh.vertices().to_vec(),
+        mesh.indices().to_vec(),
+        mesh.pieces().to_vec(),
+    );
+    assert!(!built.1.is_empty(), "the line has geometry");
+    input.wipe();
+    let rest = rest.expect("the NaN fill is in a later batch");
+    assert_eq!(input.add(&later, rest), Ok(None));
     assert_eq!(
         mesh.extend(&input),
         Err(Failure::Build),
@@ -344,12 +408,12 @@ fn a_batch_out_of_order_or_for_another_geometry_or_refused_leaves_the_mesh_as_it
     );
     assert_eq!(
         (
-            mesh.vertices().len(),
-            mesh.indices().len(),
-            mesh.pieces().len()
+            mesh.vertices().to_vec(),
+            mesh.indices().to_vec(),
+            mesh.pieces().to_vec()
         ),
-        (0, 0, 0),
-        "the refused batch left the geometry empty"
+        built,
+        "the refused later batch left the earlier geometry as it was"
     );
     assert_eq!(
         mesh.finish(),
@@ -372,6 +436,14 @@ fn four_views_at_the_global_object_cap_and_the_paint_caps_fit_one_batch_and_buil
         1500,
         "the fixture reaches the global cap"
     );
+    assert!(
+        views
+            .iter()
+            .map(|view| view.layout().paint_work())
+            .fold(PaintWork::default(), |sum, work| sum + work)
+            .within_limits(),
+        "the four views' paint work fits the global caps together"
+    );
     let boxed: Vec<_> = views.iter().map(|view| stager.stage(view)).collect();
     let mut input = BuildInput::new();
     for cache in &boxed {
@@ -389,7 +461,7 @@ fn four_views_at_the_global_object_cap_and_the_paint_caps_fit_one_batch_and_buil
     assert_eq!(
         budget.usage().segments,
         19_955,
-        "the fixture is at the segment cap"
+        "the fixture's 19,955 of the 20,000 path segments"
     );
     let boxed = stager.stage(&view);
     assert_eq!(
@@ -788,51 +860,237 @@ fn strokes_reveal_and_dash_along_their_source_length() {
     let cache = cache(0, 1, &prims);
     let (mut input, mut mesh) = (BuildInput::new(), Mesh::new());
     build(&mut input, &mut mesh, &cache).expect("it builds");
-    let of = |piece: u32| {
-        mesh.vertices()
-            .iter()
-            .filter(move |vertex| vertex.piece == piece)
-    };
-    for (piece, length) in [(0, 10.0), (1, 40.0), (3, 34.0)] {
-        let along = of(piece).map(|vertex| vertex.along).fold(0.0, f32::max);
-        let reveal = of(piece).map(|vertex| vertex.reveal).fold(0.0, f32::max);
-        assert_eq!(
-            [along, reveal].map(f32::to_bits),
-            [length, 1.0].map(f32::to_bits),
-            "dashes walk the source in primitive units and each reveals over its own length"
-        );
-    }
     let wiggle = 500.0 * f64::from(0.04_f32);
-    let half = wiggle / (wiggle + 20.0);
-    for vertex in of(2) {
-        let expected = if vertex.at[0] < 10.0 { half } else { 1.0 };
+    let retrace: Vec<bool> = mesh.pieces().iter().map(|piece| piece.retrace).collect();
+    assert_eq!(
+        retrace,
+        [false, false, false, false, true],
+        "the return leg is its own piece"
+    );
+    for (piece, length) in mesh
+        .pieces()
+        .iter()
+        .zip([10.0, 40.0, wiggle + 20.0, 34.0, 34.0])
+    {
         assert!(
-            (f64::from(vertex.reveal) - expected).abs() < 1e-6,
-            "the merged wiggle counts as main's walk counts it: {} at x = {}",
-            vertex.reveal,
-            vertex.at[0]
+            (f64::from(piece.length) - length).abs() < 1e-5,
+            "each stroke reveals over its source length: {} against {length}",
+            piece.length
         );
     }
-    assert!(
-        of(3).all(|vertex| vertex.reveal < 1.0 || vertex.at[0] == 0.0),
-        "the out-and-back line reveals whole only at the end of its return"
-    );
-    let mut alongs: Vec<f64> = sampled(&mesh, 3, [9.0, 0.5])
-        .into_iter()
-        .map(|[along, _]| along)
-        .collect();
-    alongs.sort_by(f64::total_cmp);
-    let [out, back] = alongs[..] else {
-        panic!("both legs cover the point: {alongs:?}");
+    let distance = |piece: u32, at: [f32; 2]| -> Vec<f64> {
+        let mut found: Vec<f64> = sampled(&mesh, piece, at)
+            .into_iter()
+            .map(|[distance, _]| distance)
+            .collect();
+        found.sort_by(f64::total_cmp);
+        found.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+        found
     };
-    assert!((out - 9.0).abs() < 1e-4 && (back - 25.0).abs() < 1e-4);
+    let near = |found: Vec<f64>, expected: f64| {
+        assert!(
+            found.len() == 1 && (found[0] - expected).abs() < 1e-4,
+            "{found:?} against {expected}"
+        );
+    };
+    near(distance(0, [7.0, 0.5]), 7.0);
+    near(distance(2, [5.0, 0.5]), wiggle + 5.0);
+    near(distance(3, [9.0, 0.5]), 9.0);
+    near(distance(4, [9.0, 0.5]), 25.0);
     let period = f64::from(DASH[0] + DASH[1]);
     let painted = |along: f64| along.rem_euclid(period) < f64::from(DASH[0]);
     assert_eq!(
-        (painted(out), painted(back)),
+        (painted(9.0), painted(25.0)),
         (false, true),
         "at phase 0 main paints x = 9 only on the return"
     );
+}
+
+#[test]
+fn a_run_lyon_merges_ends_the_edge_arriving_at_it_where_main_does() {
+    let wiggle = |from: f32| {
+        (1..=500).map(move |at| Vec2::new(if at % 2 == 1 { from + 0.04 } else { from }, 0.0))
+    };
+    let step = 500.0 * (f64::from(10.04_f32) - 10.0);
+    let mut interior = vec![Vec2::new(0.0, 0.0), Vec2::new(10.0, 0.0)];
+    interior.extend(wiggle(10.0));
+    interior.push(Vec2::new(20.0, 0.0));
+    let mut trailing = vec![Vec2::new(0.0, 0.0), Vec2::new(10.0, 0.0)];
+    trailing.extend(wiggle(10.0));
+    let cache = cache(0, 1, &[line(interior), line(trailing)]);
+    let (mut input, mut mesh) = (BuildInput::new(), Mesh::new());
+    build(&mut input, &mut mesh, &cache).expect("it builds");
+    let distance = |piece: u32, x: f32| {
+        let found = sampled(&mesh, piece, [x, 0.5]);
+        let [distance, _] = found.first().copied().expect("the stroke covers the point");
+        assert!(
+            found
+                .iter()
+                .all(|[other, _]| (other - distance).abs() < 1e-6)
+        );
+        distance
+    };
+    let length = f64::from(mesh.pieces()[0].length);
+    assert!((length - (20.0 + step)).abs() < 1e-3, "{length}");
+    let quarter = length / 4.0;
+    for x in [1.0, 5.0, 9.9] {
+        assert!(
+            (distance(0, x) - f64::from(x)).abs() < 1e-4,
+            "the arriving edge reaches x = 10 at distance 10, as main's walk does"
+        );
+        assert!(
+            (distance(1, x) - f64::from(x)).abs() < 1e-4,
+            "and before a trailing run"
+        );
+    }
+    for x in [10.1, 15.0, 19.9] {
+        assert!(
+            (distance(0, x) - (f64::from(x) + step)).abs() < 1e-3,
+            "the leaving edge starts past the merged run"
+        );
+    }
+    assert!(
+        distance(0, 9.9) < quarter && distance(0, 10.1) > quarter,
+        "at a quarter, the first edge is whole and nothing past x = 10 shows"
+    );
+}
+
+#[test]
+fn a_closed_line_keeps_its_seam_however_its_last_point_is_written() {
+    let plain = [
+        Vec2::new(0.0, 0.0),
+        Vec2::new(20.0, 0.0),
+        Vec2::new(0.0, 20.0),
+    ];
+    let mut repeated = plain.to_vec();
+    repeated.push(Vec2::new(0.0, 0.0));
+    let mut near = plain.to_vec();
+    near.push(Vec2::new(0.0, 0.02));
+    let cache = cache(
+        0,
+        1,
+        &[closed_line(plain), closed_line(repeated), closed_line(near)],
+    );
+    let (mut input, mut mesh) = (BuildInput::new(), Mesh::new());
+    build(&mut input, &mut mesh, &cache).expect("it builds");
+    let along = |piece: u32, at: [f32; 2]| {
+        let found = sampled(&mesh, piece, at);
+        let [distance, _] = found.first().copied().expect("the stroke covers the point");
+        distance
+    };
+    let read = |piece: u32, at: [f32; 2]| {
+        along(piece, at) / f64::from(mesh.pieces()[usize::try_from(piece).expect("a piece")].length)
+    };
+    for at in [[5.0, 0.25], [15.0, 0.25], [0.25, 15.0], [0.25, 5.0]] {
+        let expected = read(0, at);
+        for piece in [1, 2] {
+            assert!(
+                (read(piece, at) - expected).abs() < 1e-3,
+                "piece {piece} at {at:?}: {} against {expected}",
+                read(piece, at)
+            );
+        }
+    }
+    for at in [[5.0, 0.25], [15.0, 0.25], [0.25, 15.0], [0.25, 5.0]] {
+        for (piece, within) in [(1, 1e-3), (2, 0.02)] {
+            assert!(
+                (along(piece, at) - along(0, at)).abs() < within,
+                "dashes walk piece {piece} at {at:?} as the plain spelling, whose source differs \
+                 by at most the near point's 0.02: {} against {}",
+                along(piece, at),
+                along(0, at)
+            );
+        }
+    }
+    assert!(read(0, [5.0, 0.25]) < 0.1, "the first edge reveals first");
+    assert!(read(0, [0.25, 5.0]) > 0.9, "the last edge reveals last");
+}
+
+#[test]
+fn a_closed_line_lyon_keeps_two_points_of_goes_out_and_back() {
+    let three = [
+        Vec2::new(0.0, 0.0),
+        Vec2::new(17.0, 0.0),
+        Vec2::new(17.01, 0.0),
+    ];
+    let cache = cache(0, 1, &[closed_line(three)]);
+    let (mut input, mut mesh) = (BuildInput::new(), Mesh::new());
+    build(&mut input, &mut mesh, &cache).expect("it builds");
+    let legs: Vec<bool> = mesh.pieces().iter().map(|piece| piece.retrace).collect();
+    assert_eq!(legs, [false, true], "out, then back");
+    let total = 2.0 * f64::from(17.01_f32);
+    assert!((f64::from(mesh.pieces()[0].length) - total).abs() < 1e-5);
+    let [[out, _]] = sampled(&mesh, 0, [9.0, 0.5])[..] else {
+        panic!("one outward triangle");
+    };
+    let [[back, _]] = sampled(&mesh, 1, [9.0, 0.5])[..] else {
+        panic!("one return triangle");
+    };
+    assert!((out - 9.0).abs() < 1e-4, "{out}");
+    assert!(
+        (back - (f64::from(17.01_f32) + 8.01)).abs() < 0.01,
+        "{back}"
+    );
+}
+
+#[test]
+fn every_stroke_triangle_starts_at_its_earliest_vertex() {
+    let mut run = vec![Vec2::new(0.0, 0.0)];
+    run.extend((1..=500).map(|at| Vec2::new(if at % 2 == 1 { 0.04 } else { 0.0 }, 0.0)));
+    run.extend([
+        Vec2::new(10.0, 0.0),
+        Vec2::new(10.04, 0.0),
+        Vec2::new(10.0, 0.0),
+    ]);
+    run.extend([
+        Vec2::new(20.0, 0.0),
+        Vec2::new(20.0, 10.0),
+        Vec2::new(20.04, 10.0),
+    ]);
+    let prims = [
+        line(run),
+        closed_line([
+            Vec2::new(0.0, 0.0),
+            Vec2::new(20.0, 0.0),
+            Vec2::new(0.0, 20.0),
+            Vec2::new(0.0, 0.02),
+        ]),
+        closed_line([
+            Vec2::new(0.0, 0.0),
+            Vec2::new(17.0, 0.0),
+            Vec2::new(17.01, 0.0),
+        ]),
+    ];
+    let cache = cache(0, 1, &prims);
+    let (mut input, mut mesh) = (BuildInput::new(), Mesh::new());
+    build(&mut input, &mut mesh, &cache).expect("it builds");
+    let along = |index: u32| mesh.vertices()[usize::try_from(index).expect("an index")].along;
+    let (triangles, rest) = mesh.indices().as_chunks::<3>();
+    assert!(!triangles.is_empty() && rest.is_empty());
+    for corners in triangles {
+        let [first, second, third] = corners.map(along);
+        assert!(
+            first <= second && first <= third,
+            "a triangle's skip is read from its earliest point: {first}, {second}, {third}"
+        );
+    }
+}
+
+#[test]
+fn a_triangle_starts_at_an_earliest_corner_when_two_tie() {
+    for along in [
+        [20.0, 10.0, 10.0],
+        [10.0, 20.0, 10.0],
+        [10.0, 10.0, 20.0],
+        [5.0, 5.0, 5.0],
+        [20.0, 30.0, 10.0],
+    ] {
+        let first = along[crate::stage::earliest(along)];
+        assert!(
+            along.iter().all(|other| first <= *other),
+            "{along:?} starts at {first}"
+        );
+    }
 }
 
 #[test]
@@ -870,6 +1128,22 @@ fn a_border_cuts_straight_across_its_band_as_main_does() {
     );
     let corner = reveal(2, [1.0, 1.5]);
     assert!((0.0..=1.0).contains(&corner), "{corner}");
+}
+
+#[test]
+fn the_fill_reservation_is_not_a_bound_lyon_can_emit_past_the_charge() {
+    let step = r#"{"id":"s","put":[{"shape":{"id":"f","kind":"polygon","fill":"blue","width":0,"points":[[0.07,0.93],[0.38,0.59999996],[0.22999999,0.37],[0.22999999,0.66999996],[0.32999998,0.089999996],[0.48999998,0.45],[0.84,0.14]]}}]}"#;
+    let view = fixture::view("g", &[step.to_owned()], &mut GlobalBudget::default());
+    let (_, scale, prims) = view.shared_sources().next().expect("the fill");
+    let charged = PaintWork::of(prims, scale).fill_vertices;
+    let boxed = Stager::new().stage(&view);
+    let (mut input, mut mesh) = (BuildInput::new(), Mesh::new());
+    build(&mut input, &mut mesh, render(&*boxed)).expect("it builds");
+    assert!(
+        mesh.vertices().len() > charged,
+        "{} vertices against a charge of {charged}",
+        mesh.vertices().len()
+    );
 }
 
 fn of_piece(mesh: &Mesh, piece: u32) -> impl Iterator<Item = &crate::Vertex> {

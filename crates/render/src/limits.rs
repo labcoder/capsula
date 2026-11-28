@@ -67,9 +67,11 @@ pub const MESH_VERTICES: usize =
 /// either; it reserves 2v triangles. A band takes two per outline edge.
 pub const MESH_INDICES: usize = 3
     * (6 * MAX_GLOBAL_PATH_SEGMENTS + 2 * MAX_GLOBAL_FILL_VERTICES + 2 * MAX_GLOBAL_OUTLINE_POINTS);
-/// Mesh pieces: one per drawn primitive, and a second for a rect with both a fill and a
-/// border, whose border charges at least five outline points.
-pub const MESH_PIECES: usize = INPUT_PRIMS + MAX_GLOBAL_OUTLINE_POINTS / RECT_POINTS;
+/// Mesh pieces: one per drawn primitive, a second for a rect with both a fill and a border,
+/// whose border charges at least five outline points, and a second for a closed line of two
+/// kept points, whose return leg is its own piece; every line charges at least one segment.
+pub const MESH_PIECES: usize =
+    INPUT_PRIMS + MAX_GLOBAL_OUTLINE_POINTS / RECT_POINTS + MAX_GLOBAL_PATH_SEGMENTS;
 /// What lyon's tessellators may keep between builds: an allowance, main's for the same
 /// tessellator, not a bound. lyon grows its own buffers, which the mesh can't cap; the
 /// allocation tests measure what they keep against it.
