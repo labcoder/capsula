@@ -4,6 +4,8 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use kumochi_shell_core::startup::quit_after_ms;
+
 use super::geometry::Position;
 
 /// Why the shell refused these diagnostic flags; no argument values are retained.
@@ -124,11 +126,7 @@ impl Launch {
                 }
                 launch.receipt_fixture = true;
             } else if let Some(value) = arg.strip_prefix("--quit-after-ms=") {
-                let millis = value.parse::<u64>().map_err(|_| LaunchError::QuitDelay)?;
-                if !(1..=120_000).contains(&millis) {
-                    return Err(LaunchError::QuitDelay);
-                }
-                launch.quit_delay = Some(Duration::from_millis(millis));
+                launch.quit_delay = Some(quit_after_ms(value).ok_or(LaunchError::QuitDelay)?);
             }
         }
         #[cfg(debug_assertions)]
