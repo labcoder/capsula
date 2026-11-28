@@ -25,6 +25,29 @@ Gate identity pass this check, including a release-profile build with
 still exits 1, and off Windows every build exits 69. The refusal, and its test, go away when this
 shell takes over.
 
+## Staging it beside a brain
+
+The brain admits only the shell named `SHELL_EXE` (`kumochi.exe`) beside its own executable, and
+the shell checks the brain's full path too, so `kumochi-nsh` can't pair with a brain from its
+build folder. `stage-nsh`, on Windows only, prepares a folder with those names. This shell doesn't
+link to a brain yet; the folder is for the change that adds the link.
+
+As the gate identity only, it builds `kumochi-shell-nsh` and `kumochi-brain` as one debug Gate
+build, creates the new folder, copies the shell in as `kumochi.exe` and the brain as
+`kumochid.exe`, and checks each copy as the gate tools check their images
+([gate identity](gate-identity.md#starting-a-gate-tool)). Before building, it refuses a folder
+that already exists or whose parent doesn't. It checks both built images before it makes the
+folder, so a pair that doesn't fit leaves nothing behind. It launches neither image. It never
+writes over a file, and it holds the new folder open while it copies, so the folder can't be
+renamed or removed until they are done. It expects a parent folder that nothing else is changing
+while it runs. It removes nothing either: if a copy fails, the folder stays and the error says it
+is incomplete. On success it prints the folder. One build selects both packages, so the brain's
+dependencies resolve with NativeShell's feature requests.
+
+```bash
+cargo run --release --package xtask --features kumochi-protocol/gate-identity -- stage-nsh <new-folder>
+```
+
 ## Start-up
 
 On Windows, `main` goes in this order:
