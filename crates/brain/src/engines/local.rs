@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use kumochi_protocol::message::{ConnectionKind, ModelSlug};
 use tokio::sync::mpsc;
-use tokio::time::timeout;
+use tokio::time::{Instant, timeout_at};
 
 use super::{Answer, Engine, EngineFailure, Finish, Round, RunRequest, SendGate, TurnEvent};
 use crate::config::tuning::ModelTuning;
@@ -135,22 +135,30 @@ fn encode(model: &ModelSlug, request: &ModelRequest) -> Result<ChatBody, Failure
 }
 
 /// Text the last read left, then the round's outcome, all within one `wait` for room. Text
-/// before a failure arrives before it; nothing arrives late.
+/// before a failure arrives before it; nothing arrives late, and text whose own wait for room
+/// ran out never gets a second.
 async fn deliver(
     events: &mpsc::Sender<TurnEvent>,
     pending: String,
     finish: Finish,
     wait: Duration,
 ) {
-    // A round whose outcome can't be told is reported by its pump as unfinished.
-    timeout(wait, async {
-        if !pending.is_empty() {
-            events.send(TurnEvent::TextDelta(pending)).await?;
+    let by = Instant::now() + wait;
+    let cut = matches!(
+        finish,
+        Finish::Failed(EngineFailure::Local(Failure::Backpressure))
+    );
+    let text = (!pending.is_empty() && !cut).then_some(TurnEvent::TextDelta(pending));
+    for event in text.into_iter().chain([TurnEvent::Finished(finish)]) {
+        // A round whose outcome can't be told is reported by its pump as unfinished.
+        let Ok(Ok(room)) = timeout_at(by, events.reserve()).await else {
+            return;
+        };
+        if Instant::now() >= by {
+            return;
         }
-        events.send(TurnEvent::Finished(finish)).await
-    })
-    .await
-    .ok();
+        room.send(event);
+    }
 }
 
 /// A read's text, handed on only once the round's channel has room for it.

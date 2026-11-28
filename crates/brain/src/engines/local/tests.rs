@@ -299,6 +299,42 @@ async fn a_consumer_that_never_takes_gets_nothing_late() {
     assert_eq!(events.recv().await, None);
 }
 
+/// A read whose wait for room ran out already had its wait: only the failure follows.
+#[tokio::test]
+async fn text_cut_by_its_own_wait_is_never_offered_again() {
+    let (events_tx, mut events) = mpsc::channel(2);
+    let cut = Finish::Failed(EngineFailure::Local(Failure::Backpressure));
+    timeout(BOUND, deliver(&events_tx, "cut".to_owned(), cut, QUIET))
+        .await
+        .expect("delivered");
+    drop(events_tx);
+    assert_eq!(events.recv().await, Some(failed(Failure::Backpressure)));
+    assert_eq!(events.recv().await, None);
+}
+
+/// Room that opens on the same poll as the cutoff carries nothing.
+#[tokio::test(start_paused = true)]
+async fn room_that_opens_as_the_wait_ends_carries_nothing() {
+    let (events_tx, mut events) = mpsc::channel(1);
+    events_tx
+        .send(TurnEvent::TextDelta("earlier".to_owned()))
+        .await
+        .expect("queued");
+    let sender = events_tx.clone();
+    let delivery = tokio::spawn(async move {
+        deliver(&sender, "pending".to_owned(), Finish::Completed, QUIET).await;
+    });
+    tokio::task::yield_now().await;
+    assert_eq!(
+        events.try_recv(),
+        Ok(TurnEvent::TextDelta("earlier".to_owned()))
+    );
+    tokio::time::advance(QUIET).await;
+    delivery.await.expect("delivery");
+    drop(events_tx);
+    assert_eq!(events.recv().await, None);
+}
+
 /// Esc drops the round, which closes its connection mid-answer.
 #[tokio::test]
 async fn dropping_the_round_closes_its_connection() {
