@@ -214,6 +214,7 @@ pub(super) fn presence(cx: &mut TestAppContext) -> Entity<Presence> {
             delete_retry: None,
             error: None,
             refusal: None,
+            held_submit: None,
         });
         presence.update(cx, |this, cx| {
             this.dispatcher(cx);

@@ -265,9 +265,21 @@ impl Coordinator {
             current.effective_snapshot(),
             current.arrived,
         );
-        let key_results = current.tools.key_results.clone();
-        let drawings = self.drawing.digest(thread);
-        let picture_models = self.picture_models();
+        // A local route sends no drawings, pictures or key results, so a build already bound
+        // to one gathers none for the page reader to drop.
+        let local = current
+            .route
+            .is_some_and(|route| route.kind == ConnectionKind::LocalChat);
+        let key_results = if local {
+            Vec::new()
+        } else {
+            current.tools.key_results.clone()
+        };
+        let (drawings, picture_models) = if local {
+            Default::default()
+        } else {
+            (self.drawing.digest(thread), self.picture_models())
+        };
         let mut build = Build::new(key, exposed, None, control.clone());
         build.screen_digests = drawings
             .recipients()

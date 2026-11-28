@@ -31,6 +31,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::platform::microphone::CollectionGate;
 use crate::platform::{self, Connection, HANDSHAKE_TIMEOUT, PipeClient, RETRY_DELAY};
+use crate::presenter::Naming;
 #[cfg(any(test, feature = "test-support"))]
 use crate::speaker;
 
@@ -1000,6 +1001,14 @@ impl LinkHandle {
             })
     }
 
+    /// A queued pair the brain hasn't acknowledged the audio registration of: its turns wait for
+    /// [`LinkEvent::TextReady`], which comes by the pair's startup deadline or the pair ends.
+    pub fn awaits_text_ready(&self, session: &Session) -> bool {
+        self.worker.is_some()
+            && session.open()
+            && self.shared.output.awaiting_registration(session.generation)
+    }
+
     pub fn can_start_voice_gesture(&self, generation: u64) -> bool {
         if self.worker.is_none() || self.is_quitting() {
             return false;
@@ -1311,7 +1320,7 @@ impl LinkHandle {
     }
 
     /// Queues a control message for `session`'s brain. False when the connection ended or the
-    /// mailbox refused. Stop, drawing clears and queued scene refusals don't take the outbox lock.
+    /// mailbox refused. Stop, drawing clears and scene refusals don't take the outbox lock.
     /// shortcut: control Debug prints physical points for assertions; use only redacted kinds if adding diagnostics here.
     pub fn send_control(&self, session: &Session, message: ControlToBrain) -> bool {
         if self.worker.is_none()
@@ -1341,8 +1350,8 @@ impl LinkHandle {
             ControlToBrain::Stop { .. }
                 | ControlToBrain::StopScenes { .. }
                 | ControlToBrain::ClearDrawing { .. }
-        ) || session.io.queued && matches!(&message, ControlToBrain::SceneFailed { .. })
-        {
+                | ControlToBrain::SceneFailed { .. }
+        ) {
             #[cfg(any(test, feature = "test-support"))]
             if let Some(recording) = &self.control_recording {
                 return recording.try_send(message).is_ok();
@@ -2839,6 +2848,27 @@ impl<R: Read> Read for Counted<R> {
         self.bytes += read;
         Ok(read)
     }
+}
+
+/// What a data frame names for a shell that draws nothing. It must name exactly the kinds
+/// `read_data` tags as [`LinkEvent::SceneData`], and `None` for every other frame; a test
+/// runs the real reader to hold the two together.
+#[must_use]
+pub fn scene_naming(message: &DataToShell) -> Option<Naming<'_>> {
+    Some(match message {
+        DataToShell::SceneBegin { scene, .. } | DataToShell::SceneStepCommit { scene, .. } => {
+            Naming::Draws(*scene)
+        }
+        DataToShell::SceneSnapshotV1 { chunk } => Naming::Retained(chunk.scene),
+        DataToShell::SceneCutApplied { scene, cut, .. } if cut.activated == 0 => {
+            Naming::Retires(std::slice::from_ref(scene))
+        }
+        DataToShell::ScenesRemoved { scenes } | DataToShell::ScenesReplaced { scenes, .. } => {
+            Naming::Retires(scenes)
+        }
+        DataToShell::SceneCutApplied { .. } | DataToShell::SceneEnd { .. } => Naming::Other,
+        _ => return None,
+    })
 }
 
 /// Reads data frames and passes them on until the pipe ends. A malformed frame, or the data pipe

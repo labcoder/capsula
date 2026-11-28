@@ -86,6 +86,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_binary_has_the_name_the_staging_task_copies() {
+        assert_eq!(
+            concat!(env!("CARGO_BIN_NAME"), ".exe"),
+            constants::NSH_SHELL_EXE
+        );
+    }
+
+    #[test]
     fn an_argument_that_isnt_unicode_is_unknown() {
         // The flag with a valid delay, then an unpaired surrogate: a Windows argument, not Unicode.
         let mut arg: Vec<u16> = "--quit-after-ms=2000".encode_utf16().collect();
