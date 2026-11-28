@@ -125,8 +125,6 @@ pub(crate) async fn pump(
 ) {
     let Some(link) = link else {
         act(Act::Quit);
-        // Only once the quit has armed the grace, since a log write can block.
-        tracing::error!("can't start the link");
         return;
     };
     let mut shell = Shell::new(link);
@@ -145,8 +143,8 @@ pub(crate) async fn pump(
 }
 
 /// Starts the scene dropper, then the link on `Legacy` with no audio output announced, so the
-/// brain makes no speech for it. `None` when either can't start, and the pump logs it after
-/// asking for quit; nothing then holds the sender, so no clone of it outlives the link.
+/// brain makes no speech for it. `None` when either can't start, and the pump asks for quit;
+/// nothing then holds the sender, so no clone of it outlives the link.
 pub(crate) fn started() -> (Option<LinkHandle>, Receiver<LinkEvent>) {
     // Unbounded and always drained: a Legacy admission can poll a full receiver forever.
     let (sender, events) = async_channel::unbounded();

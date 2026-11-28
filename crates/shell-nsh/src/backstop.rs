@@ -24,6 +24,15 @@ pub(crate) enum Limit {
     Start(Instant),
 }
 
+impl Limit {
+    /// The limit for a shell that took its lock at `now`, given its `--quit-after-ms`.
+    pub(crate) fn at_start(now: Instant, quit_after: Option<Duration>) -> Self {
+        quit_after.map_or(Self::Start(now), |after| {
+            Self::Deadline(now + after + GRACE)
+        })
+    }
+}
+
 /// What the shell tells the backstop, with the instant it was decided.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Order {
@@ -157,6 +166,25 @@ mod tests {
 
     fn start(t0: Instant) -> Watch {
         Watch::new(Limit::Start(t0), ATTEMPT_T)
+    }
+
+    #[test]
+    fn the_limit_at_start_is_the_attempt_or_the_deadline_plus_the_grace() {
+        let t0 = Instant::now();
+        assert_eq!(
+            Watch::new(Limit::at_start(t0, None), START_LIMIT).at(),
+            Some(t0 + Duration::from_secs(30)),
+            "no flag: 30 s from the lock"
+        );
+        assert_eq!(
+            Watch::new(
+                Limit::at_start(t0, Some(Duration::from_secs(2))),
+                START_LIMIT
+            )
+            .at(),
+            Some(t0 + Duration::from_secs(17)),
+            "a 2 s flag: its deadline plus the 15 s grace"
+        );
     }
 
     #[test]

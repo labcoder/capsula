@@ -104,8 +104,9 @@ fn pumped(link: Option<LinkHandle>, events: Vec<LinkEvent>) -> Vec<&'static str>
     acts
 }
 
+// The plan's row "killed and not coming back".
 #[test]
-fn killed_and_not_coming_back_reconnects_fails_and_quits_once() {
+fn a_lost_link_that_fails_quits_once() {
     let mut shell = Shell::new(LinkHandle::detached());
     assert_eq!(
         applied(
@@ -135,8 +136,9 @@ fn an_unavailable_output_quits_at_once() {
     );
 }
 
+// The plan's row "killed and relaunched".
 #[test]
-fn killed_and_relaunched_reconnects_without_quitting() {
+fn a_lost_link_that_reconnects_does_not_quit() {
     let (first, second) = (session(1), session(2));
     let mut shell = Shell::new(LinkHandle::detached());
     assert_eq!(

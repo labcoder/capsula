@@ -63,16 +63,20 @@ impl Component for EmptyApp {
                 ask();
             });
         }
+        let failed = link.is_none();
         spawn(shell::pump(link, events, move |act| match act {
             Act::Opened => backstop.tell(Order::Connected(Instant::now())),
             Act::Reconnecting => backstop.tell(Order::Reconnecting(Instant::now())),
             Act::Quit => ask_quit(&owner, root),
-            Act::End(link, session) => {
-                // Detached: ending waits briefly on the output owner's lock, never on this thread.
-                drop(blocking(move || link.end(&session)));
+            // Detached: ending waits briefly on the output owner's lock, never on this thread.
+            Act::End(link, session) => drop(blocking(move || {
+                link.end(&session);
                 tracing::warn!("the scene refusal was refused; ending the connection");
-            }
+            })),
         }));
+        if failed {
+            drop(blocking(|| tracing::error!("can't start the link")));
+        }
         view()
     }
 }
@@ -85,15 +89,11 @@ fn ask_quit(owner: &Quit, root: Owner) {
     };
     root.run(|| {
         spawn(async move {
-            let finished = match begun {
-                Begun::Finish(link) => blocking(move || link.finish_quit()).await.is_ok(),
-                Begun::Now => true,
-            };
-            quit();
-            // Only after `quit()`, since a log write can block.
-            if !finished {
-                tracing::warn!("the link's quit ended early");
+            if let Begun::Finish(link) = begun {
+                // Quit goes on however the wait ended.
+                let _ended = blocking(move || link.finish_quit()).await;
             }
+            quit();
         })
     });
 }

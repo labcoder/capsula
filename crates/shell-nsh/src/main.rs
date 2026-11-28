@@ -48,9 +48,7 @@ fn main() -> ExitCode {
     // NativeShell can keep running without the engine that runs the link, or wait on a message
     // box, and a log write can block: a hidden shell must never keep the session's lock forever,
     // so nothing comes between taking the lock and arming.
-    let limit = deadline.map_or(Limit::Start(now + START_LIMIT), |deadline| {
-        Limit::Deadline(deadline + GRACE)
-    });
+    let limit = Limit::at_start(now, launch.quit_after);
     let armed = Backstop::arm(limit, GRACE, START_LIMIT, || {
         // `run_app` ends a run that got its UI thread this way too: `std::process::exit` off it.
         std::process::exit(i32::from(OVERDUE))

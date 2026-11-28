@@ -83,13 +83,14 @@ The app is a Rust root with an empty view. Its main window is created hidden, wi
 under the app id `SHELL_APP_ID` (`ai.kumochi.dev.shell`, `ai.kumochi.gate.shell`; release's
 `ai.kumochi.shell` stays unused while it's refused) and the title `DISPLAY_NAME`. NativeShell's
 image cache is off. The root runs on NativeShell's engine thread and does everything below in its
-own tasks there; nothing it runs there blocks. A failed engine or window start never mounts the
-root, so none of it runs then, and only the backstop ends the process. Mounting alone doesn't
-disarm the backstop: only an open connection does. When the window or UI thread can't start, a
-person dismissing NativeShell's error dialog can end the process with 1 before the backstop fires.
+own tasks there, and hands anything that waits to the blocking pool. A failed engine or window
+start never mounts the root, so none of it runs then: the backstop ends the process, unless a
+person dismisses NativeShell's error dialog first, which ends it with 1. Mounting alone doesn't
+disarm the backstop: only an open connection does.
 
-On the engine thread no log write comes before arming the quit's grace, sealing a session or
-`quit()`, since a log write can block.
+This crate writes no log on the engine thread, since a log write can block and the engine thread
+still has work that frees the lock. Its two logs there, a link that couldn't start and a refused
+scene refusal, are written on the blocking pool.
 
 ## The link and the pump
 
@@ -99,7 +100,7 @@ threads. It uses `AudioSession::Legacy` and never announces an audio output, so 
 speech for it, and it gives the empty text profile (`DrawingText::default()`). The event channel is
 unbounded and always drained, since a Legacy admission can poll a full receiver forever. The link
 holds the only event sender, so the channel ends when the link does. If the dropper, `prepare` or
-`spawn` fails, the shell asks the quit, then logs `can't start the link`.
+`spawn` fails, the shell asks the quit and logs `can't start the link` from the blocking pool.
 
 The pump (`shell.rs`) is one task that takes the link's events in order, in batches
 (`link::batch`), and hands each to a plain reducer, `Shell`, which holds the open `Session` and a
@@ -123,8 +124,8 @@ the framework. What it does with each event:
   settings and account state arrive unasked on connect and owe no reply, and the rest answer flows
   this shell never starts.
 
-When the event channel ends, the pump asks for quit. The pump logs only a link that couldn't
-start and a refused refusal, each after its action, never a frame's content.
+When the event channel ends, the pump asks for quit. Neither the pump nor the reducer logs, and
+no log carries a frame's content.
 
 A reconnect repeats the credential read and the brain launch that the start limit exists for, and
 the link's own attempt deadline can't interrupt them, so with no flag `Reconnecting` arms the
@@ -204,10 +205,11 @@ machine stretches them.
   124 skip the ordered quit. A forced exit neither guarantees `Quitting` reaches the brain nor
   undoes one already sent, and a brain that survives may relaunch the shell.
 - A close press or a quit request that arrives before the root has registered its listeners isn't
-  intercepted, so it closes the app without the ordered quit.
-- The tests run the reducer on `Session::detached` and `LinkHandle::recording` fixtures: they show
-  its credit and refusals and that quit is asked once. `Quitting` on the wire, a real reconnect
-  and a real kill are left to the native session.
+  guaranteed to be intercepted: it can close the app without the ordered quit, and with
+  `close_on_press` off an early close press can simply be ignored.
+- The tests run the reducer on `Session::detached` and `LinkHandle::detached()` with
+  `record_controls()`: they show its credit and refusals and that quit is asked once. `Quitting`
+  on the wire, a real reconnect and a real kill are left to the native session.
 
 NativeShell's `log` lines go nowhere: no logger is installed, and no NativeShell crate uses
 `tracing`, so none reach Kumochi's log. Their content isn't vetted for it.
