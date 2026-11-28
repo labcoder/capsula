@@ -18,6 +18,7 @@ const MAIN: ThreadId = ThreadId(1);
 /// local.
 #[test]
 fn local_routes_are_refused_before_the_store() {
+    use crate::config::DefaultIntent;
     let on = |connection| ModelChoice {
         model: ModelSlug::new("gpt-6.1-sol").expect("valid"),
         effort: Effort::Medium,
@@ -25,14 +26,18 @@ fn local_routes_are_refused_before_the_store() {
     };
     for (local_default, choice) in [
         (
-            false,
+            DefaultIntent::Other,
             Some(on(kumochi_protocol::message::ConnectionKind::LocalChat)),
         ),
         (
-            true,
+            DefaultIntent::Local,
             Some(on(kumochi_protocol::message::ConnectionKind::ChatGpt)),
         ),
-        (true, None),
+        (DefaultIntent::Local, None),
+        (
+            DefaultIntent::Unknown,
+            Some(on(kumochi_protocol::message::ConnectionKind::ChatGpt)),
+        ),
     ] {
         let mut core = fresh();
         core.local_default = local_default;
@@ -47,7 +52,7 @@ fn local_routes_are_refused_before_the_store() {
                 thread: T,
                 result: kumochi_protocol::message::ChoiceRead::Failed,
             })]),
-            "{local_default} {choice:?}"
+            "{local_default:?} {choice:?}"
         );
     }
 }
@@ -172,7 +177,7 @@ fn deleting_the_main_thread_answers_not_hidden_before_anything_else() {
                 run: RunId(11),
                 text: "again".into(),
                 screen: None,
-                local_default: false,
+                local_default: crate::config::DefaultIntent::Other,
             }),
             state(RunId(11), MAIN, Phase::Thinking),
             Effect::ArmDeadline {

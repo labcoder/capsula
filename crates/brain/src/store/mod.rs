@@ -107,9 +107,6 @@ pub enum StoreError {
     /// A page couldn't be read or encoded; SQLite details may contain user content.
     #[error("can't read the store page")]
     Read,
-    /// A turn's saved route is the local server, which no build serves yet.
-    #[error("a turn for the local server isn't stored")]
-    Dormant,
     /// A replay read exhausted its budget; no partial context is usable.
     #[error("the history read exhausted its budget")]
     RecallBudget,
@@ -164,7 +161,6 @@ impl std::fmt::Debug for StoreError {
             Self::StaleId => "StaleId",
             Self::Retired => "Retired",
             Self::Read => "Read",
-            Self::Dormant => "Dormant",
             Self::RecallBudget => "RecallBudget",
             Self::RecoveryContext => "RecoveryContext",
             Self::Drawing => "Drawing",

@@ -341,7 +341,7 @@ impl Brain {
             // hand stays: a turn typed under it then never meets another route at the store.
             if let Change::User(SettingsOp::SetDefaultModel(choice)) = &change
                 && (choice.connection == kumochi_protocol::message::ConnectionKind::LocalChat
-                    || self.config.local_intent())
+                    || self.config.local_intent() == crate::config::DefaultIntent::Local)
             {
                 self.settled(
                     epoch,

@@ -15,10 +15,11 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use kumochi_protocol::message::{ConnectionKind, Deleted, RunId, SceneId, ThreadId};
+use kumochi_protocol::message::{ConnectionKind, Deleted, ErrorKey, RunId, SceneId, ThreadId};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
+use crate::config::DefaultIntent;
 use crate::coordinator::{Input, ScreenGrantRefusal, StoreOp};
 use crate::dispatch::Committed;
 use crate::platform::SessionLock;
@@ -843,12 +844,17 @@ fn serve_op(
             screen,
             local_default,
         } => write(store, purger, acks, run, "turn", |store| {
-            // No build serves a local server yet, so its turn is never kept for another to replay.
-            // shortcut: it fails as a store failure, with that copy; the local task binding gives
-            // it its own refusal.
-            let route = store.saved_route(thread)?;
-            if route == Some(ConnectionKind::LocalChat) || (route.is_none() && local_default) {
-                return Err(StoreError::Dormant);
+            // No build serves a local server yet, so its turn is never kept for another to replay,
+            // nor one that inherits a default that can't be read and may name it.
+            let refused = match (store.saved_route(thread)?, local_default) {
+                (Some(ConnectionKind::LocalChat), _) | (None, DefaultIntent::Local) => {
+                    Some(ErrorKey::LocalOff.into())
+                }
+                (None, DefaultIntent::Unknown) => Some(ErrorKey::ConfigUnreadable.into()),
+                _ => None,
+            };
+            if let Some(reason) = refused {
+                return Ok(Input::TurnRefused { run, reason });
             }
             store
                 .begin_held_turn(thread, title.as_deref(), run, &text, screen)
