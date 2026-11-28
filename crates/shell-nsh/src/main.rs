@@ -1,9 +1,16 @@
-//! `kumochi-nsh`, Kumochi's `NativeShell` shell. It has no console window and starts nothing yet.
+//! `kumochi-nsh`, Kumochi's `NativeShell` shell. It has no console window. It starts like the GPUI
+//! shell, holds the same single-instance lock and log, and runs an empty, hidden app until its
+//! `--quit-after-ms` deadline.
 #![cfg_attr(not(test), windows_subsystem = "windows")]
+
+mod launch;
+mod platform;
 
 use std::process::ExitCode;
 
-use kumochi_protocol::constants::ProductIdentity;
+use kumochi_protocol::constants::{self, ProductIdentity};
+
+use crate::launch::Launch;
 
 /// The process exit code for `identity`: 0 for Dev and Gate, else the brain's 69 for unsupported.
 fn exit_code(identity: ProductIdentity) -> u8 {
@@ -16,7 +23,24 @@ fn exit_code(identity: ProductIdentity) -> u8 {
 }
 
 fn main() -> ExitCode {
-    ExitCode::from(exit_code(ProductIdentity::ACTIVE))
+    let refused = exit_code(ProductIdentity::ACTIVE);
+    if refused != 0 {
+        return ExitCode::from(refused);
+    }
+    let launch = Launch::parse(std::env::args_os().skip(1));
+    let (launch, lock) = match platform::start(launch) {
+        Ok(started) => started,
+        Err(code) => return code,
+    };
+    tracing::info!(
+        build = kumochi_protocol::BUILD_ID,
+        identity = constants::DATA_DIR,
+        edition = constants::EDITION,
+        "shell started"
+    );
+    // NativeShell ends the process itself, so the lock is held until the OS closes it at exit.
+    let _lock = lock;
+    platform::run(launch.quit_after)
 }
 
 #[cfg(test)]

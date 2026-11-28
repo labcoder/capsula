@@ -67,6 +67,16 @@ starts the screen worker and publishes the capability. Worker assembly refuses, 
 unless the mode's containment is runtime-enabled at Kernel; Group isn't enough, and it never falls
 back to uncontained workers.
 
+## The NativeShell shell's exit codes
+
+`kumochi-nsh` ([shell-nsh.md](shell-nsh.md)) isn't started by the brain or relaunched by it yet.
+
+| Exit | When |
+|---|---|
+| 0 | Its `--quit-after-ms` deadline passed and NativeShell quit, or another shell holds this session's lock |
+| 1 | The lock's admission, the log, the flags or the lock failed, or NativeShell's UI thread failed |
+| 69 | A release-identity build, before anything else, or any system other than Windows, before the lock or the log |
+
 ## Containment tiers
 
 `platform::containment(mode)` reports a tier separately from runtime admission. A tier does not

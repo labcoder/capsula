@@ -110,6 +110,24 @@ fn the_gate_identity_shares_no_stored_name_with_the_real_ones() {
 }
 
 #[test]
+fn each_edition_has_its_own_shell_app_id() {
+    let ids = [
+        ProductIdentity::RELEASE.shell_app_id,
+        ProductIdentity::DEV.shell_app_id,
+        ProductIdentity::GATE.shell_app_id,
+    ];
+    assert_eq!(
+        ids,
+        [
+            "ai.kumochi.shell",
+            "ai.kumochi.dev.shell",
+            "ai.kumochi.gate.shell"
+        ]
+    );
+    assert_eq!(BTreeSet::from(ids).len(), 3, "no two editions share one");
+}
+
+#[test]
 fn account_inventory_is_exact_bounded_and_disjoint() {
     let inventory = |service: &str| {
         let actual: Vec<_> = account_targets(service).collect();

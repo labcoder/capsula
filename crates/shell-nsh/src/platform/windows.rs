@@ -1,0 +1,71 @@
+//! The shell on Windows: the GPUI shell's start-up, then a `NativeShell` app with one hidden main
+//! window and no view that quits on its deadline.
+
+use std::process::ExitCode;
+use std::time::Duration;
+
+use kumochi_protocol::constants;
+use kumochi_shell_core::instance::InstanceLock;
+use kumochi_shell_core::logging;
+use kumochi_shell_core::startup::{self, Refused};
+use nsh_core::desktop::MainWindowOptions;
+use nsh_core::element::desktop::quit;
+use nsh_core::element::{Component, IntoElement, NoEvent, Props, Scope, spawn, timer, view};
+use nsh_platform_windows::{AppOptions, AppSource, CacheOptions, Root, run_app};
+
+use crate::launch::{Launch, LaunchError};
+
+/// The root's one prop, in milliseconds: props take numbers, not a `Duration`.
+#[derive(Clone, PartialEq, Props)]
+struct EmptyAppProps {
+    quit_after_ms: u64,
+}
+
+/// An app with nothing to show yet. Its one task quits the app when the deadline passes.
+struct EmptyApp;
+
+impl Component for EmptyApp {
+    type Props = EmptyAppProps;
+    type Event = NoEvent;
+
+    fn view(props: EmptyAppProps, _: Scope<NoEvent>) -> impl IntoElement {
+        spawn(async move {
+            timer(Duration::from_millis(props.quit_after_ms)).await;
+            quit();
+        });
+        view()
+    }
+}
+
+/// The GPUI shell's own start: the same lock and log, so the two shells exclude each other.
+pub(crate) fn start(
+    launch: Result<Launch, LaunchError>,
+) -> Result<(Launch, InstanceLock), ExitCode> {
+    startup::start(InstanceLock::admit_current_session, launch, || {
+        logging::init(constants::SHELL_LOG)
+    })
+    .map_err(Refused::exit_code)
+}
+
+/// Runs the app until it quits, then ends the process: 0 after a quit, 1 if its UI thread failed.
+pub(crate) fn run(quit_after: Duration) -> ExitCode {
+    let quit_after_ms = u64::try_from(quit_after.as_millis()).unwrap_or(u64::MAX);
+    let mut window = MainWindowOptions::default();
+    window.default_visible = Some(false);
+    let root = Root::new::<EmptyApp>(move || EmptyAppProps { quit_after_ms })
+        .app_id(constants::SHELL_APP_ID)
+        .main_window(window);
+    // shortcut: NativeShell's own `log` lines go nowhere, since their content (paths, foreign
+    // error text) isn't vetted for Kumochi's log; bridge them through an allow-list of targets
+    // once the shell shows something worth diagnosing.
+    run_app(
+        AppSource::Rust(root),
+        AppOptions {
+            app_id: constants::SHELL_APP_ID.to_owned(),
+            title: constants::DISPLAY_NAME.to_owned(),
+            skip_taskbar: true,
+            cache: CacheOptions::off(),
+            ..AppOptions::default()
+        },
+    )
+}
