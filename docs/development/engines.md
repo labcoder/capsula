@@ -755,9 +755,10 @@ each user or assistant message as itself; a `Developer` message, any other item 
 fails the round as `Request` before the gate is asked.
 
 **How it ends.** Text goes to the round's channel only once there's room for it, so the pump
-sets the pace. Text a failing read left, then the outcome, go out within one backpressure wait,
-checked against its deadline before each goes out; text whose own wait for room ran out
-(`Backpressure`) never gets a second. A round whose outcome can't be told in that time is
+sets the pace; each read's wait polls its cutoff first, so room that opens as it passes takes
+nothing. Text a failing read left, then the outcome, go out within one backpressure wait,
+checked against its deadline before each goes out; text whose wait for room was cut, by its
+own cutoff (`Backpressure`) or the round's deadline (`Deadline`), never gets a second. A round whose outcome can't be told in that time is
 reported by its pump as truncated, which a local route shows as unfinished. A `Rebuild` was never written, so it ends as
 `ReceiptOrdered`. Every other failure maps to fixed copy, and none offers a Retry, a sign-in or
 a cloud recovery:

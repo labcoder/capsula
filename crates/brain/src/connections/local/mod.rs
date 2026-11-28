@@ -18,7 +18,7 @@ use std::time::Duration;
 use kumochi_protocol::message::{ErrorKey, UserError};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
-use tokio::time::{Instant, sleep_until, timeout, timeout_at};
+use tokio::time::{Instant, sleep_until, timeout_at};
 
 use self::endpoint::LoopbackEndpoint;
 use self::reader::Reader;
@@ -130,8 +130,9 @@ pub trait Sink {
     /// The next piece of text.
     fn text(&mut self, text: &str);
 
-    /// Waits until the text so far is taken; `Break` ends the round with [`Failure::Protocol`].
-    fn taken(&mut self) -> impl Future<Output = ControlFlow<()>> + Send;
+    /// Waits until the text so far is taken, handing nothing on once `by` has passed; `Break`
+    /// ends the round with [`Failure::Protocol`].
+    fn taken(&mut self, by: Instant) -> impl Future<Output = ControlFlow<()>> + Send;
 }
 
 impl<F: FnMut(&str)> Sink for F {
@@ -139,7 +140,7 @@ impl<F: FnMut(&str)> Sink for F {
         self(text);
     }
 
-    fn taken(&mut self) -> impl Future<Output = ControlFlow<()>> + Send {
+    fn taken(&mut self, _: Instant) -> impl Future<Output = ControlFlow<()>> + Send {
         std::future::ready(ControlFlow::Continue(()))
     }
 }
@@ -262,16 +263,22 @@ async fn round<L: Lease>(
         conn.buf.drain(..length);
         // The sink already holds this read's text, so a failure in it needs no wait.
         fed?;
-        if emitted
-            && timeout(tuning.backpressure, out.taken())
-                .await
-                .map_err(|_| Failure::Backpressure)?
-                .is_break()
-        {
-            return Err(Failure::Protocol);
+        if emitted {
+            taken_within(&mut out, tuning.backpressure).await?;
         }
     }
     reader.finish()
+}
+
+/// Waits for `out` to take its text within `wait`; the sink hands nothing on past the cutoff,
+/// even when room opens on the same poll.
+pub(crate) async fn taken_within(out: &mut impl Sink, wait: Duration) -> Result<(), Failure> {
+    let by = Instant::now() + wait;
+    match timeout_at(by, out.taken(by)).await {
+        Err(_) => Err(Failure::Backpressure),
+        Ok(ControlFlow::Break(())) => Err(Failure::Protocol),
+        Ok(ControlFlow::Continue(())) => Ok(()),
+    }
 }
 
 /// Writes `request`, each write admitted by `lease` and only before `send_by`, which a socket

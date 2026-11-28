@@ -299,16 +299,50 @@ async fn a_consumer_that_never_takes_gets_nothing_late() {
     assert_eq!(events.recv().await, None);
 }
 
-/// A read whose wait for room ran out already had its wait: only the failure follows.
+/// A read whose wait for room was cut, by its own cutoff or the round's deadline, already had
+/// its wait: only the failure follows.
 #[tokio::test]
 async fn text_cut_by_its_own_wait_is_never_offered_again() {
-    let (events_tx, mut events) = mpsc::channel(2);
-    let cut = Finish::Failed(EngineFailure::Local(Failure::Backpressure));
-    timeout(BOUND, deliver(&events_tx, "cut".to_owned(), cut, QUIET))
+    for failure in [Failure::Backpressure, Failure::Deadline] {
+        let (events_tx, mut events) = mpsc::channel(2);
+        let cut = Finish::Failed(EngineFailure::Local(failure));
+        timeout(BOUND, deliver(&events_tx, "cut".to_owned(), cut, QUIET))
+            .await
+            .expect("delivered");
+        drop(events_tx);
+        assert_eq!(events.recv().await, Some(failed(failure)), "{failure:?}");
+        assert_eq!(events.recv().await, None, "{failure:?}");
+    }
+}
+
+/// A read's text whose room opens on the same poll as its cutoff stays unsent, so the round
+/// ends as `Backpressure`.
+#[tokio::test(start_paused = true)]
+async fn room_that_opens_as_a_reads_wait_ends_takes_nothing() {
+    let (events_tx, mut events) = mpsc::channel(1);
+    events_tx
+        .send(TurnEvent::TextDelta("earlier".to_owned()))
         .await
-        .expect("delivered");
+        .expect("queued");
+    let sender = events_tx.clone();
+    let wait = tokio::spawn(async move {
+        let mut text = "late".to_owned();
+        let mut out = super::Pending {
+            text: &mut text,
+            events: &sender,
+        };
+        let taken = crate::connections::local::taken_within(&mut out, QUIET).await;
+        (taken, text)
+    });
+    tokio::task::yield_now().await;
+    assert_eq!(
+        events.try_recv(),
+        Ok(TurnEvent::TextDelta("earlier".to_owned()))
+    );
+    tokio::time::advance(QUIET).await;
+    let (taken, text) = wait.await.expect("wait");
+    assert_eq!((taken, text.as_str()), (Err(Failure::Backpressure), "late"));
     drop(events_tx);
-    assert_eq!(events.recv().await, Some(failed(Failure::Backpressure)));
     assert_eq!(events.recv().await, None);
 }
 

@@ -135,8 +135,8 @@ fn encode(model: &ModelSlug, request: &ModelRequest) -> Result<ChatBody, Failure
 }
 
 /// Text the last read left, then the round's outcome, all within one `wait` for room. Text
-/// before a failure arrives before it; nothing arrives late, and text whose own wait for room
-/// ran out never gets a second.
+/// before a failure arrives before it; nothing arrives late, and text whose wait for room was cut,
+/// by its own cutoff or the round's deadline, never gets a second.
 async fn deliver(
     events: &mpsc::Sender<TurnEvent>,
     pending: String,
@@ -146,7 +146,9 @@ async fn deliver(
     let by = Instant::now() + wait;
     let cut = matches!(
         finish,
-        Finish::Failed(EngineFailure::Local(Failure::Backpressure))
+        Finish::Failed(EngineFailure::Local(
+            Failure::Backpressure | Failure::Deadline
+        ))
     );
     let text = (!pending.is_empty() && !cut).then_some(TurnEvent::TextDelta(pending));
     for event in text.into_iter().chain([TurnEvent::Finished(finish)]) {
@@ -172,10 +174,14 @@ impl Sink for Pending<'_> {
         self.text.push_str(text);
     }
 
-    async fn taken(&mut self) -> ControlFlow<()> {
+    async fn taken(&mut self, by: Instant) -> ControlFlow<()> {
         let Ok(room) = self.events.reserve().await else {
             return ControlFlow::Break(());
         };
+        // Room found as the cutoff passed takes nothing: the caller's wait reports it.
+        if Instant::now() >= by {
+            return std::future::pending().await;
+        }
         room.send(TurnEvent::TextDelta(std::mem::take(self.text)));
         ControlFlow::Continue(())
     }
