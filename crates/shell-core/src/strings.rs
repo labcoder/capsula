@@ -719,6 +719,11 @@ const fn error_id(key: ErrorKey) -> &'static str {
         ErrorKey::ResponseUnreadable => "error-response-unreadable",
         ErrorKey::SignInNeeded => "error-sign-in-needed",
         ErrorKey::ModelUnavailable => "error-model-unavailable",
+        ErrorKey::LocalOff => "error-local-off",
+        ErrorKey::LocalUnfinished => "error-local-unfinished",
+        ErrorKey::LocalRefused => "error-local-refused",
+        ErrorKey::LocalIncomplete => "error-local-incomplete",
+        ErrorKey::LocalUnreadable => "error-local-unreadable",
         ErrorKey::RenewalUnconfirmed => "error-renewal-unconfirmed",
 
         // Anthropic
