@@ -13,7 +13,7 @@ leaves it out, and `-p kumochi-shell-nsh` or `--workspace` includes it.
 
 CI checks this crate in its own steps and leaves it out of the shared gates with
 `--exclude kumochi-shell-nsh`. Cargo unifies features across every package one command
-selects, so the shared gates then build the dependency features that ship. A local
+selects, so the shared gates then resolve without NativeShell's feature requests. A local
 `--workspace` command still selects both shells and unifies their features.
 
 Until it replaces the GPUI shell, it refuses the release identity: a build of `kumochi-nsh`
