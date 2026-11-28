@@ -2,9 +2,12 @@
 //! is reserved once at these sizes, whether or not a drawing shows, and [`FIXED_BYTES`] is
 //! what `Stager::fixed_bytes` charges for all of them.
 
-use kumochi_scene::limits::{
-    MAX_GLOBAL_FILL_VERTICES, MAX_GLOBAL_LIVE_OBJECTS, MAX_GLOBAL_OUTLINE_POINTS,
-    MAX_GLOBAL_PATH_SEGMENTS, MAX_TEXT_CHARS, MAX_VISIBLE_SCENES,
+use kumochi_scene::{
+    display,
+    limits::{
+        MAX_GLOBAL_FILL_VERTICES, MAX_GLOBAL_LIVE_OBJECTS, MAX_GLOBAL_OUTLINE_POINTS,
+        MAX_GLOBAL_PATH_SEGMENTS, MAX_TEXT_CHARS, MAX_VISIBLE_SCENES,
+    },
 };
 use lyon::tessellation::{FillOptions, LineCap, LineJoin, StrokeOptions};
 
@@ -90,6 +93,8 @@ pub const STROKE_JOIN: LineJoin = StrokeOptions::DEFAULT_LINE_JOIN;
 pub const STROKE_CAP: LineCap = StrokeOptions::DEFAULT_LINE_CAP;
 /// Miter limit, as main's `StrokeOptions::default()`.
 pub const MITER_LIMIT: f32 = StrokeOptions::DEFAULT_MITER_LIMIT;
+/// Dash and gap lengths along a stroke's source, as main's painter's.
+pub const DASH: [f32; 2] = display::DASH;
 
 /// Everything the renderer holds on the CPU outside the presenter's per-scene charge: its
 /// reserved buffers, the uploaded geometries' range tables and lyon's allowance.

@@ -49,7 +49,8 @@ pub struct Picture {
     pub scene: SceneId,
     /// The geometry its records index.
     pub geometry: GeometryId,
-    first: u32,
+    /// Its first record's place in the frame.
+    pub(super) first: u32,
     count: u32,
 }
 
@@ -84,6 +85,16 @@ impl FrameBuf {
         self.records
             .get(start..start.saturating_add(len))
             .unwrap_or(&[])
+    }
+
+    /// The records of `pictures`, consecutive listed pictures, and the first one's place.
+    pub(super) fn span(&self, pictures: &[Picture]) -> (u32, &[Record]) {
+        let (Some(first), Some(last)) = (pictures.first(), pictures.last()) else {
+            return (0, &[]);
+        };
+        let start = usize::try_from(first.first).unwrap_or(usize::MAX);
+        let end = usize::try_from(last.first.saturating_add(last.count)).unwrap_or(0);
+        (first.first, self.records.get(start..end).unwrap_or(&[]))
     }
 
     /// Empties the buffer for the next frame, keeping its reservations.

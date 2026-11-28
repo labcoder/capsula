@@ -10,7 +10,7 @@ mod mesh;
 use std::fmt;
 
 pub use frame::{FrameBuf, Picture, Record};
-pub use gpu::{Built, Gpu, GpuFailure};
+pub use gpu::{Built, Drawn, Gpu, GpuFailure, Target, View};
 pub use input::{Align, BuildInput, Object, Part, Shape, Span};
 #[cfg(test)]
 pub(crate) use mesh::earliest;
