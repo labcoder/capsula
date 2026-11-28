@@ -4223,6 +4223,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "kumochi-render"
+version = "0.1.2"
+dependencies = [
+ "kumochi-protocol",
+ "kumochi-scene",
+ "kumochi-shell-core",
+ "lyon",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "kumochi-scene"
 version = "0.1.2"
 dependencies = [
@@ -4309,8 +4320,11 @@ name = "kumochi-shell-nsh"
 version = "0.1.2"
 dependencies = [
  "kumochi-protocol",
+ "kumochi-shell-core",
  "nsh-core",
  "nsh-platform-windows",
+ "thiserror 2.0.21",
+ "tracing",
 ]
 
 [[package]]

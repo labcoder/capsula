@@ -78,7 +78,11 @@ async fn a_saved_local_default_is_heard_at_start_and_kept() {
     )
     .expect("written");
     let mut brain = test_support::brain(&scratch, "");
-    assert!(brain.coordinator.local_default, "read at start");
+    assert_eq!(
+        brain.coordinator.local_default,
+        crate::config::DefaultIntent::Local,
+        "read at start"
+    );
     let before = brain.config.default_choice();
     brain.settings_ops.push_back(Queued {
         change: Change::User(SettingsOp::SetDefaultModel(ModelChoice {
@@ -91,7 +95,10 @@ async fn a_saved_local_default_is_heard_at_start_and_kept() {
     brain.pump_settings(None).expect("pumped");
     assert!(brain.config_write.is_none(), "no write started");
     assert_eq!(brain.config.default_choice(), before);
-    assert!(brain.config.local_intent());
+    assert_eq!(
+        brain.config.local_intent(),
+        crate::config::DefaultIntent::Local
+    );
     brain.close().await;
 }
 

@@ -1554,22 +1554,34 @@ fn a_config_that_cant_be_written_serves_onboarded_and_still_refuses_every_write(
     assert!(blocked_file.is_dir());
 }
 /// Any saved default naming the local server counts as local intent, however malformed the rest;
-/// a cloud or absent default doesn't.
+/// a cloud or absent default doesn't, and a file that can't be parsed is unknown.
 #[test]
 fn local_intent_follows_the_saved_connection_alone() {
+    use crate::config::DefaultIntent;
     let scratch = Scratch::new("config-local-intent");
     let dir = dir(&scratch);
+    assert_eq!(
+        Config::load(None, ThreadId(1)).local_intent(),
+        DefaultIntent::Other
+    );
     for (text, local) in [
         (
             "[default_model]\nconnection = \"LocalChat\"\nmodel = \"\"\n",
-            true,
+            DefaultIntent::Local,
         ),
-        ("[default_model]\nconnection = \"LocalChat\"\n", true),
+        (
+            "[default_model]\nconnection = \"LocalChat\"\n",
+            DefaultIntent::Local,
+        ),
         (
             "[default_model]\nconnection = \"ChatGpt\"\nmodel = \"m\"\n",
-            false,
+            DefaultIntent::Other,
         ),
-        ("", false),
+        ("", DefaultIntent::Other),
+        (
+            "[default_model]\nconnection = \"LocalChat\"\nmodel = {",
+            DefaultIntent::Unknown,
+        ),
     ] {
         std::fs::write(dir.join(CONFIG_FILE), text).expect("written");
         assert_eq!(

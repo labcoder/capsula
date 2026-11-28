@@ -10,6 +10,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::{Notify, oneshot};
 use tokio::task::JoinHandle;
+use tokio::time::timeout;
 
 use super::request::{ChatMessage, Role};
 use super::*;
@@ -310,7 +311,7 @@ struct Stalled(Arc<AtomicBool>);
 impl Sink for Stalled {
     fn text(&mut self, _: &str) {}
 
-    fn taken(&mut self) -> impl Future<Output = ControlFlow<()>> + Send {
+    fn taken(&mut self, _: Instant) -> impl Future<Output = ControlFlow<()>> + Send {
         self.0.store(true, Ordering::SeqCst);
         std::future::pending()
     }

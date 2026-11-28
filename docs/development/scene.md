@@ -1001,7 +1001,9 @@ palette. Host foreground/accent overrides do not change fixed named colors.
 `display` defines immutable prepared primitives and handle-tagged items. Polygon and
 polyline vertices use shared slices; painters can share prepared primitives instead
 of cloning text or path storage. Debug output summarizes counts, not drawing content
-or vertex arrays. `motion` supplies sampled frames. `TextMeasure` supplies the same shaping sizes
+or vertex arrays. `motion` supplies sampled frames. `SceneView::shared_sources` lends a
+painter each object's shared primitive list with the scale its rects were charged at, for
+paint state that outlives a borrow ([render.md](render.md)). `TextMeasure` supplies the same shaping sizes
 used by the host painter. It is fallible and must return deterministic finite,
 nonnegative dimensions for the same text/style/wrapping inputs. Preparation calls it
 in deterministic order and rejects failed or invalid measurements atomically. No

@@ -33,6 +33,7 @@ impl LinkEvent {
             | Self::HoldScreen { generation, .. }
             | Self::DrawingNotice { generation, .. }
             | Self::ModelChoice { generation, .. }
+            | Self::TextReady { generation }
             | Self::CaptureFailed { generation, .. } => current != Some(*generation),
             _ => false,
         }

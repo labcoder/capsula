@@ -124,6 +124,10 @@ pub enum LinkEvent {
     },
     /// Coalesced drawing evidence from the exact narrated pair and run.
     NarrationReady(NarrationWake),
+    /// The brain acknowledged the queued pair's audio registration, so it admits turns now.
+    TextReady {
+        generation: u64,
+    },
     Settings {
         generation: u64,
         view: SettingsView,
@@ -2359,6 +2363,12 @@ fn watch(
                 shared
                     .voice_ready_at
                     .store(platform::keyboard_ticks(), Ordering::Release);
+                if events
+                    .send_blocking(LinkEvent::TextReady { generation })
+                    .is_err()
+                {
+                    return;
+                }
             }
             Ok(Some(ControlToShell::Ping)) => {
                 if queued.is_some() && shared.output.run_end_overdue(generation, Instant::now()) {

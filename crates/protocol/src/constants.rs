@@ -78,33 +78,36 @@ pub struct ProductIdentity {
     pub object_prefix: &'static str,
     /// The shell's single-instance lock prefix.
     pub shell_lock: &'static str,
+    /// The shell's app id: the `AppUserModelID` its windows group by in the taskbar.
+    pub shell_app_id: &'static str,
 }
 
-/// Builds one edition's names from its display literal and its lowercase prefix, so each
-/// edition spells its name once.
+/// Builds one edition's names from its display literal, its lowercase prefix and its shell's
+/// app id, so each edition spells its name once.
 macro_rules! identity {
-    ($name:literal, $prefix:literal) => {
+    ($name:literal, $prefix:literal, $app_id:literal) => {
         ProductIdentity {
             data_dir: $name,
             credential_service: $name,
             instance_service: concat!($name, " instance"),
             object_prefix: $prefix,
             shell_lock: concat!($prefix, "-shell"),
+            shell_app_id: $app_id,
         }
     };
 }
 
 impl ProductIdentity {
     /// Installed product namespaces, even when selected by debug-built tooling.
-    pub const RELEASE: Self = identity!("Kumochi", "kumochi");
+    pub const RELEASE: Self = identity!("Kumochi", "kumochi", "ai.kumochi.shell");
 
     /// Isolated development namespaces.
-    pub const DEV: Self = identity!("Kumochi Dev", "kumochi-dev");
+    pub const DEV: Self = identity!("Kumochi Dev", "kumochi-dev", "ai.kumochi.dev.shell");
 
     /// The gate tools' own namespaces (OSC-680), so a gate run never touches either real identity.
     /// Only the `gate-identity` feature selects them, and only a gate tool's command line enables
     /// it: never a manifest, a default or another crate.
-    pub const GATE: Self = identity!("Kumochi Gate", "kumochi-gate");
+    pub const GATE: Self = identity!("Kumochi Gate", "kumochi-gate", "ai.kumochi.gate.shell");
 
     /// Names used by the running app, unchanged from the profile-dependent aliases.
     pub const ACTIVE: Self = if cfg!(feature = "gate-identity") {
@@ -212,6 +215,9 @@ pub const INSTANCE_SERVICE: &str = ProductIdentity::ACTIVE.instance_service;
 /// Windows uses `<SHELL_LOCK>-<session id>.lock` under `%LOCALAPPDATA%`.
 /// macOS uses `<SHELL_LOCK>.lock` under `~/Library/Application Support`.
 pub const SHELL_LOCK: &str = ProductIdentity::ACTIVE.shell_lock;
+
+/// The shell's app id for this edition ([`ProductIdentity::shell_app_id`]).
+pub const SHELL_APP_ID: &str = ProductIdentity::ACTIVE.shell_app_id;
 
 /// The Credential Manager account under [`INSTANCE_SERVICE`] holding the capability; the
 /// session id is appended, since each session runs its own brain.
