@@ -54,7 +54,12 @@ A Legacy session that sends `QueuedAudioOutput` ends too, before anything is ins
 The receipt isn't proof of playback, silence, or the shell having received it.
 
 The queued shell link registers its logical output after the first Settings, even with Talk-back
-off. It accepts the exact registration receipt once, by the original startup deadline. A change
+off. It accepts the exact registration receipt once, by the original startup deadline, and then
+tells the UI the pair admits turns (`LinkEvent::TextReady`). The link refuses a turn sent before
+that, so the composer holds an Enter pressed in that window and sends the draft at that pair's
+`TextReady` if the draft and its conversation are unchanged; otherwise the draft waits for another
+Enter. Closing the composer, Quit or the pair ending drops it, and a pair that misses its startup
+deadline ends. A change
 to Talk-back ends the pair rather than changing its audio contract in place; output failure
 doesn't turn an audio-required pair into a text-only pair. Its data reader can wait on one charged Plain
 announcement or PCM frame until the control reader names that run. Control stays available while

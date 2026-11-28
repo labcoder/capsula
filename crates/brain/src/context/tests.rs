@@ -21,6 +21,7 @@ const TIME: &str = "Tuesday 4 November 2026, 09:30";
 
 mod image;
 mod key_rounds;
+mod local;
 mod recall_results;
 
 struct World {
@@ -2640,4 +2641,115 @@ fn a_route_without_screen_pictures_is_sent_no_screen_scene() {
             assert!(sent.contains(marker), "{connection:?} {marker}");
         }
     }
+}
+
+/// Grouping checks the read's control as it goes and at its end, so a read cancelled, expired,
+/// or expiring partway through a long history stops it with that read's error, while the same
+/// history groups under a live one; a run that comes back after another is a bad cut.
+#[test]
+fn grouping_runs_stops_once_its_read_is_cancelled_or_out_of_time() {
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
+
+    use crate::recall::control::Control;
+
+    let mut conn = Connection::open_in_memory().expect("memory");
+    let mut group = |control: &Control, order: &[u64]| {
+        control
+            .with_handler(&mut conn, |conn, scope| {
+                let snapshot = Snapshot::begin(conn)
+                    .expect("snapshot")
+                    .controlled(scope.clone());
+                let items = (1..)
+                    .zip(order)
+                    .map(|(id, &run)| Item {
+                        id: EventId(id),
+                        run: RunId(run),
+                        body: Body::User("hi".to_owned()),
+                    })
+                    .collect();
+                let current = RunId(*order.last().expect("an item"));
+                super::build::runs(&snapshot, items, current).map(|runs| runs.len())
+            })
+            .expect("handler")
+    };
+    let live = || Control::new(Instant::now() + Duration::from_secs(60));
+    assert!(matches!(group(&live(), &[1, 2, 3]), Ok(3)));
+    assert!(matches!(
+        group(&live(), &[1, 2, 1, 3]),
+        Err(BuildError::InvalidCut)
+    ));
+    let cancelled = live();
+    cancelled.cancel();
+    assert!(matches!(
+        group(&cancelled, &[1, 2, 3]),
+        Err(BuildError::Store(StoreError::Closed))
+    ));
+    let late = live();
+    *late.test.time.lock().expect("clock") = Some(late.end);
+    assert!(matches!(
+        group(&late, &[1, 2, 3]),
+        Err(BuildError::Store(StoreError::RecallBudget))
+    ));
+    // 600 items are checked at items 0, 256 and 512, then at the end.
+    let long = [1; 600];
+    assert!(matches!(group(&live(), &long), Ok(1)));
+    for expires_at in [3, 4] {
+        let expiring = live();
+        expiring
+            .test
+            .expire_after
+            .store(expires_at, Ordering::SeqCst);
+        assert!(
+            matches!(
+                group(&expiring, &long),
+                Err(BuildError::Store(StoreError::RecallBudget))
+            ),
+            "{expires_at}"
+        );
+    }
+}
+
+/// A call still open when its run ends is a bad cut, even when a later run answers it.
+#[test]
+fn a_call_answered_only_in_a_later_run_is_a_bad_cut() {
+    let conn = Connection::open_in_memory().expect("memory");
+    let snapshot = Snapshot::begin(&conn).expect("snapshot");
+    let item = |id, run, body| Item {
+        id: EventId(id),
+        run: RunId(run),
+        body,
+    };
+    let asked = |id, run| {
+        item(
+            id,
+            run,
+            Body::Call {
+                call: call("c1"),
+                name: "read_history".to_owned(),
+                arguments: "{}".to_owned(),
+            },
+        )
+    };
+    let answered = |id, run| {
+        item(
+            id,
+            run,
+            Body::History {
+                call: call("c1"),
+                refs: Vec::new(),
+            },
+        )
+    };
+    let user = |id, run| item(id, run, Body::User("hi".to_owned()));
+    let within = vec![user(1, 1), asked(2, 1), answered(3, 1), user(4, 2)];
+    assert!(matches!(
+        super::build::runs(&snapshot, within, RunId(2)).map(|runs| runs.len()),
+        Ok(2)
+    ));
+    let across = vec![user(1, 1), asked(2, 1), answered(3, 2), user(4, 2)];
+    assert!(matches!(
+        super::build::runs(&snapshot, across, RunId(2)),
+        Err(BuildError::InvalidCut)
+    ));
 }

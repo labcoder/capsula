@@ -80,7 +80,12 @@ jobs:
         with:
           tool: cargo-deny@0.20.2
       - run: cargo fmt --all --check
-      - run: cargo deny --locked check
+      # kumochi-shell-nsh is gated in its own steps, so NativeShell's features stay out of the shipped crates' gates.
+      - name: Deny (shared crates)
+        run: cargo deny --locked --exclude kumochi-shell-nsh check
+        if: steps.dependencies.outputs.changed == 'True'
+      - name: Deny (NativeShell shell)
+        run: cargo deny --locked --manifest-path crates/shell-nsh/Cargo.toml check
         if: steps.dependencies.outputs.changed == 'True'
       - run: cargo xtask check-vendor
       - run: cargo xtask notices --check
@@ -93,7 +98,9 @@ jobs:
           if ($env:BASE) { $baseline = @('--base', $env:BASE) }
           cargo xtask check-platform-cfg @baseline
       - run: cargo clippy -p kumochi-shell-core --lib --locked -- -D warnings
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo clippy --workspace --exclude kumochi-shell-nsh --all-targets --locked -- -D warnings
+      - name: Clippy (NativeShell shell)
+        run: cargo clippy -p kumochi-shell-nsh --all-targets --locked -- -D warnings
 
   # Keeps the single job's id, so its cache key and the cache main already saved still match.
   check:
@@ -113,11 +120,16 @@ jobs:
           key: ${{ hashFiles('Cargo.toml') }}
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: cargo test --workspace --locked
+      - run: cargo test --workspace --exclude kumochi-shell-nsh --locked
         env:
           # The tests mostly wait on processes, pipes and deadlines, so 4 threads keep 2 vCPUs busy.
           RUST_TEST_THREADS: 4
           # The tests' scratch folders make many durable writes, which the work disk takes 7-10x faster than C:.
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+      - name: Test (NativeShell shell)
+        run: cargo test -p kumochi-shell-nsh --locked
+        env:
           TEMP: ${{ runner.temp }}
           TMP: ${{ runner.temp }}
       - run: cargo test -p gpui-pre-windows --locked --lib vsync

@@ -4,6 +4,8 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use kumochi_shell_core::startup::quit_after_ms;
+
 use super::geometry::Position;
 
 /// Why the shell refused these diagnostic flags; no argument values are retained.
@@ -124,11 +126,7 @@ impl Launch {
                 }
                 launch.receipt_fixture = true;
             } else if let Some(value) = arg.strip_prefix("--quit-after-ms=") {
-                let millis = value.parse::<u64>().map_err(|_| LaunchError::QuitDelay)?;
-                if !(1..=120_000).contains(&millis) {
-                    return Err(LaunchError::QuitDelay);
-                }
-                launch.quit_delay = Some(Duration::from_millis(millis));
+                launch.quit_delay = Some(quit_after_ms(value).ok_or(LaunchError::QuitDelay)?);
             }
         }
         #[cfg(debug_assertions)]
@@ -197,6 +195,51 @@ mod tests {
         );
         for invalid in ["0", "120001", "-1", "later"] {
             assert!(launch([format!("--quit-after-ms={invalid}")].into_iter()).is_err());
+        }
+    }
+
+    /// Debug and release give the same refusal for each: release refuses at the first accounts
+    /// flag, and test builds carry the recorder, so `--gate-observer` passes.
+    #[test]
+    fn malformed_flags_refuse_with_fixed_text_and_no_argument_value() {
+        const ACCOUNTS: &str = "--accounts-fixture requires a debug build, one fixed state and a \
+                                quit deadline; --accounts-appearance is optional and accepts \
+                                light, dark, large or constrained once";
+        for (flags, variant, text) in [
+            (
+                &["--accounts-fixture=private-fixture-value", "--smoke"][..],
+                "AccountsFixture",
+                ACCOUNTS,
+            ),
+            (
+                &[
+                    "--accounts-fixture=enabled",
+                    "--accounts-appearance=private-fixture-value",
+                    "--smoke",
+                ][..],
+                "AccountsFixture",
+                ACCOUNTS,
+            ),
+            (
+                &[
+                    "--gate-observer=C:/private-fixture-value/observer.log",
+                    "--quit-after-ms=private-fixture-value",
+                ][..],
+                "QuitDelay",
+                "--quit-after-ms must be between 1 and 120000",
+            ),
+        ] {
+            let error = launch(args(flags)).expect_err("malformed flags are refused");
+            let debug = format!("{error:?}");
+            let display = error.to_string();
+            assert_eq!(debug, variant, "{flags:?} gives its exact variant");
+            assert_eq!(display, text, "{flags:?} gives its fixed text");
+            for shown in [&debug, &display] {
+                assert!(
+                    !shown.contains("private-fixture-value") && !shown.contains("observer.log"),
+                    "{flags:?} keeps its values out of {shown:?}"
+                );
+            }
         }
     }
 

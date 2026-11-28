@@ -1,4 +1,4 @@
-use std::sync::atomic::AtomicU8;
+use std::sync::atomic::{AtomicU8, AtomicUsize};
 use std::sync::{Mutex, mpsc};
 
 use super::*;
@@ -17,10 +17,17 @@ pub(crate) struct State {
     pub(crate) fault: AtomicU8,
     pub(crate) time: Mutex<Option<Instant>>,
     pub(crate) gate: Mutex<Option<Gate>>,
+    /// When set, the clock jumps past every deadline at this many reads from now.
+    pub(crate) expire_after: AtomicUsize,
 }
 
 impl State {
     pub(super) fn now(&self) -> Instant {
+        if self.expire_after.load(Ordering::SeqCst) > 0
+            && self.expire_after.fetch_sub(1, Ordering::SeqCst) == 1
+        {
+            *self.time.lock().expect("clock") = Some(Instant::now() + Duration::from_hours(24));
+        }
         self.time
             .lock()
             .expect("clock")

@@ -99,6 +99,26 @@ Absent lazy panels have no pixels; their create/re-show hooks exclude them after
 owner stores the hidden window and before placement can show it. A failed hook leaves the
 new window hidden. The zero-area taskbar host and Explorer-owned UI are outside this claim.
 
+The lease's decisions are a core driven by asks and answers: it says which surface to snapshot,
+exclude or restore next and takes each answer whenever it comes, so its surfaces can live on
+other threads. The GPUI shell answers at once: `acquire`, `attach`, `cleanup` and `expire` ask,
+call the surface and answer, one call at a time and in the same order as before, and nothing
+times them. An exclude that fails revokes the lease, and a restore is asked for every receipt it
+holds. A restore that fails or never comes is restoration debt: the lease refuses the next one
+as `Busy` until that restore is confirmed, however late, or its surface is proved gone. No timer
+forgives it.
+
+When the answers come later, the acquire's own snapshots and excludes have 250 ms from its
+start. One still out at the bound ends the acquire: in the snapshot phase nothing has changed,
+and after it a restore is asked for every receipt held, because an unanswered exclude may have
+been applied. An answer or a proof of destruction that comes at or after the bound grants
+nothing, whether or not the timer has fired yet. A surface opened under a granted lease is
+snapshotted and excluded on its own, with no bound but the lease's lifetime, and the lease isn't
+live until that surface is covered or proved gone. The lifetime ends when its owner's timer
+fires, as before. A driver applies each surface's asks in the order it took them, reads a slot's
+receipt when it takes the ask, and drives a lease one way only: by the four calls or by asks and
+answers.
+
 Drawing keeps the overlay's `Visibility` recovery lifecycle, paint scratch and paint notices.
 Its GPUI surface adapter attaches the drawing receipt before show, including a replacement
 window. A drawing window made while no lease is in force starts capture-allowed; one made or

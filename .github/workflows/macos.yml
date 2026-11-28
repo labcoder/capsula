@@ -36,9 +36,13 @@ jobs:
       - name: Clippy
         env:
           CARGO_NET_OFFLINE: 'true'
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --exclude kumochi-shell-nsh --all-targets --locked -- -D warnings
+      - name: Clippy (NativeShell shell)
+        env:
+          CARGO_NET_OFFLINE: 'true'
+        run: cargo clippy -p kumochi-shell-nsh --all-targets --locked -- -D warnings
       - name: Build the workspace
-        run: cargo build --locked --offline --workspace
+        run: cargo build --locked --offline --workspace --exclude kumochi-shell-nsh
       - name: Storage and session tests
         run: cargo test --locked --offline --no-fail-fast -p kumochi-storage -p kumochi-session
       - name: macOS platform tests (no TCP)

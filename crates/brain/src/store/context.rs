@@ -153,6 +153,16 @@ impl<'a> Snapshot<'a> {
     pub(crate) fn tuning(&self) -> ContextTuning {
         self.2
     }
+
+    /// Fails once the read this snapshot belongs to is cancelled or past its deadline.
+    ///
+    /// # Errors
+    /// [`StoreError::Closed`] after a cancel, [`StoreError::RecallBudget`] past the deadline.
+    pub(crate) fn check(&self) -> Result<(), StoreError> {
+        self.1
+            .as_ref()
+            .map_or(Ok(()), |scope| scope.check().map_err(StoreError::from))
+    }
 }
 
 impl Snapshot<'_> {
@@ -230,6 +240,51 @@ impl Snapshot<'_> {
         }
         items.reverse();
         Ok(items)
+    }
+
+    /// A local task's newest runs within about `budget` bytes, oldest first, or `None` when any
+    /// of them holds more than plain text: a call, a result, a native item, or text with stored
+    /// metadata, however malformed or empty.
+    ///
+    /// # Errors
+    /// Fails when SQLite fails.
+    pub(crate) fn plain_conversation(
+        &self,
+        thread: ThreadId,
+        budget: usize,
+    ) -> Result<Option<Vec<Item>>, StoreError> {
+        let thread = sql_id(thread.0, StoreError::NoThread)?;
+        let mut statement = self.0.prepare(
+            "SELECT id, run, kind, coalesce(text, ''), body IS NULL FROM events
+             WHERE thread = ?1 AND run IS NOT NULL
+             AND kind IN ('user', 'assistant_text', 'output_item', 'tool_result')
+             ORDER BY id DESC",
+        )?;
+        let mut rows = statement.query(params![thread])?;
+        let mut items: Vec<Item> = Vec::new();
+        let mut bytes = 0_usize;
+        while let Some(row) = rows.next()? {
+            let run = RunId(row_id(row.get(1)?));
+            if bytes > budget && items.last().is_some_and(|last| last.run != run) {
+                break;
+            }
+            let kind: String = row.get(2)?;
+            let text: String = row.get(3)?;
+            let plain: bool = row.get(4)?;
+            bytes = bytes.saturating_add(text.len());
+            let body = match kind.as_str() {
+                "user" if plain => Body::User(text),
+                "assistant_text" if plain => Body::Assistant(text),
+                _ => return Ok(None),
+            };
+            items.push(Item {
+                id: EventId(row_id(row.get(0)?)),
+                run,
+                body,
+            });
+        }
+        items.reverse();
+        Ok(Some(items))
     }
 
     /// The thread's newest `max` deletion notes after `after`, oldest first.

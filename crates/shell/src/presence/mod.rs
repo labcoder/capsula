@@ -105,7 +105,7 @@ use frame_rate::FrameLoop;
 use geometry::{Layout, PanelVisibility, Position};
 use kumo::Mood;
 use kumo_view::KumoView;
-pub(crate) use launch::{Launch, LaunchError};
+pub(crate) use launch::Launch;
 use line::{Dock, Line, LineFrame, Placement};
 pub(crate) use observer::Observer;
 use observer::{Drawn, Surface};
@@ -159,6 +159,9 @@ struct Presence {
     /// The scenes on screen as an open panel last heard them.
     on_screen:
         [Option<kumochi_protocol::message::SceneId>; kumochi_protocol::message::MAX_VISIBLE_SCENES],
+    /// The drawing replay's prompt, held until the pair admits turns.
+    #[cfg(any(debug_assertions, all(windows, feature = "gate-draw-replay")))]
+    draw_fixture: Option<&'static str>,
     chat_notice: crate::chat_notice::ChatNotice,
     events: Sender<PresenceEvent>,
     /// The channel's receiving end, for a drop's drains.
@@ -222,6 +225,8 @@ struct Presence {
     error: Option<SharedString>,
     /// A local submission refusal, shown only in the typing panel.
     refusal: Option<Text>,
+    /// The pair whose `TextReady` sends the Enter pressed before its pair admitted turns.
+    held_submit: Option<text::HeldSubmit>,
 }
 
 impl Presence {
@@ -1193,6 +1198,7 @@ pub(crate) fn open(
             delete_retry: None,
             error: None,
             refusal: None,
+            held_submit: None,
             line: Line::default(),
             drawn: Drawn::default(),
             kumo: kumo.clone(),
@@ -1201,6 +1207,8 @@ pub(crate) fn open(
             kumo_frames: FrameLoop::default(),
             overlay: overlay_visibility::Visibility::Closed,
             on_screen: Default::default(),
+            #[cfg(any(debug_assertions, all(windows, feature = "gate-draw-replay")))]
+            draw_fixture: None,
         }
     });
     owner.update(cx, |this, cx| {

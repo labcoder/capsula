@@ -1114,6 +1114,108 @@ async fn a_voice_hold_uses_the_committed_task_model_and_effort() {
     assert_eq!(users(&scratch), ["earlier words", "new spoken words"]);
 }
 
+/// A task committed to a model that can see, under a default that can't: the hold reads and runs
+/// the task's exact choice, but the offer, arm and release still follow the default, so today the
+/// screen hold goes on as voice with no capture and no picture line.
+#[tokio::test]
+async fn a_screen_hold_on_a_seeing_task_under_a_blind_default_runs_its_exact_choice_as_voice() {
+    use crate::context::InputItem;
+    use crate::runtime::hold::tests::{screen_hold, set};
+    use kumochi_protocol::message::{
+        AudioSession, CaptureFailure, ScreenHolds, ScreenOff, SettingsOp,
+    };
+
+    let scratch = Scratch::new("hold-exact-seeing-recipient");
+    let task = seed_task_for_a_screen_hold(&scratch);
+    let (mut brain, release, mut decoded, _fetch) =
+        input(&scratch, vec![105, -5], "new spoken words").await;
+    let _rig = screen_hold::seeing(&mut brain);
+    let blind = ModelChoice {
+        model: ModelSlug::new("gpt-6-luna").unwrap(),
+        effort: Effort::Low,
+        connection: ConnectionKind::ChatGpt,
+    };
+    let exact = ModelChoice {
+        model: ModelSlug::new("gpt-6-sol").unwrap(),
+        effort: Effort::High,
+        connection: ConnectionKind::ChatGpt,
+    };
+    set(&mut brain, SettingsOp::SetDefaultModel(blind.clone()));
+    let gate = |brain: &Brain, choice: &ModelChoice| {
+        let capture = brain.holds.can_capture_display();
+        brain.picture_gate(Some(choice), capture, brain.show_screen_enabled())
+    };
+    assert_eq!(
+        gate(&brain, &blind),
+        ScreenHolds::Off(ScreenOff::ModelCantSee)
+    );
+    assert!(matches!(
+        gate(&brain, &exact),
+        ScreenHolds::On { slug, connection: ConnectionKind::ChatGpt, .. } if slug == exact.model
+    ));
+    let (send, mut requests) = mpsc::unbounded_channel();
+    brain.engine = Box::new(Requested(send));
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let client = async {
+        // Its notice is the brain's current revision, of the offer that is off for the default.
+        recognize_screen_recipient(&mut shell, Some(task), &exact, AudioSession::Legacy).await;
+        status(&mut shell, HoldStatus::Admitted).await;
+        shell.send(&screen_hold::release(G, 100, 200, 2)).await;
+        assert_eq!(
+            shell.control().await,
+            Some(ControlToShell::CaptureFailed {
+                capture_for: CaptureFor::Gesture(G),
+                reason: CaptureFailure::Unavailable,
+            })
+        );
+        packet(&mut shell, 16_000, 0, true, vec![105, -5]).await;
+        release_source(&mut shell, 1).await;
+        status(&mut shell, HoldStatus::Transcribing).await;
+        assert_eq!(decoded.recv().await, Some(()));
+        release.send(()).unwrap();
+        let (run, phase) = shell.state().await;
+        assert_eq!(phase, Phase::Thinking);
+        assert!(matches!(shell.data().await, DataToShell::Models { .. }));
+        shell.held(G, "new spoken words").await;
+        assert_eq!(shell.read_to_end(run).await, "selected answer".len());
+        assert_eq!(shell.state().await, (run, Phase::Answering));
+        assert_eq!(shell.state().await, (run, Phase::Done));
+        drop(shell);
+    };
+    let (ended, ()) = tokio::time::timeout(super::PATIENCE, async {
+        tokio::join!(brain.serve(control, data, &mut tap), client)
+    })
+    .await
+    .unwrap();
+    assert_eq!(ended, Ended::Lost);
+    let request = requests.try_recv().unwrap();
+    assert_eq!(request.thread, task);
+    assert_eq!(request.request.choice, Some(exact));
+    assert!(
+        !request
+            .request
+            .input
+            .iter()
+            .any(|item| matches!(item, InputItem::Image(_)))
+    );
+    let words = sent_users(&request);
+    let [earlier, current] = words.as_slice() else {
+        panic!("expected two user turns");
+    };
+    assert_eq!(*earlier, "earlier words");
+    let (minute, drawings) = current
+        .strip_prefix("new spoken words\n\nLocal time: ")
+        .unwrap()
+        .split_once("\nDrawings on screen: ")
+        .unwrap();
+    super::asks::assert_minute(minute);
+    assert_eq!(drawings, "[]");
+    assert!(requests.is_empty());
+    brain.close().await;
+    assert_eq!(users(&scratch), ["earlier words", "new spoken words"]);
+}
+
 #[tokio::test]
 async fn quiet_audio_or_blank_transcript_store_and_send_nothing() {
     for (samples, text, controls_first) in [

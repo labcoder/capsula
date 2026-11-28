@@ -1001,7 +1001,9 @@ palette. Host foreground/accent overrides do not change fixed named colors.
 `display` defines immutable prepared primitives and handle-tagged items. Polygon and
 polyline vertices use shared slices; painters can share prepared primitives instead
 of cloning text or path storage. Debug output summarizes counts, not drawing content
-or vertex arrays. `motion` supplies sampled frames. `TextMeasure` supplies the same shaping sizes
+or vertex arrays. `motion` supplies sampled frames. `SceneView::shared_sources` lends a
+painter each object's shared primitive list with the scale its rects were charged at, for
+paint state that outlives a borrow ([render.md](render.md)). `TextMeasure` supplies the same shaping sizes
 used by the host painter. It is fallible and must return deterministic finite,
 nonnegative dimensions for the same text/style/wrapping inputs. Preparation calls it
 in deterministic order and rejects failed or invalid measurements atomically. No
@@ -2202,6 +2204,34 @@ the original cuts rather than being cut by a delayed follow-up Stop.
 Clear intent made while scenes are mirrored survives brain restarts because scene ids are
 durable event ids; membership
 that still names a locally cleared scene causes its idempotent clear to be sent again.
+
+### A shell that can't draw
+
+A shell with no drawing surface still receives scene traffic, because an empty text profile
+doesn't stop the brain drawing. `presenter::Refuser` is the contract such a shell follows in
+place of a `Presenter`; nothing calls it yet. The caller passes every delivered `Data` and
+`SceneData` frame once. The link's `scene_naming` names exactly the kinds the data reader
+tags as `SceneData`, and the caller uses `Naming::Other` when it returns `None`:
+
+| Frame | `scene_naming` | Refuser returns |
+|---|---|---|
+| `SceneBegin`, `SceneStepCommit` | `Draws` | the credit, and the scene to refuse the first time |
+| `SceneSnapshotV1` chunk | `Retained` | the credit |
+| zero-activated `SceneCutApplied`, `ScenesRemoved`, `ScenesReplaced` victims | `Retires` | the credit; the scenes are forgotten |
+| `SceneEnd`, a nonzero cut | `Other` | the credit |
+| any other data frame, legacy `SceneSnapshot` and `StepCommit` included | `None`, passed as `Other` | the credit |
+
+For the open connection each frame's wire bytes come back once, for the caller to grant; a
+stale generation or a closed connection gets nothing. `ScenesV1` and legacy `Scenes` are
+control lists: they owe nothing and never reach the refuser, so connecting alone makes it
+clear no stored drawing. `SceneFailed` ends the brain's whole scene, so a call that draws onto a
+retained scene clears it; only Dev and Gate data can see that, because `kumochi-nsh` refuses
+the release identity. Refusals are remembered until retirement, at most 64 (the presenter's
+tombstone count); a late repeat for a forgotten scene is inert, since the brain ignores
+`SceneFailed` for a scene it no longer holds. `SceneFailed` takes no outbox lock on either
+audio mode, so a UI thread can send it. `true` from `send_control` means the mailbox took the
+refusal, not that it was delivered: a pipe that ends first can still drop it, and the
+connection is ending then anyway. Route B's real presenter replaces the refuser.
 
 ### Screen scenes in the shell
 

@@ -316,7 +316,12 @@ async fn reply(replies: &mut mpsc::UnboundedReceiver<Input>) -> Input {
 /// by the default for a thread with none, keeps no text, title or thread. A cloud thread's turn
 /// under a local default is stored.
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one table of turns, then what each kept in every table"
+)]
 async fn a_turn_for_the_local_server_is_never_stored() {
+    use crate::config::DefaultIntent::{Local, Other, Unknown};
     use kumochi_protocol::message::{ConnectionKind, Effort, ModelChoice, ModelSlug};
 
     let scratch = Scratch::new("local-turn-refused");
@@ -352,25 +357,38 @@ async fn a_turn_for_the_local_server_is_never_stored() {
         screen: None,
         local_default,
     };
-    for (op, stored) in [
+    let off = || Some(kumochi_protocol::message::ErrorKey::LocalOff.into());
+    let unknown = || Some(kumochi_protocol::message::ErrorKey::ConfigUnreadable.into());
+    for (op, refused) in [
         (
-            turn(ThreadId(2), None, RunId(3), "refusedown", false),
-            false,
+            turn(ThreadId(2), None, RunId(3), "refusedown", Other),
+            off(),
         ),
-        (turn(ThreadId(3), None, RunId(4), "storedcloud", true), true),
+        (
+            turn(ThreadId(3), None, RunId(4), "storedcloud", Local),
+            None,
+        ),
         (
             turn(
                 ThreadId(4),
                 Some("refusedtitle"),
                 RunId(5),
                 "refuseddefault",
-                true,
+                Local,
             ),
-            false,
+            off(),
         ),
         (
-            turn(ThreadId(5), Some("new"), RunId(6), "storednew", false),
-            true,
+            turn(ThreadId(5), Some("new"), RunId(6), "storednew", Other),
+            None,
+        ),
+        (
+            turn(ThreadId(3), None, RunId(7), "storedpinned", Unknown),
+            None,
+        ),
+        (
+            turn(ThreadId(6), Some("u"), RunId(8), "refusedunknown", Unknown),
+            unknown(),
         ),
     ] {
         let run = match &op {
@@ -378,10 +396,9 @@ async fn a_turn_for_the_local_server_is_never_stored() {
             _ => unreachable!("a turn"),
         };
         assert!(thread.send(op));
-        let expected = if stored {
-            Input::TurnStored { run }
-        } else {
-            Input::StoreFailed { run }
+        let expected = match refused {
+            None => Input::TurnStored { run },
+            Some(reason) => Input::TurnRefused { run, reason },
         };
         assert_eq!(reply(&mut replies).await, expected);
     }
@@ -394,11 +411,46 @@ async fn a_turn_for_the_local_server_is_never_stored() {
         ("refuseddefault", Vec::new()),
         ("storedcloud", vec![ThreadId(3)]),
         ("storednew", vec![ThreadId(5)]),
+        ("storedpinned", vec![ThreadId(3)]),
+        ("refusedunknown", Vec::new()),
     ] {
         assert_eq!(
             store.pages().search_ids(marker).expect("search"),
             threads,
             "{marker}"
+        );
+    }
+    let raw = rusqlite::Connection::open(scratch.db()).expect("raw");
+    let count = |sql: &str| {
+        raw.query_row(sql, [], |row| row.get::<_, i64>(0))
+            .expect("count")
+    };
+    for (rows, stored, refused) in [
+        (
+            "threads WHERE id IN (2, 3, 5)",
+            3,
+            "threads WHERE id IN (4, 6)",
+        ),
+        (
+            "runs WHERE id IN (4, 6, 7)",
+            3,
+            "runs WHERE id IN (3, 5, 8)",
+        ),
+        (
+            "events WHERE run IN (4, 6, 7)",
+            3,
+            "events WHERE run IN (3, 5, 8)",
+        ),
+    ] {
+        assert_eq!(
+            count(&format!("SELECT count(*) FROM {rows}")),
+            stored,
+            "{rows}"
+        );
+        assert_eq!(
+            count(&format!("SELECT count(*) FROM {refused}")),
+            0,
+            "{refused}"
         );
     }
 }
@@ -768,7 +820,7 @@ async fn an_op_fails_while_the_store_cant_reopen_and_the_next_is_stored_once_it_
         run,
         text: text.into(),
         screen: None,
-        local_default: false,
+        local_default: crate::config::DefaultIntent::Other,
     };
     assert!(thread.send(turn(RunId(3), "refused words")));
     assert_eq!(
@@ -924,7 +976,7 @@ fn every_operation_gets_one_reply_in_order() {
             run,
             text: "hi".into(),
             screen: None,
-            local_default: false,
+            local_default: crate::config::DefaultIntent::Other,
         },
         StoreOp::CommitStep {
             thread: ThreadId(2),
@@ -1028,7 +1080,7 @@ fn a_round_the_reader_would_refuse_fails_its_run_and_the_thread_goes_on() {
             run: RunId(1),
             text: "hi".into(),
             screen: None,
-            local_default: false,
+            local_default: crate::config::DefaultIntent::Other,
         },
         round(RunId(1), item, over),
         end(RunId(1), RunEnd::Failed(crate::store::Failure::Store)),
@@ -1038,7 +1090,7 @@ fn a_round_the_reader_would_refuse_fails_its_run_and_the_thread_goes_on() {
             run: RunId(2),
             text: "again".into(),
             screen: None,
-            local_default: false,
+            local_default: crate::config::DefaultIntent::Other,
         },
         round(RunId(2), &growing, ok()),
         end(RunId(2), RunEnd::Failed(crate::store::Failure::Store)),
@@ -1048,7 +1100,7 @@ fn a_round_the_reader_would_refuse_fails_its_run_and_the_thread_goes_on() {
             run: RunId(3),
             text: "once more".into(),
             screen: None,
-            local_default: false,
+            local_default: crate::config::DefaultIntent::Other,
         },
         round(RunId(3), item, ok()),
         end(RunId(3), RunEnd::Done),
@@ -1121,7 +1173,7 @@ fn a_heard_point_is_stored_and_answers_nothing() {
             run,
             text: "hi".into(),
             screen: None,
-            local_default: false,
+            local_default: crate::config::DefaultIntent::Other,
         },
         StoreOp::EndRun {
             screen: None,
@@ -1138,7 +1190,7 @@ fn a_heard_point_is_stored_and_answers_nothing() {
             run: refused,
             text: "again".into(),
             screen: None,
-            local_default: false,
+            local_default: crate::config::DefaultIntent::Other,
         },
         StoreOp::EndRun {
             screen: None,
@@ -1208,7 +1260,7 @@ fn a_held_turns_screen_is_stored_with_its_turn() {
         run,
         text: "hi".into(),
         screen: Some(HeldScreen::NotIncluded(ScreenClass::TooLarge)),
-        local_default: false,
+        local_default: crate::config::DefaultIntent::Other,
     }));
     store.close().blocking_recv().expect("closed");
     let mut got = Vec::new();
@@ -1560,7 +1612,7 @@ fn measure_delete_during_a_purge() {
                 run: turn.1,
                 text: "a measured turn".into(),
                 screen: None,
-                local_default: false,
+                local_default: crate::config::DefaultIntent::Other,
             }));
             let released = Instant::now();
             releasing.send(()).expect("the copy waits");
@@ -1623,7 +1675,7 @@ fn a_withdrawn_screen_is_stored_after_its_turn() {
         run,
         text: "hi".into(),
         screen: Some(HeldScreen::Attached),
-        local_default: false,
+        local_default: crate::config::DefaultIntent::Other,
     }));
     assert!(store.send(StoreOp::WithdrawScreen { run }));
     store.close().blocking_recv().expect("closed");
@@ -1658,7 +1710,7 @@ fn an_unsent_screen_is_cleared_after_its_turn() {
         run,
         text: "hi".into(),
         screen: Some(HeldScreen::Screen),
-        local_default: false,
+        local_default: crate::config::DefaultIntent::Other,
     }));
     let other = RunId(2);
     assert!(store.send(StoreOp::BeginTurn {
@@ -1667,7 +1719,7 @@ fn an_unsent_screen_is_cleared_after_its_turn() {
         run: other,
         text: "hey".into(),
         screen: Some(HeldScreen::Attached),
-        local_default: false,
+        local_default: crate::config::DefaultIntent::Other,
     }));
     assert!(store.send(StoreOp::RepairScreen {
         run,
@@ -1795,7 +1847,7 @@ fn a_job_key_picture_authorization_is_refused_without_touching_the_store() {
             run: RunId(id),
             text: "hi".into(),
             screen: Some(HeldScreen::Screen),
-            local_default: false,
+            local_default: crate::config::DefaultIntent::Other,
         }));
     }
     let job = LeaseId {
