@@ -14,6 +14,12 @@ use windows::Win32::Storage::FileSystem::{
 
 use crate::hermetic::{self, BRAIN_ROLE, Profile, SHELL_ROLE};
 
+/// Each image's name as built, the name it is staged under, and its role.
+const PAIR: [(&str, &str, &str); 2] = [
+    (NSH_SHELL_EXE, SHELL_EXE, SHELL_ROLE),
+    (BRAIN_EXE, BRAIN_EXE, BRAIN_ROLE),
+];
+
 /// Builds both images as one debug Gate build and stages them in the folder `args` names.
 pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
     hermetic::require_gate(ProductIdentity::ACTIVE)?;
@@ -57,51 +63,45 @@ fn new_folder(mut args: impl Iterator<Item = String>) -> Result<PathBuf> {
     Ok(folder)
 }
 
-/// Creates `folder`, which must not be there yet, and fills it.
+/// Creates `folder`, which must not be there yet, and copies the built shell and brain in
+/// `images` into it under their staged names. Each image is checked for its role before the
+/// folder is made, so a pair that doesn't fit leaves nothing behind.
 fn stage(images: &Path, folder: &Path) -> Result<()> {
+    for (built, _, role) in PAIR {
+        hermetic::require_compatible(&images.join(built), role)?;
+    }
     fs::create_dir(folder).with_context(|| format!("creating {}", folder.display()))?;
     fill(images, folder)
 }
 
-/// Copies the built shell and brain in `images` into `folder` as [`SHELL_EXE`] and
-/// [`BRAIN_EXE`], each copy checked for its role. A failure removes the copies this made, then
-/// the folder if that left it empty. Anything else in it isn't this task's to delete, so it
-/// stays and the error says the folder is left behind.
+/// Copies the pair into `folder` and checks each copy.
+///
+/// shortcut: a failed copy removes nothing, so it can't remove a file that isn't this task's, and
+/// the error says the folder is left incomplete; roll back through owned handles if a caller
+/// ever needs a failure to leave nothing.
 fn fill(images: &Path, folder: &Path) -> Result<()> {
-    copy_pair(images, folder).or_else(|error| {
-        fs::remove_dir(folder)
-            .with_context(|| format!("{error:#}, and {} is left behind", folder.display()))?;
-        Err(error)
+    copy_pair(images, folder).with_context(|| {
+        format!(
+            "{} is left behind incomplete; nothing in it was removed",
+            folder.display()
+        )
     })
 }
 
 /// The copies, with `folder` held so its path can't be given to another folder meanwhile, and
-/// never over a file that is already there. A failure removes the copies this made.
+/// never over a file that is already there.
 fn copy_pair(images: &Path, folder: &Path) -> Result<()> {
     let _held = hold(folder).with_context(|| format!("holding {}", folder.display()))?;
-    let mut made = Vec::new();
-    let copied = [
-        (NSH_SHELL_EXE, SHELL_EXE, SHELL_ROLE),
-        (BRAIN_EXE, BRAIN_EXE, BRAIN_ROLE),
-    ]
-    .into_iter()
-    .try_for_each(|(built, name, role)| {
+    for (built, name, role) in PAIR {
         let copy = folder.join(name);
         let staging = || format!("staging {built}");
         let mut from = File::open(images.join(built)).with_context(staging)?;
         let mut to = File::create_new(&copy).with_context(staging)?;
-        made.push(copy.clone());
         io::copy(&mut from, &mut to).with_context(staging)?;
         drop(to);
-        hermetic::require_compatible(&copy, role)
-    });
-    copied.or_else(|error| {
-        for copy in &made {
-            fs::remove_file(copy)
-                .with_context(|| format!("{error:#}, and {} is left behind", copy.display()))?;
-        }
-        Err(error)
-    })
+        hermetic::require_compatible(&copy, role)?;
+    }
+    Ok(())
 }
 
 /// Opens `folder` without sharing delete, so nothing renames or removes it while this is held.
@@ -119,7 +119,7 @@ mod tests {
     use crate::hermetic::image;
     use crate::scratch;
 
-    const REFUSED: &str = "kumochi.exe does not have the expected Gate identity, role and folder override; rebuild it";
+    const REFUSED: &str = "kumochi-nsh.exe does not have the expected Gate identity, role and folder override; rebuild it";
 
     /// A build folder holding `shell` and `brain` under their built names, each when given.
     fn images(label: &str, shell: Option<&str>, brain: Option<&str>) -> scratch::Scratch {
@@ -132,6 +132,16 @@ mod tests {
         dir
     }
 
+    /// The names in `folder`, sorted.
+    fn names(folder: &Path) -> Vec<std::ffi::OsString> {
+        let mut names: Vec<_> = fs::read_dir(folder)
+            .expect("the folder")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        names.sort();
+        names
+    }
+
     #[test]
     fn a_gate_pair_stages_under_the_names_the_brain_and_the_shell_admit() {
         let shell = image(SHELL_ROLE, ProductIdentity::GATE);
@@ -140,12 +150,7 @@ mod tests {
         let root = scratch::dir("stage-nsh-pair-out");
         let folder = root.join("staged");
         stage(&built, &folder).expect("a Gate pair stages");
-        let mut names: Vec<_> = fs::read_dir(&folder)
-            .expect("the staged folder")
-            .map(|entry| entry.expect("entry").file_name())
-            .collect();
-        names.sort();
-        assert_eq!(names, [SHELL_EXE, BRAIN_EXE]);
+        assert_eq!(names(&folder), [SHELL_EXE, BRAIN_EXE]);
         assert_eq!(
             fs::read(folder.join(SHELL_EXE)).expect("shell"),
             shell.as_bytes()
@@ -165,11 +170,7 @@ mod tests {
         fs::write(folder.join("mine"), "the owner's file").expect("marker");
         let error = stage(&built, &folder).expect_err("an existing folder");
         assert_eq!(error.to_string(), format!("creating {}", folder.display()));
-        let names: Vec<_> = fs::read_dir(&folder)
-            .expect("the folder stays")
-            .map(|entry| entry.expect("entry").file_name())
-            .collect();
-        assert_eq!(names, ["mine"]);
+        assert_eq!(names(&folder), ["mine"]);
         assert_eq!(
             fs::read(folder.join("mine")).expect("marker"),
             b"the owner's file"
@@ -177,7 +178,7 @@ mod tests {
     }
 
     #[test]
-    fn a_shell_that_isnt_a_gate_shell_is_refused_and_nothing_is_left() {
+    fn a_shell_that_isnt_a_gate_shell_is_refused_before_the_folder_is_made() {
         let brain = image(BRAIN_ROLE, ProductIdentity::GATE);
         for (case, shell) in [
             ("dev", image(SHELL_ROLE, ProductIdentity::DEV)),
@@ -189,12 +190,12 @@ mod tests {
             let folder = root.join("staged");
             let error = stage(&built, &folder).expect_err(case);
             assert_eq!(format!("{error:#}"), REFUSED, "{case}");
-            assert!(!folder.exists(), "{case} left the folder");
+            assert!(!folder.exists(), "{case} made the folder");
         }
     }
 
     #[test]
-    fn a_missing_image_is_refused_and_nothing_is_left() {
+    fn a_missing_image_is_refused_before_the_folder_is_made() {
         let shell = image(SHELL_ROLE, ProductIdentity::GATE);
         let brain = image(BRAIN_ROLE, ProductIdentity::GATE);
         for (missing, built) in [
@@ -207,58 +208,35 @@ mod tests {
             let root = scratch::dir("stage-nsh-missing-out");
             let folder = root.join("staged");
             let error = stage(&built, &folder).expect_err(missing);
-            assert_eq!(error.to_string(), format!("staging {missing}"));
-            assert!(!folder.exists(), "no {missing} left the folder");
+            assert_eq!(error.to_string(), format!("{missing} is unavailable"));
+            assert!(!folder.exists(), "no {missing} made the folder");
         }
     }
 
-    /// The names in `folder`, sorted.
-    fn names(folder: &Path) -> Vec<std::ffi::OsString> {
-        let mut names: Vec<_> = fs::read_dir(folder)
-            .expect("the folder stays")
-            .map(|entry| entry.expect("entry").file_name())
-            .collect();
-        names.sort();
-        names
-    }
-
     #[test]
-    fn a_failed_fill_removes_its_copy_and_leaves_what_it_didnt_make() {
-        let shell = image(SHELL_ROLE, ProductIdentity::GATE);
-        let built = images("stage-nsh-stranger", Some(&shell), None);
-        let folder = scratch::dir("stage-nsh-stranger-out");
-        fs::write(folder.join("theirs"), "someone else's file").expect("stranger");
-        let error = fill(&built, &folder).expect_err("no brain to copy");
-        let said = error.to_string();
-        assert!(
-            said.starts_with(&format!("staging {BRAIN_EXE}: ")),
-            "{said}"
-        );
-        assert!(
-            said.ends_with(&format!(", and {} is left behind", folder.display())),
-            "{said}"
-        );
-        assert_eq!(names(&folder), ["theirs"]);
-        assert_eq!(
-            fs::read(folder.join("theirs")).expect("stranger"),
-            b"someone else's file"
-        );
-    }
-
-    #[test]
-    fn a_file_already_in_the_folder_is_neither_written_over_nor_removed() {
+    fn a_failed_copy_writes_over_nothing_and_removes_nothing() {
         let shell = image(SHELL_ROLE, ProductIdentity::GATE);
         let brain = image(BRAIN_ROLE, ProductIdentity::GATE);
         let built = images("stage-nsh-taken", Some(&shell), Some(&brain));
         let folder = scratch::dir("stage-nsh-taken-out");
         fs::write(folder.join(BRAIN_EXE), "someone else's brain").expect("theirs");
         let error = fill(&built, &folder).expect_err("the brain's name is taken");
-        let said = error.to_string();
-        assert!(
-            said.starts_with(&format!("staging {BRAIN_EXE}: ")),
-            "{said}"
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "{} is left behind incomplete; nothing in it was removed",
+                folder.display()
+            )
         );
-        assert_eq!(names(&folder), [BRAIN_EXE]);
+        assert_eq!(
+            error.chain().nth(1).expect("the cause").to_string(),
+            format!("staging {BRAIN_EXE}")
+        );
+        assert_eq!(names(&folder), [SHELL_EXE, BRAIN_EXE]);
+        assert_eq!(
+            fs::read(folder.join(SHELL_EXE)).expect("the copy made first"),
+            shell.as_bytes()
+        );
         assert_eq!(
             fs::read(folder.join(BRAIN_EXE)).expect("theirs"),
             b"someone else's brain"
