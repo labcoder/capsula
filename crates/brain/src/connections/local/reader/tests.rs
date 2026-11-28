@@ -1,8 +1,12 @@
-//! The reader over synthetic streams shaped like llama-server's; no socket.
+//! The reader over synthetic streams shaped like llama-server's and recorded ones; no socket.
 
 use super::*;
 
 const TEXT: &[u8] = include_bytes!("../../../../fixtures/local/synthetic-llama-server-text.sse");
+const LLAMA_SERVER: &[u8] =
+    include_bytes!("../../../../fixtures/local/llama-server-b12774-text.sse");
+const OLLAMA_THINKING: &[u8] =
+    include_bytes!("../../../../fixtures/local/ollama-0.40.19-thinking-text.sse");
 
 fn chunk(choice: &str) -> String {
     format!("data: {{\"object\":\"chat.completion.chunk\",\"choices\":[{choice}]}}\n\n")
@@ -41,6 +45,18 @@ fn a_text_stream_completes_once_after_stop_and_done_however_it_is_split() {
         read(&[crlf.as_bytes()]),
         ("Hello from loopback.".to_owned(), Ok(()))
     );
+}
+
+#[test]
+fn recorded_streams_hand_out_only_their_answer_however_they_are_split() {
+    for recorded in [LLAMA_SERVER, OLLAMA_THINKING] {
+        assert_eq!(
+            read(&[recorded]),
+            ("Hello from loopback.".to_owned(), Ok(()))
+        );
+        let bytes: Vec<&[u8]> = recorded.chunks(1).collect();
+        assert_eq!(read(&bytes), ("Hello from loopback.".to_owned(), Ok(())));
+    }
 }
 
 #[test]
