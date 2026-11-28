@@ -23,7 +23,8 @@ rather than guessing a package source.
 The generator reads `deny.toml`'s license allow list, named exceptions and confidence
 threshold. SPDX expressions select one permitted OR branch and every required AND
 part, preferring license texts found in the package's files. If text for a permitted
-choice is missing, the output names the choice and uses canonical SPDX text. It
+choice is missing, the output names the choice and uses canonical SPDX text. A required
+`WITH` expression has no canonical text here, so it fails generation. It
 preserves actual copyright notices, including continuations and scope, from the
 package rather than turning them into a list of guessed holders. Where the published
 legal files and source headers have no copyright line, it labels attribution from

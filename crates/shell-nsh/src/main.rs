@@ -5,20 +5,18 @@ use std::process::ExitCode;
 
 use kumochi_protocol::constants::ProductIdentity;
 
-/// The exit code of a build whose identity this shell refuses, the brain's 69 for unsupported.
-const UNSUPPORTED: u8 = 69;
-
-// The refusal goes away when this shell replaces the GPUI one.
-fn admits(identity: ProductIdentity) -> bool {
-    identity == ProductIdentity::DEV || identity == ProductIdentity::GATE
+/// The process exit code for `identity`: 0 for Dev and Gate, else the brain's 69 for unsupported.
+fn exit_code(identity: ProductIdentity) -> u8 {
+    // The refusal goes away when this shell replaces the GPUI one.
+    if identity == ProductIdentity::DEV || identity == ProductIdentity::GATE {
+        0
+    } else {
+        69
+    }
 }
 
 fn main() -> ExitCode {
-    if admits(ProductIdentity::ACTIVE) {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::from(UNSUPPORTED)
-    }
+    ExitCode::from(exit_code(ProductIdentity::ACTIVE))
 }
 
 #[cfg(test)]
@@ -26,9 +24,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_the_dev_and_gate_identities_are_admitted() {
-        assert!(!admits(ProductIdentity::RELEASE), "release is refused");
-        assert!(admits(ProductIdentity::DEV), "dev is admitted");
-        assert!(admits(ProductIdentity::GATE), "gate is admitted");
+    fn only_the_dev_and_gate_identities_exit_successfully() {
+        assert_eq!(
+            exit_code(ProductIdentity::RELEASE),
+            69,
+            "release is refused"
+        );
+        assert_eq!(exit_code(ProductIdentity::DEV), 0, "dev is admitted");
+        assert_eq!(exit_code(ProductIdentity::GATE), 0, "gate is admitted");
     }
 }

@@ -24,7 +24,7 @@ allow = [
 confidence-threshold = 0.9
 # The agreed list stays whole even when no dependency uses an entry yet.
 unused-allowed-license = "allow"
-# Permissive licenses outside the list, each needed by one framework dependency.
+# Named license exceptions, each needed by one framework dependency.
 exceptions = [
     # 0BSD, public-domain-equivalent: gpui-component's enum iteration.
     { crate = "enum-iterator", allow = ["0BSD"] },
