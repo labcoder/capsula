@@ -310,7 +310,7 @@ pub(super) struct HeldSubmit {
     generation: u64,
     draft: SharedString,
     revision: u64,
-    thread: Option<kumochi_protocol::message::ThreadId>,
+    target: kumochi_shell_core::runs::Target,
 }
 
 impl Presence {
@@ -325,7 +325,7 @@ impl Presence {
             || self.link.is_quitting()
             || draft.as_ref() != Some(&held.draft)
             || held.revision != self.runs.revision()
-            || held.thread != self.runs.thread()
+            || held.target != self.runs.target()
         {
             return;
         }
@@ -348,7 +348,7 @@ impl Presence {
                                 generation: session.generation(),
                                 draft,
                                 revision: self.runs.revision(),
-                                thread: self.runs.thread(),
+                                target: self.runs.target(),
                             })
                         });
                 return Ok(());

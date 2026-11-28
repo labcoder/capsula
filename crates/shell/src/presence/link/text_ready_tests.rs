@@ -27,18 +27,32 @@ fn draft(owner: &Presence, cx: &App) -> String {
         .to_string()
 }
 
-/// Presses Enter on a queued pair after its first Settings but before the brain acknowledges its
-/// audio registration; returns the pair's `TextReady`, not yet applied.
+/// Presses Enter on a queued pair before or after its first Settings, but before the brain
+/// acknowledges its audio registration; returns the pair's `TextReady`, not yet applied.
 fn early_enter(
     owner: &Entity<Presence>,
+    before_settings: bool,
     cx: &mut TestAppContext,
 ) -> (fixture::Authenticated, Receiver<LinkEvent>, LinkEvent) {
     let (id, hello, probe, _brain) = kumochi_brain::ipc::offline_text_peer("0 text Hi.".into());
     let pipe = fixture::authenticated_primed(id, hello);
     let events = fixture::patient(pipe.events.clone());
-    owner.update(cx, |owner, _| owner.link = pipe.handle.clone());
+    owner.update(cx, |owner, _| {
+        owner.link = pipe.handle.clone();
+        // Onboarding would close the composer at the first Settings, and with it the hold.
+        owner.onboarding_run = crate::onboarding::ThisRun::PutOff;
+    });
     let session = fixture::connected(fixture::next(&events));
     apply(owner, LinkEvent::Connected(session), cx);
+    let open = |cx: &mut TestAppContext| {
+        owner.update(cx, |owner, cx| {
+            owner.open_text(cx).expect("the composer opens");
+        });
+        run_fence_tests::submit_draft(owner, DRAFT, cx);
+    };
+    if before_settings {
+        open(cx);
+    }
     loop {
         let event = fixture::next(&events);
         let settings = matches!(event, LinkEvent::Settings { .. });
@@ -47,10 +61,9 @@ fn early_enter(
             break;
         }
     }
-    owner.update(cx, |owner, cx| {
-        owner.open_text(cx).expect("the composer opens");
-    });
-    run_fence_tests::submit_draft(owner, DRAFT, cx);
+    if !before_settings {
+        open(cx);
+    }
     owner.read_with(cx, |owner, cx| {
         assert_eq!(
             owner.refusal, None,
@@ -72,9 +85,18 @@ fn early_enter(
 
 #[gpui::test]
 fn an_enter_before_the_pair_admits_turns_is_sent_once_it_does(cx: &mut TestAppContext) {
+    enter_is_sent_at_text_ready(false, cx);
+}
+
+#[gpui::test]
+fn an_enter_before_the_first_settings_is_sent_once_the_pair_admits_turns(cx: &mut TestAppContext) {
+    enter_is_sent_at_text_ready(true, cx);
+}
+
+fn enter_is_sent_at_text_ready(before_settings: bool, cx: &mut TestAppContext) {
     let _area = work_area_fixture::set([0, 0, 2560, 1400]);
     let owner = test_fixture::presence(cx);
-    let (_pipe, events, ready) = early_enter(&owner, cx);
+    let (_pipe, events, ready) = early_enter(&owner, before_settings, cx);
     apply(&owner, ready, cx);
     owner.read_with(cx, |owner, cx| assert_eq!(draft(owner, cx), ""));
     loop {
@@ -101,7 +123,7 @@ fn an_enter_before_the_pair_admits_turns_is_sent_once_it_does(cx: &mut TestAppCo
 fn esc_drops_an_enter_still_waiting_for_the_pair(cx: &mut TestAppContext) {
     let _area = work_area_fixture::set([0, 0, 2560, 1400]);
     let owner = test_fixture::presence(cx);
-    let (_pipe, _events, ready) = early_enter(&owner, cx);
+    let (_pipe, _events, ready) = early_enter(&owner, false, cx);
     owner.update(cx, |owner, cx| {
         owner.dismiss_text(cx).expect("Esc closes the composer");
     });
@@ -113,7 +135,7 @@ fn esc_drops_an_enter_still_waiting_for_the_pair(cx: &mut TestAppContext) {
 fn quit_drops_an_enter_still_waiting_for_the_pair(cx: &mut TestAppContext) {
     let _area = work_area_fixture::set([0, 0, 2560, 1400]);
     let owner = test_fixture::presence(cx);
-    let (pipe, _events, ready) = early_enter(&owner, cx);
+    let (pipe, _events, ready) = early_enter(&owner, false, cx);
     assert!(pipe.handle.begin_quit());
     apply(&owner, ready, cx);
     owner.read_with(cx, |owner, cx| assert_eq!(draft(owner, cx), DRAFT));
@@ -124,7 +146,7 @@ fn an_edited_draft_waits_for_another_enter(cx: &mut TestAppContext) {
     const EDITED: &str = "Something else";
     let _area = work_area_fixture::set([0, 0, 2560, 1400]);
     let owner = test_fixture::presence(cx);
-    let (_pipe, _events, ready) = early_enter(&owner, cx);
+    let (_pipe, _events, ready) = early_enter(&owner, false, cx);
     owner.update(cx, |owner, cx| {
         let text = owner.text.as_ref().expect("the composer");
         text.window
@@ -142,7 +164,7 @@ fn an_edited_draft_waits_for_another_enter(cx: &mut TestAppContext) {
 fn a_changed_destination_waits_for_another_enter(cx: &mut TestAppContext) {
     let _area = work_area_fixture::set([0, 0, 2560, 1400]);
     let owner = test_fixture::presence(cx);
-    let (_pipe, _events, ready) = early_enter(&owner, cx);
+    let (_pipe, _events, ready) = early_enter(&owner, false, cx);
     owner.update(cx, |owner, _| {
         assert!(
             owner.runs.select_thread(None),

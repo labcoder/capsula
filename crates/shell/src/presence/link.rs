@@ -53,9 +53,11 @@ impl Presence {
                     self.retire_issue_review(cx);
                     self.revoke_exclusion(cx);
                     self.session = None;
+                    self.held_submit = None;
                     self.link_state(state, cx);
                 }
                 LinkEvent::Connected(session) => {
+                    self.held_submit = None;
                     self.cancel_voice(cx);
                     self.retire_issue_review(cx);
                     self.settings.update(cx, |state, cx| {
