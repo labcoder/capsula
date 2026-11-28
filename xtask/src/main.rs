@@ -32,6 +32,8 @@ mod scratch;
 mod session;
 #[cfg(windows)]
 mod slice2;
+#[cfg(windows)]
+mod stage_nsh;
 mod vendor;
 #[cfg(windows)]
 mod voice_assets;
@@ -58,6 +60,7 @@ const _: () = {
     );
 };
 
+#[expect(clippy::too_many_lines, reason = "the task list is one string")]
 fn usage() -> String {
     #[cfg(target_os = "macos")]
     let mac = format!("{}\n", mac_bundle::USAGE);
@@ -145,6 +148,11 @@ tasks:
   slice2-gate       the slice 2 gate: the real brain with fixture scripts, driven
                     over its real pipes by a scripted client; no input; refuses while
                     any product process runs
+  stage-nsh <folder>
+                    as the gate identity (the command above): build a debug Gate
+                    kumochi-nsh and brain and copy them into the new folder as kumochi.exe
+                    and kumochid.exe, the names a later link needs; launches neither and
+                    removes nothing: a failed copy leaves the folder and says so
   check-core        fail if kumochi-shell-core has a dependency off its list, a UI framework in
                     its tree, test support in a shipped binary or a test gate the shell's tests
                     could miss, and lint kumochi-render's stage side; CI runs it
@@ -197,6 +205,8 @@ fn main() -> Result<()> {
         Some("live") => live::run(args),
         #[cfg(windows)]
         Some("slice2-gate") => slice2::run(args),
+        #[cfg(windows)]
+        Some("stage-nsh") => stage_nsh::run(args),
         #[cfg(windows)]
         Some("cold-start") => gate::cold(args),
         #[cfg(windows)]
