@@ -21,8 +21,8 @@ Until it replaces the GPUI shell, it refuses the release identity: a build of `k
 with the release identity exits with code 69 (unsupported) before it does anything, so it can
 never touch an installed Kumochi's folders, pipe, lock or credentials. Builds with the Dev or
 Gate identity pass this check, including a release-profile build with
-`kumochi-protocol/gate-identity`; passing it isn't running: on Windows a build with no flags
-still exits 1, and off Windows every build exits 69. The refusal, and its test, go away when this
+`kumochi-protocol/gate-identity`; on Windows a build with no flags runs, since the flag is
+optional, and off Windows every build exits 69. The refusal, and its test, go away when this
 shell takes over.
 
 ## Staging it beside a brain
@@ -84,7 +84,12 @@ under the app id `SHELL_APP_ID` (`ai.kumochi.dev.shell`, `ai.kumochi.gate.shell`
 `ai.kumochi.shell` stays unused while it's refused) and the title `DISPLAY_NAME`. NativeShell's
 image cache is off. The root runs on NativeShell's engine thread and does everything below in its
 own tasks there; nothing it runs there blocks. A failed engine or window start never mounts the
-root, so none of it runs then, and only the backstop ends the process.
+root, so none of it runs then, and only the backstop ends the process. Mounting alone doesn't
+disarm the backstop: only an open connection does. When the window or UI thread can't start, a
+person dismissing NativeShell's error dialog can end the process with 1 before the backstop fires.
+
+On the engine thread no log write comes before arming the quit's grace, sealing a session or
+`quit()`, since a log write can block.
 
 ## The link and the pump
 
@@ -94,7 +99,7 @@ threads. It uses `AudioSession::Legacy` and never announces an audio output, so 
 speech for it, and it gives the empty text profile (`DrawingText::default()`). The event channel is
 unbounded and always drained, since a Legacy admission can poll a full receiver forever. The link
 holds the only event sender, so the channel ends when the link does. If the dropper, `prepare` or
-`spawn` fails, the shell logs `can't start the link` and quits.
+`spawn` fails, the shell asks the quit, then logs `can't start the link`.
 
 The pump (`shell.rs`) is one task that takes the link's events in order, in batches
 (`link::batch`), and hands each to a plain reducer, `Shell`, which holds the open `Session` and a
@@ -102,8 +107,9 @@ The pump (`shell.rs`) is one task that takes the link's events in order, in batc
 the framework. What it does with each event:
 
 - **`Connected`** keeps the session and tells the refuser. An open one disarms the start limit.
-- **Any other state** drops the session and tells the refuser. `Reconnecting` and `Connecting`
-  wait for the link, which reconnects on its own after a first loss. `Failed` and
+- **Any other state** drops the session and tells the refuser, and nothing is credited until the
+  next `Connected`. `Reconnecting` waits for the link, which reconnects on its own after a first
+  loss, and with no flag re-arms the backstop's attempt limit. `Failed` and
   `OutputUnavailable` mean it won't come back, since nobody can press Retry on a shell with no
   window: the shell quits. That's final; nothing after it is taken.
 - **`Data` and `SceneData`**: every delivered frame goes to `Refuser::data` once, with
@@ -117,12 +123,12 @@ the framework. What it does with each event:
   settings and account state arrive unasked on connect and owe no reply, and the rest answer flows
   this shell never starts.
 
-When the event channel ends, the pump asks for quit. Logs carry the link's state and the
-connection's generation, never a frame's content.
+When the event channel ends, the pump asks for quit. The pump logs only a link that couldn't
+start and a refused refusal, each after its action, never a frame's content.
 
-`Reconnecting` doesn't re-arm a start budget: after the first open connection, a reconnect is
-bounded by the link itself (10 s an attempt, 5 s a handshake phase) and ends in `Connected` or
-`Failed`.
+A reconnect repeats the credential read and the brain launch that the start limit exists for, and
+the link's own attempt deadline can't interrupt them, so with no flag `Reconnecting` arms the
+attempt limit again until the next open `Connected`.
 
 ## Quit
 
@@ -167,12 +173,14 @@ waits on a channel with a timeout and then exits 124. It's always armed, in one 
 | Case | Fires at |
 |---|---|
 | With `--quit-after-ms` | The deadline plus the grace. A connection never disarms it and a quit never moves it later |
-| With no flag | `START_LIMIT` after the lock, unless the pump applies the first open `Connected` first, which disarms it |
-| Once a quit begins | The grace from then, or the time above if that's sooner |
+| With no flag | `START_LIMIT` after the lock, and again `START_LIMIT` after each `Reconnecting`, unless an open `Connected` is applied before that limit passes, which disarms it |
+| Once a quit begins | The grace from the ask. With the flag, the deadline plus the grace if that's sooner; with no flag, the grace replaces the limit, so a quit just before it still gets its whole grace |
 
-Losing the backstop's channel disarms nothing: what's armed still fires. A connection during a
-quit doesn't disarm its grace, and a terminal state or a start error asks the quit, which switches
-to the grace before shutdown begins, so a quit that hangs in `finish_quit` still ends the process.
+Each notice carries the instant it was decided, so one decided at or after the time the backstop
+would fire changes nothing, however late its thread reads it. Nothing disarms a quit's grace.
+
+Losing the backstop's channel disarms nothing: what's armed still fires. A terminal state or a
+start error asks the quit, which switches to the grace before shutdown begins, so a quit that hangs in `finish_quit` still ends the process.
 The thread writes nothing, since a log write can block; the code is how a run shows the backstop
 fired, because nothing else in this shell or in `run_app` exits with it. If the thread can't
 start, the shell lets go of the lock, logs `can't start the deadline backstop` and exits 1
@@ -181,7 +189,7 @@ without running the app.
 The grace, 15 s, is a budget, not a bound: 13 s for `finish_quit` (10 s to connect, 3 s to quit),
 200 ms for quit hooks, and the rest spare, which also covers the pin's 10 s wait for a process it
 replaces (only when `NSH_RESTART_AFTER` is set) at a start with the flag. `START_LIMIT`, 30 s,
-covers a cold brain launch and one connect attempt; it's a guess, to be measured in the native
+covers a cold brain launch and one connect attempt, at start or after a loss; it's a guess, to be measured in the native
 session. Window creation, mounting and the engine's join have no time limit of their own, so a
 start or quit that is slow but healthy can end with 124. The waits are minimums, and a suspended
 machine stretches them.
@@ -190,12 +198,13 @@ machine stretches them.
 
 - A brain that is alive but wedged stays `Connected`: nothing here detects it, and with no flag the
   shell runs on.
-- An engine that hangs after the root mounted, while no quit is in progress, isn't caught: the
-  start limit is disarmed by then, or never armed with a flag, which only catches it at the
-  deadline plus the grace.
+- An engine that hangs while a connection is open and no quit is in progress isn't caught with
+  no flag; with a flag it is caught only at the deadline plus the grace.
 - A Windows session end (`WM_ENDSESSION` stops the surface directly), a killed process and exit
-  124 skip the ordered quit, so the brain isn't told `Quitting`, and a brain that survives may
-  relaunch the shell. A forced exit also can't unsend a `Quitting` already sent.
+  124 skip the ordered quit. A forced exit neither guarantees `Quitting` reaches the brain nor
+  undoes one already sent, and a brain that survives may relaunch the shell.
+- A close press or a quit request that arrives before the root has registered its listeners isn't
+  intercepted, so it closes the app without the ordered quit.
 - The tests run the reducer on `Session::detached` and `LinkHandle::recording` fixtures: they show
   its credit and refusals and that quit is asked once. `Quitting` on the wire, a real reconnect
   and a real kill are left to the native session.

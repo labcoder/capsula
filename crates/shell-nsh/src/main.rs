@@ -3,29 +3,16 @@
 //! state in an empty, hidden app until the link ends, a quit or its `--quit-after-ms` deadline.
 #![cfg_attr(not(test), windows_subsystem = "windows")]
 
-#[cfg_attr(
-    all(not(windows), not(test)),
-    expect(
-        dead_code,
-        reason = "only the Windows app tells the backstop of a connection or a quit"
-    )
-)]
-mod backstop;
 mod launch;
 mod platform;
-#[cfg_attr(
-    not(windows),
-    expect(dead_code, reason = "only the Windows app runs the link yet")
-)]
-mod shell;
 
 use std::process::ExitCode;
 use std::time::Instant;
 
 use kumochi_protocol::constants::{self, ProductIdentity};
 
-use crate::backstop::{Backstop, GRACE, Limit, START_LIMIT};
 use crate::launch::Launch;
+use crate::platform::backstop::{Backstop, GRACE, Limit, START_LIMIT};
 
 /// The exit code for a build or system this shell doesn't run on, as the brain's.
 const UNSUPPORTED: u8 = 69;
@@ -64,7 +51,7 @@ fn main() -> ExitCode {
     let limit = deadline.map_or(Limit::Start(now + START_LIMIT), |deadline| {
         Limit::Deadline(deadline + GRACE)
     });
-    let armed = Backstop::arm(limit, GRACE, || {
+    let armed = Backstop::arm(limit, GRACE, START_LIMIT, || {
         // `run_app` ends a run that got its UI thread this way too: `std::process::exit` off it.
         std::process::exit(i32::from(OVERDUE))
     });

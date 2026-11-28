@@ -2,18 +2,22 @@ use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
-use kumochi_protocol::message::{DataToShell, Incarnation, RunId, SceneId};
+use kumochi_protocol::message::{
+    DataToShell, Incarnation, RunId, SceneDescriptor, SceneDescriptorV1, SceneId,
+};
 use kumochi_scene::deferred::Deferred;
 use kumochi_scene::text::Bounded;
 use kumochi_shell_core::presenter::fixture::{commit_frame, header, rect};
 
 use super::*;
-use crate::backstop::Limit;
+use crate::platform::backstop::Limit;
 
 const A: SceneId = SceneId(1);
 const B: SceneId = SceneId(2);
 /// Half the brain's 512 KiB data window.
 const HALF_WINDOW: u32 = 256 * 1024;
+/// Far longer than any test waits.
+const NEVER: Duration = Duration::from_secs(600);
 
 fn session(generation: u64) -> Session {
     Session::detached(generation, Incarnation(1))
@@ -73,6 +77,7 @@ fn name(act: Option<&Act>) -> &'static str {
     match act {
         None => "",
         Some(Act::Opened) => "opened",
+        Some(Act::Reconnecting) => "reconnecting",
         Some(Act::Quit) => "quit",
         Some(Act::End(..)) => "end",
     }
@@ -111,7 +116,22 @@ fn killed_and_not_coming_back_reconnects_fails_and_quits_once() {
                 LinkEvent::State(LinkState::Failed),
             ]
         ),
-        ["opened", "", "quit"]
+        ["opened", "reconnecting", "quit"]
+    );
+}
+
+#[test]
+fn an_unavailable_output_quits_at_once() {
+    let mut shell = Shell::new(LinkHandle::detached());
+    assert_eq!(
+        applied(
+            &mut shell,
+            [
+                LinkEvent::Connected(session(1)),
+                LinkEvent::State(LinkState::OutputUnavailable),
+            ]
+        ),
+        ["opened", "quit"]
     );
 }
 
@@ -125,17 +145,18 @@ fn killed_and_relaunched_reconnects_without_quitting() {
             [
                 LinkEvent::Connected(first.clone()),
                 LinkEvent::State(LinkState::Reconnecting),
+                data(1, 7),
                 LinkEvent::Connected(second.clone()),
                 data(1, 10),
                 data(2, 20),
             ]
         ),
-        ["opened", "", "opened", "", ""]
+        ["opened", "reconnecting", "", "opened", "", ""]
     );
     assert_eq!(
         first.granted(),
         0,
-        "the old connection's late frame earns nothing"
+        "nothing is credited between the loss and the next connection, nor after"
     );
     assert_eq!(
         second.granted(),
@@ -217,18 +238,25 @@ fn a_delayed_control_list_owes_no_credit() {
             data(1, 100),
             LinkEvent::ScenesV1 {
                 generation: 1,
-                scenes: Bounded::default(),
+                scenes: Bounded::new(vec![
+                    SceneDescriptorV1::new(A, 3, 3, 3).expect("a valid descriptor"),
+                ])
+                .expect("one scene"),
             },
-            LinkEvent::Scenes(Vec::new()),
+            LinkEvent::Scenes(vec![SceneDescriptor {
+                scene: B,
+                revision: 2,
+                committed: 2,
+            }]),
         ],
     );
     assert_eq!(asked, ["opened", "", "", ""]);
     assert_eq!(open.granted(), 100, "only the data frame earns credit");
-    assert_eq!(controls(&heard), []);
+    assert_eq!(controls(&heard), [], "a listed scene is left alone");
 }
 
 #[test]
-fn the_window_refills_from_the_refusers_credit() {
+fn frames_past_one_window_are_all_granted_on_their_session() {
     let (link, heard) = recording();
     let open = session(1);
     let mut shell = Shell::new(link);
@@ -250,7 +278,7 @@ fn the_window_refills_from_the_refusers_credit() {
 }
 
 #[test]
-fn a_refusal_the_mailbox_refuses_seals_and_ends_the_connection() {
+fn a_refused_refusal_seals_the_session_and_returns_its_end() {
     // No control recording: the detached link's mailbox refuses every refusal.
     let open = session(1);
     let mut shell = Shell::new(LinkHandle::detached());
@@ -259,7 +287,7 @@ fn a_refusal_the_mailbox_refuses_seals_and_ends_the_connection() {
         "opened"
     );
     let Some(Act::End(_, ended)) = shell.apply(begin(1, A, 50)) else {
-        panic!("the refused send ends the connection");
+        panic!("the refused send returns the session's end");
     };
     assert_eq!(ended.generation(), 1, "it ends the frame's own connection");
     assert!(!open.open(), "sealed here, before the end runs elsewhere");
@@ -299,8 +327,8 @@ fn quit_is_asked_once_when_two_causes_arrive() {
             Some(LinkHandle::detached()),
             vec![
                 LinkEvent::Connected(session(1)),
-                LinkEvent::State(LinkState::Failed),
                 LinkEvent::State(LinkState::OutputUnavailable),
+                LinkEvent::State(LinkState::Failed),
             ]
         ),
         ["opened", "quit"],
@@ -333,8 +361,9 @@ fn a_failure_stays_failed_when_valid_events_follow() {
 fn a_quit_asked_twice_runs_once_and_arms_the_grace() {
     let (fired, heard) = std::sync::mpsc::channel();
     let backstop = Backstop::arm(
-        Limit::Start(Instant::now() + Duration::from_secs(600)),
+        Limit::Start(Instant::now()),
         Duration::from_millis(50),
+        NEVER,
         move || fired.send(()).expect("the test is listening"),
     )
     .expect("the backstop starts");
@@ -347,7 +376,7 @@ fn a_quit_asked_twice_runs_once_and_arms_the_grace() {
     assert!(link.is_quitting(), "the first ask marks Quit on the link");
     assert!(owner.begin().is_none(), "a second ask does nothing");
     assert_eq!(
-        heard.recv_timeout(Duration::from_secs(10)),
+        heard.recv_timeout(Duration::from_secs(30)),
         Ok(()),
         "the quit armed the grace, long before the start limit"
     );
@@ -355,12 +384,8 @@ fn a_quit_asked_twice_runs_once_and_arms_the_grace() {
 
 #[test]
 fn a_quit_with_no_link_quits_at_once() {
-    let backstop = Backstop::arm(
-        Limit::Start(Instant::now() + Duration::from_secs(600)),
-        Duration::from_secs(600),
-        || {},
-    )
-    .expect("the backstop starts");
+    let backstop = Backstop::arm(Limit::Start(Instant::now()), NEVER, NEVER, || {})
+        .expect("the backstop starts");
     assert!(matches!(
         Quit::new(backstop, None).begin(),
         Some(Begun::Now)

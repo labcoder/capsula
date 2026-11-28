@@ -13,13 +13,13 @@ use kumochi_shell_core::startup::{self, Refused};
 use nsh_core::desktop::MainWindowOptions;
 use nsh_core::element::desktop::{main_window, on_quit_request, quit};
 use nsh_core::element::{
-    Component, IntoElement, NoEvent, Props, Scope, blocking, spawn, timer, view,
+    Component, IntoElement, NoEvent, Owner, Props, Scope, blocking, spawn, timer, view,
 };
 use nsh_platform_windows::{AppOptions, AppSource, CacheOptions, Root, run_app};
 
-use crate::backstop::Backstop;
+use super::backstop::{Backstop, Order};
+use super::shell::{self, Act, Begun, Quit};
 use crate::launch::{Launch, LaunchError};
-use crate::shell::{self, Act, Begun, Quit};
 
 /// The backstop's handle for the root, since props take only values the engine can decode.
 static BACKSTOP: OnceLock<Backstop> = OnceLock::new();
@@ -44,11 +44,14 @@ impl Component for EmptyApp {
             .get()
             .cloned()
             .expect("`run` keeps the backstop before the app starts");
+        // The quit task belongs to the root, not to the handler that asked: a close press runs in
+        // an effect whose next run would cancel what it spawned.
+        let root = Owner::current();
         let (link, events) = shell::started();
         let owner = Rc::new(Quit::new(backstop.clone(), link.clone()));
         let asker = |owner: &Rc<Quit>| {
             let owner = Rc::clone(owner);
-            move || ask_quit(&owner)
+            move || ask_quit(&owner, root)
         };
         let close = asker(&owner);
         main_window().on_close_press(move |_| close());
@@ -61,28 +64,37 @@ impl Component for EmptyApp {
             });
         }
         spawn(shell::pump(link, events, move |act| match act {
-            Act::Opened => backstop.connected(),
-            Act::Quit => ask_quit(&owner),
-            // Detached: ending waits briefly on the output owner's lock, never on the engine thread.
-            Act::End(link, session) => drop(blocking(move || link.end(&session))),
+            Act::Opened => backstop.tell(Order::Connected(Instant::now())),
+            Act::Reconnecting => backstop.tell(Order::Reconnecting(Instant::now())),
+            Act::Quit => ask_quit(&owner, root),
+            Act::End(link, session) => {
+                // Detached: ending waits briefly on the output owner's lock, never on this thread.
+                drop(blocking(move || link.end(&session)));
+                tracing::warn!("the scene refusal was refused; ending the connection");
+            }
         }));
         view()
     }
 }
 
 /// Asks the one quit. The first ask waits for the link's quit on the blocking pool, since it can
-/// take 13 s and quit hooks get 200 ms, then calls `quit()`, once.
-fn ask_quit(owner: &Quit) {
+/// take 13 s and quit hooks get 200 ms, then calls `quit()`, once, in a task `root` owns.
+fn ask_quit(owner: &Quit, root: Owner) {
     let Some(begun) = owner.begin() else {
         return;
     };
-    spawn(async move {
-        if let Begun::Finish(link) = begun
-            && blocking(move || link.finish_quit()).await.is_err()
-        {
-            tracing::warn!("the link's quit ended early");
-        }
-        quit();
+    root.run(|| {
+        spawn(async move {
+            let finished = match begun {
+                Begun::Finish(link) => blocking(move || link.finish_quit()).await.is_ok(),
+                Begun::Now => true,
+            };
+            quit();
+            // Only after `quit()`, since a log write can block.
+            if !finished {
+                tracing::warn!("the link's quit ended early");
+            }
+        })
     });
 }
 

@@ -2,6 +2,7 @@
 //! it is tested without the framework; `platform` runs it on the engine thread.
 
 use std::cell::Cell;
+use std::time::Instant;
 
 use async_channel::Receiver;
 use kumochi_protocol::message::{AudioSession, ControlToBrain, Narration};
@@ -10,13 +11,15 @@ use kumochi_shell_core::link::{
 };
 use kumochi_shell_core::presenter::{Naming, Refuser};
 
-use crate::backstop::Backstop;
+use super::backstop::{Backstop, Order};
 
 /// What the root does after an event.
 #[derive(Debug)]
 pub(crate) enum Act {
-    /// A connection is open, so the start limit is off.
+    /// A connection is open, so the start or attempt limit is off.
     Opened,
+    /// The connection was lost and the link is trying again: with no flag, re-arm the limit.
+    Reconnecting,
     /// The link won't come back, or never started: quit.
     Quit,
     /// The mailbox refused a scene refusal, so the connection is sealed here: end it off the
@@ -52,20 +55,19 @@ impl Shell {
         }
         match event {
             LinkEvent::Connected(session) => {
-                tracing::info!(generation = session.generation(), "link connected");
                 self.scenes.connected(session.generation());
                 let open = session.open();
                 self.session = Some(session);
                 open.then_some(Act::Opened)
             }
             LinkEvent::State(state) => {
-                tracing::info!(?state, "link state");
                 self.session = None;
                 self.scenes.disconnected();
-                if matches!(state, LinkState::Failed | LinkState::OutputUnavailable) {
-                    return self.ask_quit();
+                match state {
+                    LinkState::Failed | LinkState::OutputUnavailable => self.ask_quit(),
+                    LinkState::Reconnecting => Some(Act::Reconnecting),
+                    LinkState::Connecting | LinkState::Connected => None,
                 }
-                None
             }
             LinkEvent::Data {
                 generation,
@@ -107,7 +109,6 @@ impl Shell {
         {
             return None;
         }
-        tracing::warn!("the scene refusal was refused; ending the connection");
         let session = self.session.take()?;
         session.close();
         self.scenes.disconnected();
@@ -124,6 +125,8 @@ pub(crate) async fn pump(
 ) {
     let Some(link) = link else {
         act(Act::Quit);
+        // Only once the quit has armed the grace, since a log write can block.
+        tracing::error!("can't start the link");
         return;
     };
     let mut shell = Shell::new(link);
@@ -142,15 +145,14 @@ pub(crate) async fn pump(
 }
 
 /// Starts the scene dropper, then the link on `Legacy` with no audio output announced, so the
-/// brain makes no speech for it. `None` when either can't start; nothing then holds the sender,
-/// so no clone of it outlives the link.
+/// brain makes no speech for it. `None` when either can't start, and the pump logs it after
+/// asking for quit; nothing then holds the sender, so no clone of it outlives the link.
 pub(crate) fn started() -> (Option<LinkHandle>, Receiver<LinkEvent>) {
     // Unbounded and always drained: a Legacy admission can poll a full receiver forever.
     let (sender, events) = async_channel::unbounded();
     let link = kumochi_scene::deferred::start()
         .and_then(|()| link::prepare(sender, AudioSession::Legacy, Narration::Plain))
         .and_then(|(link, start)| start.spawn(|_| DrawingText::default()).map(|()| link))
-        .inspect_err(|_| tracing::error!("can't start the link"))
         .ok();
     (link, events)
 }
@@ -187,7 +189,7 @@ impl Quit {
         if self.asked.replace(true) {
             return None;
         }
-        self.backstop.quitting();
+        self.backstop.tell(Order::Quitting(Instant::now()));
         Some(match &self.link {
             Some(link) if link.begin_quit() => Begun::Finish(link.clone()),
             _ => Begun::Now,
