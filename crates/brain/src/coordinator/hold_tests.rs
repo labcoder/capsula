@@ -940,6 +940,64 @@ fn a_picture_its_route_cant_take_goes_as_model_cant_see_before_any_send() {
     )));
 }
 
+/// A local route takes no screen: a held turn on it fails before any request starts, rather
+/// than going without its screen.
+#[test]
+fn a_held_screen_on_a_local_route_fails_the_run_before_any_send() {
+    use crate::context::{Jpeg, Screen};
+    let mut core = fresh();
+    core.handle(Input::Engines(
+        ConnectionKind::LocalChat,
+        Availability::Ready(Ready {
+            connection: ConnectionTag(0),
+            models: vec![ModelInfo {
+                slug: ModelSlug::new("captured").unwrap(),
+                display_name: ModelName::new("captured model").unwrap(),
+                supported_efforts: EffortSet::new([Effort::High]),
+            }],
+            trusted_draw: false,
+            images: Vec::new(),
+        }),
+    ))
+    .unwrap();
+    let local = ModelChoice {
+        connection: ConnectionKind::LocalChat,
+        ..choice("captured", Effort::High)
+    };
+    let StoreOp::ReadHold(read) = core
+        .prepare_hold(
+            KEY,
+            Some(T),
+            12,
+            RunSnapshot {
+                choice: Some(local.clone()),
+                ..defaults()
+            },
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap()
+    else {
+        panic!("hold read")
+    };
+    let mut snapshot = read.snapshot;
+    snapshot.generation = Some(Generation(0));
+    let image = Jpeg::new(vec![0xFF, 0xD8, 0xFF, 0xD9]).unwrap();
+    core.submit_hold(snapshot, "words".into(), Some(Screen::Image(image)))
+        .unwrap();
+    core.handle(Input::TurnStored { run: R }).unwrap();
+    let Input::ContextBuilt(mut done) = screened(engine_key(&core, R), &[T]) else {
+        unreachable!()
+    };
+    done.result.as_mut().unwrap().request.choice = Some(local);
+    let effects = core.handle(Input::ContextBuilt(done)).unwrap();
+    assert_eq!(starts(&effects), 0);
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Control(ControlToShell::RunState { error: Some(error), .. })
+            if error.key() == kumochi_protocol::message::ErrorKey::ScreenUnavailable
+    )));
+}
+
 /// A coordinator whose engines are ready with `model` listed.
 fn held_catalog(model: &str, effort: Effort) -> Input {
     Input::Engines(

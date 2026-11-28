@@ -4,6 +4,7 @@
 use crate::config::tuning::ContextTuning;
 use crate::context::build::{Turn, build};
 use crate::context::compact::{compaction, rewrite};
+use crate::context::local::build_local;
 use crate::context::{BOUND, BuildError, Built, PictureRecipient, Route, Supplied};
 use crate::coordinator::{
     BuildContext, CompactBuilt, CompactContext, ContextBuilt, JobAsk, JobBuilt, JobKind, ReadJob,
@@ -15,6 +16,13 @@ use crate::store::context::Snapshot;
 use crate::store::{Side, StoreError};
 use kumochi_protocol::message::ConnectionKind;
 use std::time::Instant;
+
+fn is_local(snapshot: &crate::context::RunSnapshot) -> bool {
+    snapshot
+        .choice
+        .as_ref()
+        .is_some_and(|choice| choice.connection == ConnectionKind::LocalChat)
+}
 
 fn closed(control: &crate::recall::control::Control) -> StoreError {
     control
@@ -131,6 +139,10 @@ pub(super) fn read_call(
 
 /// Builds `job` on `side`, or fails it when the store closed before its turn (`None`). A run's
 /// first build reads its model choice into its snapshot. Failures are logged by kind only.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one read transaction's steps, in the order they must run"
+)]
 pub(super) fn read(
     side: Option<&Side>,
     job: BuildContext,
@@ -172,6 +184,9 @@ pub(super) fn read(
                             .stored_choice(thread)?
                             .execution(snapshot.choice.take())?;
                         snapshot.connection = arrived.replay(snapshot.choice.as_ref());
+                    }
+                    if is_local(&snapshot) {
+                        return Ok(build_local(read, &snapshot, thread, key.run, BOUND));
                     }
                     let answers_chatgpt = snapshot
                         .choice
@@ -267,6 +282,9 @@ pub(super) fn read_compact(
                     let read = Snapshot::begin(conn)?.controlled(scope.clone());
                     #[cfg(test)]
                     hold();
+                    if is_local(&snapshot) {
+                        return Ok(Err(BuildError::LocalContent));
+                    }
                     let found = rewrite(&read, &snapshot, thread, room);
                     read.end()?;
                     Ok(found)
@@ -338,6 +356,11 @@ pub(super) fn read_job(
                     snapshot.choice = read
                         .stored_choice(key.thread)?
                         .execution(snapshot.choice.take())?;
+                    // Nothing titles or summarizes a local task.
+                    if is_local(&snapshot) {
+                        read.end()?;
+                        return Ok(Ok(None));
+                    }
                     let ask = match kind {
                         JobKind::Title => Ok(read.first_ask(key.thread)?.map(|ask| JobAsk {
                             generation: ask.generation,
