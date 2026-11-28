@@ -187,6 +187,38 @@ fn a_turn_refused_before_it_was_kept_returns_its_text_and_new_target() {
     }
 }
 
+/// A second turn sent to the thread New named, before the first's refusal, keeps that target
+/// until its own refusal, which returns its text and New.
+#[test]
+fn a_later_turn_on_an_unkept_new_thread_returns_new_at_its_own_refusal() {
+    let mut runs = answering(1);
+    assert!(runs.select_thread(None));
+    submit(&mut runs, "first");
+    runs.apply_state(
+        RunId(11),
+        ThreadId(22),
+        Phase::Thinking,
+        Some(RunOrigin::Typed { turn: 1 }),
+    );
+    assert_eq!(runs.target(), Target::Task(ThreadId(22)));
+    submit(&mut runs, "second");
+    let refused = |runs: &mut Runs, run, turn| {
+        runs.apply_run_state(
+            RunId(run),
+            ThreadId(22),
+            Phase::Failed,
+            Some(ErrorKey::ConfigUnreadable.into()),
+            Some(RunOrigin::Typed { turn }),
+        )
+        .0
+        .restore
+    };
+    assert_eq!(refused(&mut runs, 11, 1), None);
+    assert_eq!(runs.target(), Target::Task(ThreadId(22)));
+    assert_eq!(refused(&mut runs, 12, 2).as_deref(), Some("second"));
+    assert_eq!(runs.target(), Target::New);
+}
+
 #[test]
 fn newer_keyed_answers_never_borrow_older_cancelled_or_deleted_prefixes() {
     use kumochi_protocol::message::Deleted;

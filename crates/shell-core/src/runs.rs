@@ -64,7 +64,8 @@ const RECONNECT: [ErrorKey; 7] = [
     ErrorKey::AnthropicKeyRejected,
     ErrorKey::RenewalUnconfirmed,
 ];
-/// Refusals the brain gives before it keeps a turn, so its text and any New thread exist only here.
+/// Refusals the brain gives before it keeps a turn, so its text exists only here and a thread it
+/// named for New was never made.
 const UNKEPT: [ErrorKey; 2] = [ErrorKey::ConfigUnreadable, ErrorKey::LocalOff];
 
 /// Why a turn wasn't sent.
@@ -145,8 +146,6 @@ struct Submitted {
     /// What was typed, until nothing may put it back.
     text: Option<Content>,
     answering: bool,
-    /// Its run moved a New target onto the thread it named.
-    adopted: bool,
 }
 
 impl fmt::Debug for Submitted {
@@ -157,7 +156,6 @@ impl fmt::Debug for Submitted {
             .field("thread", &self.thread)
             .field("text_len", &self.text.as_ref().map(|text| text.len()))
             .field("answering", &self.answering)
-            .field("adopted", &self.adopted)
             .finish()
     }
 }
@@ -707,7 +705,6 @@ impl Runs {
             thread: self.thread(),
             text: Some(text.into()),
             answering: false,
-            adopted: false,
         });
         self.turns_sent = turn;
         Ok(())
@@ -988,7 +985,6 @@ impl Runs {
                     } else {
                         Target::Task(thread)
                     };
-                    submitted.adopted = true;
                 }
                 let cancelled = at < self.cancelled;
                 self.answered_one(at);
@@ -1051,17 +1047,30 @@ impl Runs {
                 && submitted.thread == Some(thread)
                 && self.thread() == Some(thread)
             {
-                let unkept = error.is_some_and(|error| UNKEPT.contains(&error.key()));
                 if !submitted.answering
-                    && (unkept || error.is_some_and(|error| RECONNECT.contains(&error.key())))
+                    && error.is_some_and(|error| {
+                        UNKEPT.contains(&error.key()) || RECONNECT.contains(&error.key())
+                    })
                 {
-                    if unkept && submitted.adopted {
-                        self.target = Target::New;
-                    }
                     applied.restore = submitted.text;
                 } else if error.is_some_and(|error| error.actions().contains(&Action::Retry)) {
                     self.recovery = Some((run, submitted));
                 }
+            }
+            // A refusal before any turn was kept means a New target's thread was never made,
+            // whichever of its turns the refusal answers; one still owed an answer keeps it.
+            let owed = self
+                .submitted
+                .iter()
+                .chain(self.named.as_ref().map(|(_, submitted)| submitted))
+                .any(|submitted| submitted.thread == Some(thread));
+            if phase == Phase::Failed
+                && error.is_some_and(|error| UNKEPT.contains(&error.key()))
+                && !self.durable
+                && self.target == Target::Task(thread)
+                && !owed
+            {
+                self.target = Target::New;
             }
         }
         if let Some(pending) = self.pending_stops.get_mut(&run) {
