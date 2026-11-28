@@ -36,12 +36,12 @@ fn exit_code(identity: ProductIdentity) -> u8 {
 // shortcut: unmeasured, so a slow but healthy start can end with 124; set it from the native run.
 const BACKSTOP_GRACE: Duration = Duration::from_secs(15);
 
-/// Runs `expire` on a thread of its own once `after` has passed, whatever `NativeShell` is doing.
-fn arm_backstop(after: Duration, expire: impl FnOnce() + Send + 'static) -> std::io::Result<()> {
+/// Runs `expire` on a thread of its own once `at` has passed, whatever `NativeShell` is doing.
+fn arm_backstop(at: Instant, expire: impl FnOnce() + Send + 'static) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("shell-backstop".to_owned())
         .spawn(move || {
-            std::thread::sleep(after);
+            std::thread::sleep(at.saturating_duration_since(Instant::now()));
             expire();
         })
         .map(drop)
@@ -57,12 +57,13 @@ fn main() -> ExitCode {
         Ok(started) => started,
         Err(code) => return code,
     };
-    // One deadline for the app's quit and the backstop, both counted from taking the lock.
+    // The deadline, from taking the lock: the backstop fires at a fixed time past it, and the app
+    // waits what's left of it when it mounts.
     let deadline = Instant::now() + launch.quit_after;
     // NativeShell can keep running without the engine that holds the deadline, or wait on a
     // message box, and a log write can block: a hidden shell must never keep the session's lock
     // forever, so nothing comes between taking the lock and arming.
-    let armed = arm_backstop(launch.quit_after + BACKSTOP_GRACE, || {
+    let armed = arm_backstop(deadline + BACKSTOP_GRACE, || {
         // `run_app` ends a run that got its UI thread this way too: `std::process::exit` off it.
         std::process::exit(i32::from(OVERDUE))
     });
@@ -92,20 +93,15 @@ mod tests {
     #[test]
     fn the_backstop_runs_its_action_once_its_delay_has_passed() {
         let (expired, heard) = mpsc::channel();
-        let armed = Instant::now();
-        arm_backstop(Duration::from_millis(50), move || {
-            expired
-                .send(armed.elapsed())
-                .expect("the test is listening");
+        let at = Instant::now() + Duration::from_millis(50);
+        arm_backstop(at, move || {
+            expired.send(Instant::now()).expect("the test is listening");
         })
         .expect("the backstop starts");
-        let waited = heard
+        let ran = heard
             .recv_timeout(Duration::from_secs(10))
             .expect("the action runs");
-        assert!(
-            waited >= Duration::from_millis(50),
-            "it ran after {waited:?}"
-        );
+        assert!(ran >= at, "it ran {:?} early", at - ran);
     }
 
     #[test]

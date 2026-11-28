@@ -15,8 +15,8 @@ use nsh_platform_windows::{AppOptions, AppSource, CacheOptions, Root, run_app};
 
 use crate::launch::{Launch, LaunchError};
 
-/// The root's one prop: the milliseconds left of the deadline when it mounts, since props take
-/// numbers, not a `Duration` or an `Instant`.
+/// The root's one prop: the milliseconds left of the deadline when the engine mounts the root,
+/// since props take numbers, not an `Instant`. The view's timer starts one commit later.
 #[derive(Clone, PartialEq, Props)]
 struct EmptyAppProps {
     quit_after_ms: u64,
@@ -53,7 +53,8 @@ pub(crate) fn start(
 pub(crate) fn run(deadline: Instant) -> ExitCode {
     let mut window = MainWindowOptions::default();
     window.default_visible = Some(false);
-    // The engine makes the props as it mounts the root, which can come late: only what's left.
+    // The engine makes the props as it mounts the root, which can come late: only what's left then,
+    // so the quit can trail the deadline by the one commit before the view's timer starts.
     let root = Root::new::<EmptyApp>(move || {
         let left = deadline.saturating_duration_since(Instant::now());
         EmptyAppProps {
