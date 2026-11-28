@@ -190,8 +190,10 @@ without running the app.
 The grace, 15 s, is a budget, not a bound: 13 s for `finish_quit` (10 s to connect, 3 s to quit),
 200 ms for quit hooks, and the rest spare, which also covers the pin's 10 s wait for a process it
 replaces (only when `NSH_RESTART_AFTER` is set) at a start with the flag. `START_LIMIT`, 30 s,
-covers a cold brain launch and one connect attempt, at start or after a loss; it's a guess, to be measured in the native
-session. Window creation, mounting and the engine's join have no time limit of their own, so a
+covers a brain launch and one connect attempt, at start or after a loss. One native run measured
+a warm start connecting in 1.1 s, a reconnect after a killed brain in 0.2 s and a healthy linked
+quit ending 68 ms past its deadline, so both limits have wide margins there; a cold start isn't
+measured. Window creation, mounting and the engine's join have no time limit of their own, so a
 start or quit that is slow but healthy can end with 124. The waits are minimums, and a suspended
 machine stretches them.
 

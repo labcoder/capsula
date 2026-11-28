@@ -7,12 +7,14 @@ use std::time::{Duration, Instant};
 
 /// How long a quit may take before the backstop ends the process: the link's `finish_quit`, 13 s
 /// (10 s to connect, 3 s to quit), then 200 ms of `NativeShell`'s quit hooks, and about 1.8 s spare.
-// shortcut: unmeasured, so a slow but healthy quit can end with 124; set it from the native run.
+// shortcut: a budget, not a measured bound: one healthy linked quit ran 68 ms past its deadline,
+// but a slower one ends with 124; revisit it if that happens.
 pub(crate) const GRACE: Duration = Duration::from_secs(15);
 
 /// How long a shell with no deadline may wait for an open connection, at start and again after a
-/// loss: a cold brain launch and one connect attempt [guess].
-// shortcut: a guess, so a slow connect can end with 124; measure it in the native session.
+/// loss: a brain launch and one connect attempt.
+// shortcut: sized from warm starts that connected in about 1 s, so a slow cold connect can end
+// with 124; measure a cold start before lowering it.
 pub(crate) const START_LIMIT: Duration = Duration::from_secs(30);
 
 /// When the backstop fires if nothing changes it.
