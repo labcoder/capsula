@@ -1328,7 +1328,7 @@ impl Brain {
             let send_due = self.next_send_deadline();
             let take_engine = link.queue.borrow().bytes() < DATA_CAP;
             let take_turns = self.admits_turn(&link);
-            let feed = take_engine && link.recovery.as_ref().is_some_and(Recovery::pending);
+            let feed = Self::feeds(&link);
             let input = select_connection!(WATCH_FATAL, [
                 cause = poll_fn(|cx| fence.expect("active pair has a fence").poll_fatal(
                     wake.as_mut().map(Pin::as_mut).expect("enabled fatal arm has a wake"),
@@ -1627,13 +1627,31 @@ impl Brain {
     }
 
     fn queue_recovery(&mut self, link: &mut Link<'_, '_>) -> Result<(), Full> {
+        if let Some(scene) = link.queue.borrow().first_gate()
+            && let Some(recovery) = link.recovery.as_mut()
+        {
+            recovery.prefer(scene);
+        }
         if let Some(chunk) = link.recovery.as_mut().and_then(Recovery::next_chunk) {
             link.data(&chunk)?;
         }
         if !link.recovery.as_ref().is_some_and(Recovery::pending) {
             self.crashes.queued(std::time::Instant::now());
         }
+        let recovery = link.recovery.as_ref();
+        link.queue
+            .borrow_mut()
+            .open(|scene| recovery.is_some_and(|recovery| recovery.owes(scene)));
+        link.ready.notify_one();
         Ok(())
+    }
+
+    /// Recovery feeds while chunks are owed or a gate is still shut, paced by the bytes ahead of
+    /// the first gate.
+    fn feeds(link: &Link<'_, '_>) -> bool {
+        let queue = link.queue.borrow();
+        queue.ahead() < DATA_CAP
+            && (queue.gated() || link.recovery.as_ref().is_some_and(Recovery::pending))
     }
 
     /// When the soonest granted send's deadline passes.
@@ -1872,6 +1890,14 @@ impl Brain {
                         )
                     {
                         continue;
+                    }
+                    if let Some(shell) = link.as_deref_mut()
+                        && let Some(scene) = shell
+                            .recovery
+                            .as_ref()
+                            .and_then(|recovery| recovery.owed(&message))
+                    {
+                        shell.queue.borrow_mut().gate(scene);
                     }
                     if let Some(shell) = link.as_deref_mut()
                         && shell.data(&message).is_err()
@@ -2474,6 +2500,11 @@ impl<'a, 't> Link<'a, 't> {
         };
         if matches!(message, DataToShell::IssueReview { .. }) {
             self.queue.borrow_mut().push_review(frame)?;
+        } else if matches!(
+            message,
+            DataToShell::SceneSnapshot { .. } | DataToShell::SceneSnapshotV1 { .. }
+        ) {
+            self.queue.borrow_mut().push_ahead(owner, frame);
         } else {
             self.queue.borrow_mut().push(owner, frame);
         }
