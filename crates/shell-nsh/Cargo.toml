@@ -13,7 +13,10 @@ path = "src/main.rs"
 
 [dependencies]
 kumochi-protocol.workspace = true
+kumochi-shell-core.workspace = true
 nsh-core.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 nsh-platform-windows.workspace = true
