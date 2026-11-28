@@ -2448,9 +2448,16 @@ live slot with that scene and epoch, or else the frozen picture with them, and `
 clears it as usual: a late failure for a picture frozen since it was painted retires only that
 picture. A view replacement, a slot reset and a hide each start a new epoch from one counter
 that a reconnect doesn't reset, so the epoch fences an answer about an older view, showing or
-connection. It doesn't change on a Stop, a cut applied to a view at rest or a re-placement, and
-a hide leaves frozen pictures alone, so the owner checks its connection, host and submission
-fence before it passes an answer on; the epoch is the last check, not the only one.
+connection. It doesn't change on a Stop or a re-placement, nor on a cut that keeps the drawing,
+adds no cut to its history, leaves the same steps activated and finds the view at rest at the
+time its Stop froze it; any other cut rebuilds the view under a new epoch. A hide leaves frozen
+pictures alone. So a caller checks its own connection, host and submission fence before it hands
+an answer back, and the epoch is the last check, not the only one. A re-placement moves a live
+picture under the same epoch, and it can come from the overlay's placement call or from an
+activation or cut that moves a kept peer. So a caller also drops a failure that depended on where
+the picture was placed, such as a label that would be clamped or a pose over budget, when the
+picture was re-placed since the paint, by any path. A failure that doesn't depend on placement
+still applies, and a presentation earned before a move still counts.
 
 With [drawing timing enabled](input.md#offline-drawing-timing), the shell saves a QPC
 stamp at the first successful paint for that scene, epoch and bound. It reports the

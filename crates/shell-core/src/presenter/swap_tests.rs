@@ -953,3 +953,40 @@ fn a_late_failure_for_a_frozen_picture_retires_it_and_no_live_scene() {
         assert!(!presenter.frames.borrow().mark_failed(ticket), "retired");
     }
 }
+
+#[test]
+fn an_older_view_s_late_failure_leaves_the_newer_frozen_picture_in_place() {
+    const SURVIVOR: SceneId = SceneId(10);
+    let (mut presenter, now) = fixture(&[SURVIVOR, LIVE]);
+    let older = later(&presenter)[1];
+    let before = presenter.frames.borrow().epoch(LIVE);
+    let job =
+        only_job(commit_as(&mut presenter, RUN, LIVE, 1, rect("newer"), now).expect("commit"));
+    presenter
+        .completed(job.run(&mut Shaper), now)
+        .expect("prepared");
+    presenter.advance(GENERATION, now).expect("a newer view");
+    assert!(presenter.sample_at(now).expect("a sample").0.visible);
+    assert_ne!(presenter.frames.borrow().epoch(LIVE), before);
+    replace(&mut presenter, &[LIVE], NEXT, now);
+    begin(&mut presenter, NEXT, now);
+    let pictures = picture(&presenter);
+    let bytes = presenter.frames.borrow().retirement_bytes();
+    assert_eq!(pictures.len(), 2);
+    assert!(bytes > 0);
+
+    assert_eq!(older.scene, LIVE);
+    assert!(
+        !presenter.frames.borrow().mark_failed(older),
+        "an older view"
+    );
+    assert!(presenter.paint_failed().is_empty());
+    assert_eq!(picture(&presenter), pictures);
+    assert_eq!(presenter.frames.borrow().retirement_bytes(), bytes);
+
+    let frozen = later(&presenter)[1];
+    assert!(presenter.frames.borrow().mark_failed(frozen));
+    assert!(presenter.paint_failed().is_empty(), "no old-scene failure");
+    assert_eq!(presenter.frames.borrow().retirement_bytes(), 0);
+    assert_eq!(picture(&presenter).len(), 1);
+}

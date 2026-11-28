@@ -343,7 +343,6 @@ impl Frames {
                 Ok(Drawn::Now) if ticket.counts => slot.painted.set(ticket.bound),
                 Ok(_) => {}
                 Err(_) => {
-                    tracing::warn!("a drawing couldn't paint; clearing it");
                     slot.failed.set(true);
                     failed = true;
                 }
@@ -381,7 +380,8 @@ impl Frames {
 
     /// A later answer: the ticket's picture reached the compositor. It records the painted bound
     /// only for a counting ticket whose scene's live slot is still at its epoch and not failed.
-    /// Whether it counted.
+    /// Whether it counted. The ticket must come from this presenter's [`Frames::paint_with`];
+    /// which answers to hand back, and in what order, is the caller's to decide.
     pub fn presented(&self, ticket: PaintTicket) -> bool {
         let live = self.slots.iter().flatten().find(|(id, slot)| {
             *id == ticket.scene && slot.epoch == ticket.epoch && !slot.failed.get()
@@ -397,7 +397,9 @@ impl Frames {
 
     /// A later answer: the ticket's picture couldn't be drawn. Marks the live slot with its
     /// scene and epoch, or else the frozen picture with them, for [`Presenter::paint_failed`].
-    /// Whether it newly marked one.
+    /// Whether it newly marked one. The ticket must come from this presenter's
+    /// [`Frames::paint_with`]; which answers to hand back, and in what order, is the caller's to
+    /// decide.
     pub fn mark_failed(&self, ticket: PaintTicket) -> bool {
         let made = |id: SceneId, slot: &Slot| id == ticket.scene && slot.epoch == ticket.epoch;
         let live = self
@@ -537,7 +539,8 @@ impl Frames {
 }
 
 impl Presenter {
-    /// The frames the overlay paints. Borrow them only inside its paint callback.
+    /// The frames the overlay paints. Borrow them only to paint or to hand back a later answer,
+    /// and release the borrow before `paint_failed`, `take_shown` or any other presenter call.
     pub fn frames(&self) -> Rc<RefCell<Frames>> {
         Rc::clone(&self.frames)
     }
@@ -609,9 +612,22 @@ impl Presenter {
 
     /// Clears every scene whose frame failed to paint.
     pub fn paint_failed(&mut self) -> Vec<Effect> {
+        let (pictures, failed) = {
+            let frames = self.frames.borrow();
+            let pictures = frames
+                .retirement
+                .iter()
+                .flat_map(|retirement| retirement.pictures.iter().flatten())
+                .filter(|picture| picture.slot.failed.get())
+                .count();
+            (pictures, frames.failed())
+        };
+        // Logged here, not while painting: the log's writer takes a lock.
+        for _ in 0..pictures + failed.iter().flatten().count() {
+            tracing::warn!("a drawing couldn't paint; clearing it");
+        }
         self.frames.borrow_mut().retire_failed_pictures();
         let mut out = Out::default();
-        let failed = self.frames.borrow().failed();
         for id in failed.into_iter().flatten() {
             self.release(id);
             self.forget_failed(id, &mut out);

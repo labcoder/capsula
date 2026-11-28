@@ -517,3 +517,31 @@ fn a_late_failure_stays_failed_and_clears_its_scene_once() {
     assert!(!frames.borrow().mark_failed(ticket));
     assert!(presenter.paint_failed().is_empty(), "cleared once");
 }
+
+#[test]
+fn a_late_answer_for_one_scene_never_lands_on_another_that_shares_its_epoch() {
+    let second = SceneId(21);
+    let (mut presenter, _) = recovered(vec![(LIVE, rect("r")), (second, pair())]);
+    sample(&mut presenter);
+    let frames = presenter.frames();
+    frames.borrow_mut().hide();
+    frames.borrow_mut().shown = true;
+    sample(&mut presenter);
+    assert_eq!(frames.borrow().epoch(LIVE), frames.borrow().epoch(second));
+    let tickets = later(&frames.borrow());
+    let [first_ticket, second_ticket] = tickets[..] else {
+        panic!("both scenes paint");
+    };
+    assert_eq!((first_ticket.scene, second_ticket.scene), (LIVE, second));
+    assert!(frames.borrow().presented(second_ticket));
+    assert_eq!(frames.borrow().painted(LIVE), None);
+    assert_eq!(frames.borrow().painted(second).map(|p| p.bound), Some(1));
+    assert!(frames.borrow().mark_failed(second_ticket));
+    assert_eq!(
+        controls(&presenter.paint_failed()),
+        [&ControlToBrain::SceneFailed { scene: second }]
+    );
+    assert!(presenter.scenes.contains_key(&LIVE));
+    assert!(!frames.borrow().paint(|_, _| Ok::<_, ()>(())));
+    assert_eq!(frames.borrow().painted(LIVE).map(|p| p.bound), Some(1));
+}
