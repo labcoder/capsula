@@ -5425,6 +5425,14 @@ fn queued_wrong_or_duplicate_registration_ack_ends_the_pair() {
         )
         .expect("invalid ack");
         queued_pair_closed(link.link, &link.control, &link.data);
+        assert!(matches!(next(&events), LinkEvent::Settings { .. }));
+        if duplicate {
+            text_ready(&events);
+        }
+        assert!(matches!(
+            events.recv_timeout(PATIENCE),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+        ));
     }
 }
 

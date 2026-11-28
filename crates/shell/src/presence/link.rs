@@ -663,6 +663,9 @@ impl Presence {
         if self.draw_fixture.is_none() {
             self.draw_fixture = super::Observer::take_draw_fixture(cx);
         }
+        if self.draw_fixture.is_none() || self.link.is_quitting() {
+            return;
+        }
         let Some(session) = &self.session else {
             return;
         };
