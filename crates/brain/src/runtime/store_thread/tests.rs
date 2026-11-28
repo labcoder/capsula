@@ -354,7 +354,7 @@ async fn a_turn_for_the_local_server_is_never_stored() {
         local_default,
     };
     let off = || Some(kumochi_protocol::message::ErrorKey::LocalOff.into());
-    let unknown = || Some(crate::coordinator::model_unavailable());
+    let unknown = || Some(kumochi_protocol::message::ErrorKey::ConfigUnreadable.into());
     for (op, refused) in [
         (
             turn(ThreadId(2), None, RunId(3), "refusedown", Other),
@@ -414,6 +414,39 @@ async fn a_turn_for_the_local_server_is_never_stored() {
             store.pages().search_ids(marker).expect("search"),
             threads,
             "{marker}"
+        );
+    }
+    let raw = rusqlite::Connection::open(scratch.db()).expect("raw");
+    let count = |sql: &str| {
+        raw.query_row(sql, [], |row| row.get::<_, i64>(0))
+            .expect("count")
+    };
+    for (rows, stored, refused) in [
+        (
+            "threads WHERE id IN (2, 3, 5)",
+            3,
+            "threads WHERE id IN (4, 6)",
+        ),
+        (
+            "runs WHERE id IN (4, 6, 7)",
+            3,
+            "runs WHERE id IN (3, 5, 8)",
+        ),
+        (
+            "events WHERE run IN (4, 6, 7)",
+            3,
+            "events WHERE run IN (3, 5, 8)",
+        ),
+    ] {
+        assert_eq!(
+            count(&format!("SELECT count(*) FROM {rows}")),
+            stored,
+            "{rows}"
+        );
+        assert_eq!(
+            count(&format!("SELECT count(*) FROM {refused}")),
+            0,
+            "{refused}"
         );
     }
 }

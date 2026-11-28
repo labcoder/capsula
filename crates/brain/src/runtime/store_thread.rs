@@ -850,7 +850,7 @@ fn serve_op(
                 (Some(ConnectionKind::LocalChat), _) | (None, DefaultIntent::Local) => {
                     Some(ErrorKey::LocalOff.into())
                 }
-                (None, DefaultIntent::Unknown) => Some(crate::coordinator::model_unavailable()),
+                (None, DefaultIntent::Unknown) => Some(ErrorKey::ConfigUnreadable.into()),
                 _ => None,
             };
             if let Some(reason) = refused {
