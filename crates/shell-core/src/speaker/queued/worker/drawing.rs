@@ -30,10 +30,6 @@ pub(crate) trait DrawingIo: Send + 'static {
     fn requires_narration(&self) -> bool {
         false
     }
-
-    fn plain(&self) -> bool {
-        false
-    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -317,7 +313,7 @@ impl Worker {
         self.fence_narration(now)
     }
 
-    fn fence_narration(&mut self, now: Duration) -> Result<(), Fault> {
+    pub(super) fn fence_narration(&mut self, now: Duration) -> Result<(), Fault> {
         let Some(drawing) = &mut self.drawing else {
             return Ok(());
         };

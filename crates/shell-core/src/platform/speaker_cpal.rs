@@ -1,4 +1,4 @@
-//! Dormant output seam for the speech worker. Nothing in the normal link opens it.
+//! Output seam for the speech worker.
 
 use std::fmt;
 use std::sync::Arc;

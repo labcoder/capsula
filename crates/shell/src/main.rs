@@ -98,10 +98,24 @@ fn initialize_gpui(cx: &mut gpui_kit::App) {
     cx.set_global(Strings::english());
 }
 
+/// The ordinary launch's link: queued audio whose narrated steps the drawing conducts.
+fn ordinary_link(
+    events: async_channel::Sender<link::LinkEvent>,
+) -> std::io::Result<(link::LinkHandle, link::LinkStart)> {
+    link::prepare(events, AudioSession::QueuedRequired, Narration::Conducted)
+}
+
+#[cfg(all(test, windows, debug_assertions))]
+#[test]
+fn the_ordinary_launch_conducts_two_narrated_steps() {
+    let (events, receiver) = async_channel::unbounded();
+    let prepared = ordinary_link(events).expect("the ordinary link prepares");
+    link::conduct_fixture::conducts_two_steps("ordinary-two-steps", prepared, receiver);
+}
+
 fn run_connected(flags: presence::Launch) -> ExitCode {
     let (events, link_events) = async_channel::unbounded();
-    let (link, start) = match link::prepare(events, AudioSession::QueuedRequired, Narration::Plain)
-    {
+    let (link, start) = match ordinary_link(events) {
         Ok(prepared) => prepared,
         Err(error) => {
             tracing::error!(%error, "can't prepare the link to the brain");

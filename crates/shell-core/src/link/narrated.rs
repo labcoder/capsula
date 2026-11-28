@@ -17,6 +17,14 @@ use crate::speaker::conductor::{Picture, PictureState, RouteStamp, View};
 use crate::speaker::queued::Command;
 use crate::speaker::queued::{DrawingIo, Ordered, OwnerExit};
 
+#[cfg(all(windows, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    /// Runs once on this thread just before its next Allow takes the output gate.
+    pub(super) static BEFORE_ALLOW: std::cell::Cell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::Cell::new(None) };
+}
+
 #[derive(Debug)]
 struct Pair {
     io: Weak<SessionIo>,
@@ -66,22 +74,45 @@ pub(crate) struct Narrated {
 
 #[derive(Debug, Default)]
 struct State {
-    promised: Option<Assignment>,
-    replaced_before_promise: [Option<SceneId>; MAX_VISIBLE_SCENES],
-    retired: bool,
+    entries: Vec<Entry>,
     absences: Absences,
-    assignment: Option<Assignment>,
+    /// Scenes the data reader saw begin, or open in a recovered snapshot, and not yet retire.
+    live: Vec<SceneId>,
     wake: Option<Arc<RunWake>>,
     handed_off: bool,
     view: Option<ViewLevel>,
-    picture: Option<PictureLevel>,
-    applied: Option<Binding>,
-    decision: Option<SpeechDispatch>,
-    retired_decision: Option<(u64, SpeechDispatch)>,
-    decided: Option<SpeechDecision>,
-    ended: Option<Binding>,
+    unacked: Option<(u64, SpeechDispatch)>,
     worker_ended: bool,
     worker: Option<(RunId, Thread)>,
+}
+
+/// One promised step of the run, in segment order.
+#[derive(Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is one independent step fact the bridge reconciles"
+)]
+struct Entry {
+    assignment: Assignment,
+    announced: bool,
+    narrated: bool,
+    retired: bool,
+    picture: Option<PictureLevel>,
+    applied: Option<Binding>,
+    decided: Option<SpeechDecision>,
+    sent: bool,
+    ended: Option<Binding>,
+    fenced: bool,
+    settled: bool,
+}
+
+impl Entry {
+    fn finished(&self) -> bool {
+        self.settled
+            || self.fenced
+            || self.ended.is_some()
+            || self.decided == Some(SpeechDecision::Discard)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -103,33 +134,77 @@ impl Absences {
 
     fn reclaim(&mut self, consumed: [u64; 2]) {
         if consumed != self.reclaimed {
-            self.keys.retain(|entry| {
-                entry
-                    .retired_by
-                    .is_none_or(|(lane, at)| at.get() > consumed[lane.slot()])
-            });
+            let pending =
+                |(lane, at): (RetirementLane, NonZeroU64)| at.get() > consumed[lane.slot()];
+            self.keys
+                .retain(|entry| entry.retired_by.is_none_or(pending));
             self.reclaimed = consumed;
         }
     }
 }
 
 impl State {
+    fn entry(&mut self, assignment: Assignment) -> Option<&mut Entry> {
+        self.entries.iter_mut().find(|e| e.assignment == assignment)
+    }
+
+    /// The lowest announced step that hasn't settled; only it is narrated or answers lookup.
+    fn head(&self) -> Option<usize> {
+        self.entries
+            .iter()
+            .position(|e| !e.finished())
+            .filter(|&at| self.entries[at].announced)
+    }
+
+    /// Absence keys held, plus the one each step that can still fall back reserved.
+    fn reserved(&self) -> usize {
+        self.absences.keys.len()
+            + self
+                .entries
+                .iter()
+                .filter(|e| !e.sent && !e.settled && !e.retired)
+                .count()
+    }
+
+    /// Exact `RunEnd` or worker exit: no decision that hasn't gone out is sent any more. A step
+    /// nobody bound and nothing stopped or removed falls back to its authored timing, in the
+    /// absence slot it reserved when it was promised.
+    fn settle(&mut self, consumed: [u64; 2], stopped: impl Fn(RunId) -> bool) {
+        let bound = self.view.map(|view| view.binding.assignment);
+        let Self {
+            entries, absences, ..
+        } = self;
+        absences.reclaim(consumed);
+        let stopped = entries.first().is_some_and(|e| stopped(e.assignment.run));
+        for entry in entries.iter_mut().filter(|e| !e.sent && !e.settled) {
+            entry.settled = true;
+            if !stopped && !entry.retired && bound != Some(entry.assignment) {
+                absences.keys.push(Absence {
+                    key: draw_key(entry.assignment),
+                    retired_by: None,
+                });
+            }
+        }
+    }
+
     fn picture_for(&self, view: Option<ViewLevel>) -> Option<PictureLevel> {
-        let ended = self.ended.or_else(|| {
-            view.filter(|view| {
-                self.worker_ended && Some(view.binding.assignment) == self.assignment
-            })
-            .map(|view| view.binding)
-        });
-        ended.map_or(self.picture, |binding| {
-            let pending_onset = view
-                .is_some_and(|level| level.binding == binding && level.view == View::Eligible)
-                && self.picture.is_some_and(|level| {
+        let view = view?;
+        let entry = self
+            .entries
+            .iter()
+            .find(|e| e.assignment == view.binding.assignment)?;
+        let ended = entry
+            .ended
+            .or((self.worker_ended || entry.settled).then_some(view.binding));
+        ended.map_or(entry.picture, |binding| {
+            let pending_onset = view.binding == binding
+                && view.view == View::Eligible
+                && entry.picture.is_some_and(|level| {
                     level.binding == binding
                         && matches!(level.state, PictureState::Owned(Picture::At(_)))
                 });
             if pending_onset {
-                self.picture
+                entry.picture
             } else {
                 Some(PictureLevel {
                     binding,
@@ -156,6 +231,9 @@ fn draw_key(a: Assignment) -> DrawKey {
         index: a.step.index,
     }
 }
+
+/// Every visible step's authored fallback, held until its scene's retirement is consumed.
+const FALLBACKS: usize = MAX_VISIBLE_SCENES * MAX_STEPS;
 
 pub(super) fn valid_key(key: DrawKey) -> bool {
     usize::try_from(key.index).is_ok_and(|index| index < MAX_STEPS)
@@ -219,10 +297,31 @@ impl Narrated {
     }
 
     pub(super) fn run_end(&self, run: RunId) {
-        if let Ok(state) = self.state.lock()
-            && state.promised.is_some_and(|a| a.run == run)
+        if let Ok(mut state) = self.state.lock()
+            && state
+                .entries
+                .first()
+                .is_some_and(|e| e.assignment.run == run)
         {
             self.wire_ended.store(run.0, Ordering::Release);
+            state.settle(self.consumed(), |run| self.stopped(run));
+            if self.stopped(run) && !state.handed_off {
+                state.handed_off = true;
+                self.unpark_reader();
+            }
+            self.notify(&state);
+        }
+    }
+
+    fn unpark_reader(&self) {
+        if let Some(reader) = self.pair.get().and_then(|pair| pair.reader.get()) {
+            reader.unpark();
+        }
+    }
+
+    /// The run's speaker input exists now, so a deferred narration can be offered again.
+    pub(super) fn input_installed(&self) {
+        if let Ok(state) = self.state.lock() {
             self.notify(&state);
         }
     }
@@ -235,17 +334,46 @@ impl Narrated {
         })
     }
 
+    /// `Ok(false)` waits for the previous run's handoff, or for an ordered retirement to free the
+    /// absence slot the promise reserves.
     pub(super) fn can_promise(&self, run: RunId) -> Result<bool, ()> {
         if self.closing() {
             return Err(());
         }
-        let state = self.state.lock().map_err(|_| ())?;
-        Ok(state.promised.is_none_or(|old| {
-            run <= old.run
-                || self.stopped(old.run)
-                || self.wire_ended.load(Ordering::Acquire) != old.run.0
-                || state.handed_off
-        }))
+        let mut state = self.state.lock().map_err(|_| ())?;
+        let same = match state.entries.first().map(|e| e.assignment.run) {
+            Some(old) if old == run => true,
+            Some(old) => {
+                if !(run < old
+                    || self.stopped(old)
+                    || self.wire_ended.load(Ordering::Acquire) != old.0
+                    || state.handed_off)
+                {
+                    return Ok(false);
+                }
+                false
+            }
+            None => false,
+        };
+        if self.stopped(run) {
+            return Ok(true);
+        }
+        state.absences.reclaim(self.consumed());
+        let reserved = if same {
+            state.reserved()
+        } else {
+            state.absences.keys.len()
+        };
+        if reserved < FALLBACKS {
+            return Ok(true);
+        }
+        state
+            .absences
+            .keys
+            .iter()
+            .any(|key| key.retired_by.is_some())
+            .then_some(false)
+            .ok_or(())
     }
 
     pub(super) fn handoff(&self, session: &Session, presenter: &mut Presenter) {
@@ -254,22 +382,23 @@ impl Narrated {
             return;
         }
         if let Ok(mut state) = self.try_state()
-            && state.promised.is_some_and(|a| a.run.0 == run)
+            && state
+                .entries
+                .first()
+                .is_some_and(|e| e.assignment.run.0 == run)
             && !state.handed_off
             && (self.stopped(RunId(run))
-                || state.retired && (state.assignment.is_none() || state.decided.is_some())
-                || (state.decided != Some(SpeechDecision::Allow)
-                    || state.ended.is_some()
-                    || state.worker_ended)
-                    && !state.retired
+                || state
+                    .entries
+                    .iter()
+                    .all(|e| e.settled || e.sent && (e.finished() || state.worker_ended))
                     && state
-                        .assignment
-                        .is_none_or(|a| presenter.conductor_handoff(a)))
+                        .entries
+                        .iter()
+                        .all(|e| presenter.conductor_handoff(e.assignment)))
         {
             state.handed_off = true;
-            if let Some(reader) = self.pair.get().and_then(|pair| pair.reader.get()) {
-                reader.unpark();
-            }
+            self.unpark_reader();
         }
     }
 
@@ -313,17 +442,56 @@ impl Narrated {
     pub(super) fn idle(&self) -> bool {
         self.state
             .try_lock()
-            .is_ok_and(|state| state.promised.is_none() || state.handed_off)
+            .is_ok_and(|state| state.entries.is_empty() || state.handed_off)
     }
 
     /// `idle` that waits out contention, where a refusal would end the pair.
     pub(super) fn wait_idle(&self) -> bool {
         self.state
             .lock()
-            .is_ok_and(|state| state.promised.is_none() || state.handed_off)
+            .is_ok_and(|state| state.entries.is_empty() || state.handed_off)
     }
 
-    #[cfg(test)]
+    /// Each promised step with whether it was narrated and fenced.
+    #[cfg(any(test, feature = "test-support"))]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "only the crate's own tests call it")
+    )]
+    pub(super) fn steps(&self) -> Vec<(Assignment, bool, bool)> {
+        let state = self.state.lock().expect("an unpoisoned bridge");
+        state
+            .entries
+            .iter()
+            .map(|e| (e.assignment, e.narrated, e.fenced))
+            .collect()
+    }
+
+    /// Whether the worker applied `assignment`'s binding, or a decision already took it.
+    #[cfg(all(windows, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn applied(&self, assignment: Assignment) -> bool {
+        let state = self.state.lock().expect("an unpoisoned bridge");
+        state
+            .entries
+            .iter()
+            .any(|e| e.assignment == assignment && (e.applied.is_some() || e.sent))
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "only the crate's own tests call it")
+    )]
+    pub(super) fn reserved(&self) -> usize {
+        self.state.lock().expect("an unpoisoned bridge").reserved()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "only the crate's own tests call it")
+    )]
     pub(super) fn hold_state(&self) -> impl Sized + '_ {
         self.state.lock().expect("an unpoisoned bridge")
     }
@@ -343,33 +511,54 @@ impl Narrated {
                 if state.absences.contains(key) {
                     return false;
                 }
-                if let Some(old) = state.promised {
-                    if old.run >= assignment.run
-                        || (!self.stopped(old.run)
-                            && (self.wire_ended.load(Ordering::Acquire) != old.run.0
-                                || !state.handed_off))
-                    {
-                        return false;
+                match state.entries.first().map(|e| e.assignment.run) {
+                    Some(run) if run == assignment.run => {
+                        if state.entries.iter().any(|e| {
+                            draw_key(e.assignment) == key
+                                || e.assignment.segment >= assignment.segment
+                        }) {
+                            return false;
+                        }
                     }
-                    let debt = state.decision.map(|key| (old.session, key));
-                    if debt.is_some() && state.retired_decision.is_some() {
-                        return false;
+                    Some(old) => {
+                        if old > assignment.run
+                            || (!self.stopped(old)
+                                && (self.wire_ended.load(Ordering::Acquire) != old.0
+                                    || !state.handed_off))
+                        {
+                            return false;
+                        }
+                        *state = State {
+                            absences: std::mem::take(&mut state.absences),
+                            live: std::mem::take(&mut state.live),
+                            unacked: state.unacked,
+                            worker: state.worker.take(),
+                            ..State::default()
+                        };
                     }
-                    *state = State {
-                        absences: std::mem::take(&mut state.absences),
-                        replaced_before_promise: state.replaced_before_promise,
-                        retired_decision: debt.or(state.retired_decision),
-                        worker: state.worker.take(),
-                        ..State::default()
-                    };
+                    None => {}
                 }
-                state.retired = state.replaced_before_promise.contains(&Some(key.scene));
-                state.promised = Some(assignment);
-                state.wake = Some(Arc::new(RunWake {
-                    run: assignment.run,
-                    pending: AtomicBool::new(false),
-                }));
-                self.current.store(assignment.run.0, Ordering::Release);
+                if state.entries.is_empty() {
+                    state.wake = Some(Arc::new(RunWake {
+                        run: assignment.run,
+                        pending: AtomicBool::new(false),
+                    }));
+                    self.current.store(assignment.run.0, Ordering::Release);
+                }
+                let retired = !state.live.contains(&key.scene);
+                state.entries.push(Entry {
+                    assignment,
+                    announced: false,
+                    narrated: false,
+                    retired,
+                    picture: None,
+                    applied: None,
+                    decided: None,
+                    sent: false,
+                    ended: None,
+                    fenced: false,
+                    settled: false,
+                });
                 true
             })
     }
@@ -400,15 +589,11 @@ impl Narrated {
             return false;
         }
         self.state.lock().is_ok_and(|mut state| {
-            if successor.is_some() {
-                if let Some(assignment) = state.promised.filter(|a| !self.stopped(a.run)) {
-                    state.retired |= scenes.contains(&assignment.step.scene);
-                } else {
-                    state.replaced_before_promise =
-                        std::array::from_fn(|at| scenes.get(at).copied());
-                }
-            }
             state.absences.reclaim(self.consumed());
+            for entry in &mut state.entries {
+                entry.retired |= scenes.contains(&entry.assignment.step.scene);
+            }
+            state.live.retain(|scene| !scenes.contains(scene));
             for entry in &mut state.absences.keys {
                 if scenes.contains(&entry.key.scene) {
                     entry.retired_by.get_or_insert((lane, ordinal));
@@ -416,6 +601,16 @@ impl Narrated {
             }
             true
         })
+    }
+
+    /// A scene began, or its recovered snapshot opened, at most as many as can be visible.
+    pub(super) fn began(&self, scene: SceneId) -> Result<(), ()> {
+        let mut state = self.state.lock().map_err(|_| ())?;
+        if state.live.len() == MAX_VISIBLE_SCENES || state.live.contains(&scene) {
+            return Err(());
+        }
+        state.live.push(scene);
+        Ok(())
     }
 
     fn retirement_consumed(&self, lane: RetirementLane) {
@@ -431,10 +626,15 @@ impl Narrated {
         }
         let mut state = self.state.lock().map_err(|_| ())?;
         state.absences.reclaim(self.consumed());
-        if state.promised.is_some_and(|a| draw_key(a) == key) || state.absences.contains(key) {
+        if state.entries.iter().any(|e| draw_key(e.assignment) == key)
+            || state.absences.contains(key)
+        {
             return Err(());
         }
-        if state.absences.keys.len() == MAX_VISIBLE_SCENES * MAX_STEPS {
+        if !state.live.contains(&key.scene) {
+            return Ok(true);
+        }
+        if state.reserved() >= FALLBACKS {
             return state
                 .absences
                 .keys
@@ -455,10 +655,13 @@ impl Narrated {
             if self.stopped(assignment.run) {
                 return true;
             }
-            if state.promised != Some(assignment) || state.assignment.is_some() {
+            let Some(entry) = state.entries.iter_mut().find(|e| !e.announced) else {
+                return false;
+            };
+            if entry.assignment != assignment {
                 return false;
             }
-            state.assignment = Some(assignment);
+            entry.announced = true;
             self.notify(&state);
             true
         })
@@ -467,17 +670,13 @@ impl Narrated {
     pub(super) fn taken(&self, session: u64, key: SpeechDispatch) -> bool {
         self.state.lock().is_ok_and(|mut state| {
             if state
-                .retired_decision
+                .unacked
                 .take_if(|debt| *debt == (session, key))
-                .is_some()
-            {
-                return true;
-            }
-            if state.assignment.is_none_or(|a| a.session != session) || state.decision != Some(key)
+                .is_none()
             {
                 return false;
             }
-            state.decision = None;
+            self.notify(&state);
             true
         })
     }
@@ -487,14 +686,25 @@ impl Narrated {
             return Err(());
         }
         let state = self.try_state()?;
-        if let Some(assignment) = state
-            .assignment
-            .filter(|&a| !state.retired && !state.handed_off && draw_key(a) == key)
-        {
-            Ok(Some(assignment))
-        } else {
-            state.absences.contains(key).then_some(None).ok_or(())
+        if state.absences.contains(key) {
+            return Ok(None);
         }
+        let head = state.head();
+        state
+            .entries
+            .iter()
+            .enumerate()
+            .find(|(at, e)| {
+                draw_key(e.assignment) == key
+                    && !e.retired
+                    && !state.handed_off
+                    && (head == Some(*at)
+                        || state
+                            .view
+                            .is_some_and(|view| view.binding.assignment == e.assignment))
+            })
+            .map(|(_, e)| Some(e.assignment))
+            .ok_or(())
     }
 
     pub(crate) fn attach(self: &Arc<Self>, presenter: &mut Presenter) {
@@ -507,22 +717,36 @@ impl Narrated {
         );
     }
 
+    /// `Ok(false)` waits: contention retries on the busy path, a missing input on its install, and
+    /// a run that stopped or ended first publishes nothing.
     fn offer_gate(
         &self,
         link: &LinkHandle,
         command: Command,
         before: impl FnOnce() -> bool,
     ) -> Result<bool, ()> {
+        #[cfg(all(windows, debug_assertions))]
+        #[cfg(any(test, feature = "test-support"))]
+        if matches!(command, Command::Allow(_))
+            && let Some(race) = BEFORE_ALLOW.take()
+        {
+            race();
+        }
         match link.shared.output.narrated_gate(command, before) {
-            Ok(()) => Ok(true),
+            Ok(sent) => Ok(sent),
             Err(Denied::Busy) => {
                 self.busy.store(true, Ordering::Release);
                 Ok(false)
             }
+            Err(Denied::Opening) => Ok(false),
             Err(_) => Err(()),
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one pass reconciles removal, the presenter's view, activation and decisions"
+    )]
     pub(crate) fn update(
         &self,
         link: &LinkHandle,
@@ -536,45 +760,52 @@ impl Narrated {
         }) {
             return Err(());
         }
-        self.drain_reports(session, presenter)?;
-        let view = presenter.conductor_view(now);
+        self.drain_reports(session, presenter);
+        let mut view = presenter.conductor_view(now);
         let picture = {
             let Ok(mut state) = self.try_state() else {
                 return Ok(());
             };
-            let Some(assignment) = state.assignment.filter(|a| {
-                session.open() && a.session == session.generation() && !state.handed_off
+            let Some(run) = state.entries.first().map(|e| e.assignment.run).filter(|_| {
+                session.open()
+                    && state.entries[0].assignment.session == session.generation()
+                    && !state.handed_off
             }) else {
                 return Ok(());
             };
-            if self.stopped(assignment.run) {
+            if self.stopped(run) {
                 if let Some(level) = state.view.take() {
                     presenter.conductor_fence(level.binding);
                 }
                 return Ok(());
             }
-            state.retired |=
-                presenter.conductor_removed(session.generation(), assignment.step.scene);
-            let removed = state.retired;
-            let view = if removed {
-                if let Some(level) = view {
-                    presenter.conductor_fence(level.binding);
+            for entry in &mut state.entries {
+                entry.retired |=
+                    presenter.conductor_removed(session.generation(), entry.assignment.step.scene);
+            }
+            if let Some(level) = view
+                && state
+                    .entry(level.binding.assignment)
+                    .is_some_and(|e| e.retired)
+            {
+                presenter.conductor_fence(level.binding);
+                view = None;
+            }
+            let ended = self.wire_ended.load(Ordering::Acquire) == run.0;
+            for at in 0..state.entries.len() {
+                let entry = &state.entries[at];
+                if !entry.retired || entry.decided.is_some() || entry.settled {
+                    continue;
                 }
-                None
-            } else {
-                view
-            };
-            let ended = self.wire_ended.load(Ordering::Acquire) == assignment.run.0;
-            if (state.view.is_none() || ended) && state.decided.is_none() && removed {
-                if !self.offer_gate(link, Command::RevokeSource(assignment), || true)? {
+                if entry.narrated
+                    && !self.offer_gate(link, Command::RevokeSource(entry.assignment), || true)?
+                {
                     return Ok(());
                 }
-                if !Self::decide(&mut state, session, assignment, SpeechDecision::Discard) {
-                    return Err(());
-                }
+                state.entries[at].decided = Some(SpeechDecision::Discard);
             }
             if ended {
-                let picture = (!removed).then(|| state.picture_for(view)).flatten();
+                let picture = state.picture_for(view);
                 drop(state);
                 presenter.conductor_picture(Ok(picture), now);
                 return Ok(());
@@ -591,29 +822,41 @@ impl Narrated {
             }
             if state.view != view {
                 state.view = view;
-                if let Some((_, owner)) = state
-                    .worker
-                    .as_ref()
-                    .filter(|(run, _)| *run == assignment.run)
+                if let Some((_, owner)) = state.worker.as_ref().filter(|(worker, _)| *worker == run)
                 {
                     owner.unpark();
                 }
             }
-            let allow = state.applied.filter(|&binding| {
-                view.is_some_and(|view| view.binding == binding && view.view == View::Eligible)
-            });
-            if let Some(binding) = allow {
-                if !self.offer_gate(link, Command::Allow(binding), || {
-                    Self::decide(
-                        &mut state,
-                        session,
-                        binding.assignment,
-                        SpeechDecision::Allow,
-                    )
-                })? {
-                    return Ok(());
+            if let Some(at) = state.head() {
+                let head = state.entries[at].assignment;
+                if !state.entries[at].narrated {
+                    if !self.offer_gate(link, Command::Narrate(head), || true)? {
+                        return Ok(());
+                    }
+                    state.entries[at].narrated = true;
                 }
-                state.applied = None;
+                let allow = state.entries[at].applied.filter(|&binding| {
+                    view.is_some_and(|view| view.binding == binding && view.view == View::Eligible)
+                });
+                if let Some(binding) = allow
+                    && state.unacked.is_none()
+                    && state.entries[..at].iter().all(|e| e.sent)
+                {
+                    if !self.offer_gate(link, Command::Allow(binding), || {
+                        Self::decide(&mut state, at, session, SpeechDecision::Allow)
+                    })? {
+                        return Ok(());
+                    }
+                    state.entries[at].applied = None;
+                }
+            }
+            if state.unacked.is_none()
+                && let Some(at) = state.entries.iter().position(|e| !e.sent && !e.settled)
+                && state.entries[at].announced
+                && state.entries[at].decided == Some(SpeechDecision::Discard)
+                && !Self::decide(&mut state, at, session, SpeechDecision::Discard)
+            {
+                return Err(());
             }
             state.picture_for(view)
         };
@@ -621,12 +864,13 @@ impl Narrated {
         Ok(())
     }
 
-    fn drain_reports(&self, session: &Session, presenter: &mut Presenter) -> Result<(), ()> {
+    fn drain_reports(&self, session: &Session, presenter: &mut Presenter) {
         while let Ok(mut state) = self.try_state() {
             if !session.open()
                 || state
-                    .assignment
-                    .is_none_or(|a| a.session != session.generation())
+                    .entries
+                    .first()
+                    .is_none_or(|e| e.assignment.session != session.generation())
             {
                 break;
             }
@@ -638,47 +882,33 @@ impl Narrated {
                 | Ordered::Fenced(binding)
                 | Ordered::Ended { binding, .. } => binding,
             };
-            if state.assignment != Some(binding.assignment) || self.stopped(binding.assignment.run)
-            {
+            if self.stopped(binding.assignment.run) {
                 continue;
             }
+            let Some(entry) = state.entry(binding.assignment) else {
+                continue;
+            };
+            entry.applied = None;
             match event {
-                Ordered::Applied(_) => {
-                    state.applied = Some(binding);
-                }
+                Ordered::Applied(_) => entry.applied = Some(binding),
                 Ordered::Fenced(_) => {
-                    state.applied = None;
-                    let accepted = state.decided.is_some()
-                        || Self::decide(
-                            &mut state,
-                            session,
-                            binding.assignment,
-                            SpeechDecision::Discard,
-                        );
+                    entry.fenced = true;
+                    entry.decided.get_or_insert(SpeechDecision::Discard);
                     drop(state);
                     presenter.conductor_fence(binding);
-                    if !accepted {
-                        return Err(());
-                    }
                 }
-                Ordered::Ended { .. } => {
-                    state.applied = None;
-                    state.ended = Some(binding);
-                }
+                Ordered::Ended { .. } => entry.ended = Some(binding),
             }
         }
-        Ok(())
     }
 
-    fn decide(
-        state: &mut State,
-        session: &Session,
-        assignment: Assignment,
-        decision: SpeechDecision,
-    ) -> bool {
-        let key = dispatch(assignment);
-        state.decision = Some(key);
-        state.decided = Some(decision);
+    /// Sends entry `at`'s decision, the pair's one unacknowledged decision.
+    fn decide(state: &mut State, at: usize, session: &Session, decision: SpeechDecision) -> bool {
+        let entry = &mut state.entries[at];
+        let key = dispatch(entry.assignment);
+        entry.decided = Some(decision);
+        entry.sent = true;
+        state.unacked = Some((entry.assignment.session, key));
         session
             .io
             .control
@@ -731,11 +961,11 @@ impl<F: FnMut() + Send + 'static, E: FnMut(bool) + Send + 'static> DrawingIo for
 
     fn picture(&mut self, key: Binding, level: Option<PictureLevel>) {
         if self.run == key.assignment.run
-            && let Ok(mut state) = self.bridge.state.lock()
-            && state.assignment == Some(key.assignment)
             && !self.bridge.stopped(key.assignment.run)
+            && let Ok(mut state) = self.bridge.state.lock()
+            && let Some(entry) = state.entry(key.assignment)
         {
-            state.picture = level;
+            entry.picture = level;
             self.bridge.notify(&state);
         }
     }
@@ -745,10 +975,14 @@ impl<F: FnMut() + Send + 'static, E: FnMut(bool) + Send + 'static> DrawingIo for
         if refused {
             (self.event_failure)();
         } else if let Ok(mut state) = self.bridge.state.lock()
-            && state.assignment.is_some_and(|a| a.run == self.run)
+            && state
+                .entries
+                .first()
+                .is_some_and(|e| e.assignment.run == self.run)
             && !self.bridge.stopped(self.run)
         {
             state.worker_ended = true;
+            state.settle(self.bridge.consumed(), |run| self.bridge.stopped(run));
             self.bridge.notify(&state);
         }
         (self.exit)(refused);
@@ -758,7 +992,12 @@ impl<F: FnMut() + Send + 'static, E: FnMut(bool) + Send + 'static> DrawingIo for
         let Ok(state) = self.bridge.state.lock() else {
             return false;
         };
-        if state.assignment.is_none_or(|a| a.run != self.run) || self.bridge.stopped(self.run) {
+        if state
+            .entries
+            .first()
+            .is_none_or(|e| e.assignment.run != self.run)
+            || self.bridge.stopped(self.run)
+        {
             return true;
         }
         if self.bridge.send.try_send(event).is_err() {
@@ -770,211 +1009,5 @@ impl<F: FnMut() + Send + 'static, E: FnMut(bool) + Send + 'static> DrawingIo for
 }
 
 #[cfg(all(test, windows, debug_assertions))]
-mod tests {
-    use kumochi_protocol::message::{OutputGeneration, RunId, SegmentId, StepRef};
-
-    use super::*;
-
-    #[test]
-    fn an_empty_contended_pass_rearms_once_and_only_on_its_pair() {
-        use crate::link::fixture::{attended_queued_shared, connected};
-
-        let pipe = attended_queued_shared(
-            "narration-empty-rearm",
-            Arc::new(Shared {
-                narrated: true,
-                ..Shared::default()
-            }),
-        );
-        let session = connected(pipe.events.recv_blocking().unwrap());
-        let other = Session::detached(session.generation(), session.incarnation());
-        let bridge = session.io.narrated.as_ref().unwrap();
-        let mut presenter = crate::presenter::fixture::presenter();
-        presenter.connected(session.generation());
-        session.attach_narration(&mut presenter);
-        let held = bridge.state.lock().unwrap();
-        assert!(session.update_narration(&pipe.handle, &mut presenter, Instant::now()));
-        let retry = session
-            .retry_narration()
-            .expect("contention needs a new scene pass");
-        assert!(
-            session.retry_narration().is_none(),
-            "only one wait is in flight"
-        );
-        assert!(
-            pipe.events.is_empty(),
-            "no queued message can rescue the interrupted pass"
-        );
-        drop(held);
-        retry();
-        assert!(!other.resumes_narration(&session));
-        assert!(session.resumes_narration(&session));
-        assert!(!session.resumes_narration(&session));
-        assert!(session.update_narration(&pipe.handle, &mut presenter, Instant::now()));
-        assert!(session.retry_narration().is_none());
-        pipe.handle.end(&session);
-        assert!(pipe.link.join().unwrap());
-    }
-
-    #[test]
-    fn stopped_assignment_loses_authority_but_keeps_its_own_decision_receipt() {
-        let bridge = Narrated::new();
-        let old = Assignment {
-            session: 1,
-            output: OutputGeneration(4),
-            run: RunId(7),
-            segment: SegmentId(0),
-            step: StepRef {
-                scene: SceneId(2),
-                index: 0,
-            },
-        };
-        let new = Assignment {
-            run: RunId(8),
-            ..old
-        };
-        assert!(bridge.promised(old));
-        assert!(bridge.announce(old));
-        let receipt = dispatch(old);
-        bridge.state.lock().unwrap().decision = Some(receipt);
-        bridge.stop(old.run);
-        assert_eq!(bridge.assignment(draw_key(old)), Err(()));
-        assert!(bridge.promised(new));
-        assert!(bridge.announce(new));
-        assert!(!bridge.taken(old.session + 1, receipt));
-        assert!(bridge.taken(old.session, receipt));
-        assert!(!bridge.taken(old.session, receipt));
-        assert_eq!(bridge.assignment(draw_key(new)), Ok(Some(new)));
-    }
-
-    #[test]
-    fn a_full_absence_table_waits_only_for_an_ordered_retirement() {
-        let bridge = Narrated::new();
-        let first = DrawKey {
-            run: RunId(7),
-            scene: SceneId(1),
-            index: 0,
-        };
-        for scene in 1..=4 {
-            for index in 0..64 {
-                assert_eq!(
-                    bridge.unassigned(DrawKey {
-                        scene: SceneId(scene),
-                        index,
-                        ..first
-                    }),
-                    Ok(true)
-                );
-            }
-        }
-        let next = DrawKey {
-            scene: SceneId(5),
-            ..first
-        };
-        assert_eq!(bridge.unassigned(next), Err(()));
-        assert!(bridge.retiring(
-            &[first.scene],
-            None,
-            RetirementLane::Scenes,
-            NonZeroU64::MIN
-        ));
-        assert_eq!(bridge.unassigned(next), Ok(false));
-        assert_eq!(bridge.assignment(first), Ok(None));
-        assert_eq!(bridge.unassigned(first), Err(()));
-
-        bridge.retirement_consumed(RetirementLane::Scenes);
-        assert_eq!(bridge.unassigned(next), Ok(true));
-        assert_eq!(bridge.assignment(first), Err(()));
-        assert_eq!(bridge.assignment(next), Ok(None));
-        assert_eq!(
-            bridge.unassigned(DrawKey {
-                scene: SceneId(2),
-                ..first
-            }),
-            Err(())
-        );
-    }
-
-    #[test]
-    fn an_applied_removal_does_not_acknowledge_a_held_zero_cut() {
-        let bridge = Narrated::new();
-        let cut = DrawKey {
-            run: RunId(7),
-            scene: SceneId(1),
-            index: 0,
-        };
-        let removed = DrawKey {
-            scene: SceneId(2),
-            ..cut
-        };
-        let live = DrawKey {
-            scene: SceneId(3),
-            ..cut
-        };
-        for key in [cut, removed, live] {
-            assert_eq!(bridge.unassigned(key), Ok(true));
-        }
-        assert!(bridge.retiring(&[cut.scene], None, RetirementLane::Cut, NonZeroU64::MIN));
-        assert!(bridge.retiring(
-            &[removed.scene],
-            None,
-            RetirementLane::Scenes,
-            NonZeroU64::MIN
-        ));
-        bridge.retirement_consumed(RetirementLane::Scenes);
-        assert_eq!(bridge.unassigned(live), Err(()));
-        assert_eq!(bridge.assignment(cut), Ok(None));
-        assert_eq!(bridge.assignment(removed), Err(()));
-        bridge.retirement_consumed(RetirementLane::Cut);
-        assert_eq!(bridge.unassigned(live), Err(()));
-        assert_eq!(bridge.assignment(cut), Err(()));
-        assert_eq!(bridge.assignment(live), Ok(None));
-    }
-
-    #[test]
-    fn wire_replacement_fences_only_the_victim_and_keeps_its_exact_metadata() {
-        for marker_first in [false, true] {
-            let bridge = Narrated::new();
-            let (old, successor) = (SceneId(2), SceneId(3));
-            let promised = Assignment {
-                session: 1,
-                output: OutputGeneration(4),
-                run: RunId(7),
-                segment: SegmentId(0),
-                step: StepRef {
-                    scene: old,
-                    index: 0,
-                },
-            };
-            let old_key = draw_key(promised);
-            let next_key = DrawKey {
-                scene: successor,
-                ..old_key
-            };
-            if !marker_first {
-                assert!(bridge.promised(promised));
-                assert!(bridge.announce(promised));
-                assert!(!bridge.retiring(
-                    &[old, old],
-                    Some(successor),
-                    RetirementLane::Scenes,
-                    NonZeroU64::MIN
-                ));
-                assert_eq!(bridge.assignment(old_key), Ok(Some(promised)));
-            }
-            assert!(bridge.retiring(
-                &[old],
-                Some(successor),
-                RetirementLane::Scenes,
-                NonZeroU64::MIN
-            ));
-            if marker_first {
-                assert!(bridge.promised(promised));
-                assert!(bridge.announce(promised));
-            }
-            assert_eq!(bridge.unassigned(next_key), Ok(true));
-            assert_eq!(bridge.assignment(old_key), Err(()));
-            assert_eq!(bridge.assignment(next_key), Ok(None));
-        }
-    }
-}
+#[path = "narrated_tests.rs"]
+mod tests;

@@ -9,9 +9,17 @@ use std::time::Duration;
 use std::time::Instant;
 
 use async_channel::Receiver;
+#[cfg(debug_assertions)]
+use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{AudioSession, Incarnation, IssueSession, ShellTuning};
+#[cfg(debug_assertions)]
+use kumochi_protocol::message::{
+    ControlToBrain, ControlToShell, DataToBrain, Narration, Phase, RunId, RunOrigin, ThreadId,
+};
 
-use super::{Attendance, Connection, Link, LinkEvent, LinkHandle, Session, Shared, start};
+use super::{
+    Attendance, Connection, Link, LinkEvent, LinkHandle, LinkStart, Session, Shared, start,
+};
 use crate::platform::{PipeClient, test_pair};
 
 /// How long a test waits for anything before it fails.
@@ -166,7 +174,7 @@ fn authenticated_with_output(
     use crate::platform::{handshake_pair, open};
     let (sender, events) = async_channel::unbounded();
     let (output, playback) = mpsc::sync_channel(1);
-    shared.fake_playback = Some(output);
+    shared.fake_playback = output.into();
     let link = Link {
         brain: std::env::current_exe().expect("the fixture shares the test image"),
         session: id,
@@ -304,16 +312,12 @@ pub(super) fn attended_queued_shared(label: &str, shared: Arc<Shared>) -> Attend
     attended_with(label, shared, Incarnation(1), AudioSession::QueuedRequired)
 }
 
-fn attended_with(
+pub(super) fn attended_with(
     label: &str,
     shared: Arc<Shared>,
     incarnation: Incarnation,
     audio: AudioSession,
 ) -> Attended {
-    let (control, shell_control) = pair(&format!("{label}-control"));
-    let (data, shell_data) = pair(&format!("{label}-data"));
-    control.set_timeout(Some(PATIENCE));
-    data.set_timeout(Some(PATIENCE));
     let (sender, events) = async_channel::unbounded();
     let link = Link {
         brain: PathBuf::new(),
@@ -321,7 +325,20 @@ fn attended_with(
         audio,
         shared,
     };
-    let (handle, start) = start(link, sender);
+    attended_prepared(label, start(link, sender), events, incarnation)
+}
+
+/// Attends a prepared link's own start, handle and event receiver against the scripted peer.
+pub(super) fn attended_prepared(
+    label: &str,
+    (handle, start): (LinkHandle, LinkStart),
+    events: Receiver<LinkEvent>,
+    incarnation: Incarnation,
+) -> Attended {
+    let (control, shell_control) = pair(&format!("{label}-control"));
+    let (data, shell_data) = pair(&format!("{label}-data"));
+    control.set_timeout(Some(PATIENCE));
+    data.set_timeout(Some(PATIENCE));
     let connection = Connection {
         control: Arc::new(shell_control),
         data: Arc::new(shell_data),
@@ -368,4 +385,174 @@ pub fn connected(event: LinkEvent) -> Session {
         panic!("Connected first, got {event:?}");
     };
     session
+}
+
+#[cfg(debug_assertions)]
+pub(super) fn settings_view() -> kumochi_protocol::message::SettingsView {
+    use kumochi_protocol::message::{AssistantName, SettingsView};
+    SettingsView {
+        assistant_name: AssistantName::new("Cloud").expect("valid"),
+        user_name: None,
+        onboarded: true,
+        onboarding_from: kumochi_protocol::message::OnboardingStep::Welcome,
+        main_thread: ThreadId(9),
+        max_frame_rate: kumochi_protocol::message::MaxFrameRate::AUTOMATIC,
+        default_model: None,
+        dock_position: kumochi_protocol::message::DockPosition::TopCenter,
+        show_in_taskbar: false,
+        talk_back: false,
+        stt_unload: kumochi_protocol::message::SttUnload::Kept,
+        hold_to_talk: kumochi_protocol::message::DEFAULT_HOLD_TO_TALK,
+        screen_holds: kumochi_protocol::message::DEFAULT_SCREEN_HOLDS,
+        show_screen: kumochi_protocol::message::DEFAULT_SHOW_SCREEN,
+        shortcut: kumochi_protocol::message::ShortcutView::Default,
+    }
+}
+
+#[cfg(debug_assertions)]
+pub(super) fn run_state(
+    run: u64,
+    thread: ThreadId,
+    phase: Phase,
+    origin: Option<RunOrigin>,
+) -> ControlToShell {
+    ControlToShell::RunState {
+        origin,
+        run: RunId(run),
+        thread,
+        phase,
+        error: None,
+    }
+}
+
+#[cfg(all(test, debug_assertions))]
+pub(super) fn queued_registration(
+    control: &PipeClient,
+    shared: &Shared,
+) -> kumochi_protocol::message::OutputGeneration {
+    queued_registration_as(control, declared(shared))
+}
+
+#[cfg(all(test, debug_assertions))]
+fn declared(shared: &Shared) -> Narration {
+    if shared.narrated {
+        Narration::Conducted
+    } else {
+        Narration::Plain
+    }
+}
+
+/// The pair's talk-back registration, which must declare `narration` on the wire.
+#[cfg(debug_assertions)]
+pub(super) fn queued_registration_as(
+    control: &PipeClient,
+    narration: Narration,
+) -> kumochi_protocol::message::OutputGeneration {
+    frame::write(
+        &mut &*control,
+        &ControlToShell::Settings {
+            view: kumochi_protocol::message::SettingsView {
+                talk_back: true,
+                ..settings_view()
+            },
+            answer: false,
+        },
+        Pipe::Control,
+    )
+    .expect("talk-back settings written");
+    match frame::read(&mut &*control, Pipe::Control).expect("read registration") {
+        Some(ControlToBrain::QueuedAudioOutput(24_000, output, declared))
+            if declared == narration =>
+        {
+            output
+        }
+        other => panic!("a 24 kHz queued registration, got {other:?}"),
+    }
+}
+
+#[cfg(debug_assertions)]
+pub(super) fn acknowledge_queued(
+    control: &PipeClient,
+    output: kumochi_protocol::message::OutputGeneration,
+) {
+    frame::write(
+        &mut &*control,
+        &ControlToShell::QueuedAudioRegistered(output),
+        Pipe::Control,
+    )
+    .expect("registered");
+    frame::write(&mut &*control, &ControlToShell::Ping, Pipe::Control).expect("ping");
+    assert_eq!(
+        frame::read(&mut &*control, Pipe::Control).expect("peer reads Pong"),
+        Some(ControlToBrain::Pong),
+        "the control reader has handled the prior ACK"
+    );
+}
+
+#[cfg(debug_assertions)]
+pub(super) fn text_ready(events: &std::sync::mpsc::Receiver<LinkEvent>) {
+    assert!(
+        matches!(next(events), LinkEvent::TextReady { .. }),
+        "the acknowledged pair admits turns"
+    );
+}
+
+#[cfg(debug_assertions)]
+pub(super) fn queued_text(turn: u32, text: &str) -> DataToBrain {
+    DataToBrain::TextSubmit {
+        turn,
+        thread: Some(ThreadId(1)),
+        screen: kumochi_protocol::message::ScreenChoice::None,
+        text: text.into(),
+    }
+}
+
+#[cfg(all(test, debug_assertions))]
+pub(super) fn queued_named_run(
+    link: &Attended,
+    events: &std::sync::mpsc::Receiver<LinkEvent>,
+) -> (Session, kumochi_protocol::message::OutputGeneration) {
+    queued_named_run_as(link, events, declared(&link.handle.shared))
+}
+
+#[cfg(debug_assertions)]
+pub(super) fn queued_named_run_as(
+    link: &Attended,
+    events: &std::sync::mpsc::Receiver<LinkEvent>,
+    narration: Narration,
+) -> (Session, kumochi_protocol::message::OutputGeneration) {
+    let session = connected(next(events));
+    let output = queued_registration_as(&link.control, narration);
+    acknowledge_queued(&link.control, output);
+    let text = queued_text(1, "old owner");
+    assert!(
+        link.handle.send_data(&session, text.clone()),
+        "the old pair admits its first turn"
+    );
+    assert_eq!(
+        frame::read(&mut &*link.data, Pipe::Data).expect("the old data pipe"),
+        Some(text),
+        "the old peer sees the exact typed submit"
+    );
+    frame::write(
+        &mut &link.control,
+        &run_state(
+            7,
+            ThreadId(1),
+            Phase::Thinking,
+            Some(RunOrigin::Typed { turn: 1 }),
+        ),
+        Pipe::Control,
+    )
+    .expect("the old peer names the accepted turn");
+    assert!(
+        matches!(next(events), LinkEvent::Settings { .. }),
+        "settings preceded the run"
+    );
+    text_ready(events);
+    assert!(
+        matches!(next(events), LinkEvent::RunState { run: RunId(7), .. }),
+        "the Shell bound the old worker"
+    );
+    (session, output)
 }

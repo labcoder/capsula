@@ -240,7 +240,7 @@ stateDiagram-v2
   the next callback resumes at the same device frame. Stop retains its existing cutoff and
   conservative heard cursor. It fences copying immediately and the callback's fade and physical
   quiet acknowledgement do not depend on presentation-ring space.
-- **Speech-start admission (dormant).** The producer holds the next queued Speech-start segment
+- **Speech-start admission.** The producer holds the next queued Speech-start segment
   until a keyed Allow or Discard joins it at the normal synthesis window. An early decision sticks
   to its announced segment; a duplicate cannot dispatch it again. Discard still owes the ordered
   final. A closed reply waiting only on eligibility invalidates its drain timer; resolving that
@@ -351,14 +351,15 @@ sequenceDiagram
   dispatched Speak, including plain text, from dispatch to its first nonempty PCM or terminal.
   The pump reads the registered narration at each Speak, so a pump loaded after the pair
   registered times the same way, and losing the shell drops back to untimed. Queued segments have no timer.
-  The provisional deadline is five seconds; it needs measuring on the current build before conducted output is switched on.
+  The provisional deadline is five seconds. A dev-profile probe on a Windows development build of
+  main d7997fd6 observed a p95 of 83.4 ms over 30 samples from dispatch to first nonempty PCM.
   At expiry the pump checks the receiver even if the data pipe has no room. A ready event keeps
   its normal credit and order; an unfinished send does not delay expiry. Silence at expiry fences
   the dispatch even if unload already moved its TTS generation, and ends the reply's remaining
   narration with ordered empty finals. Earlier audio and the text reply continue.
   An empty final releases its own picture to authored timing without claiming it was heard.
-  This fences late output but does not interrupt a blocked native call. The ordinary launcher
-  prepares `Plain`, so conducted output stays off.
+  This fences late output but does not interrupt a blocked native call. The Windows connected
+  launcher prepares `Conducted`, so conducted output is on.
 - **Draining.** When the engine finishes, the reply closes. The run ends `done` only once its
   speech is final, so it can sit finished with its speech still playing; see
   [runs.md](runs.md#draining-a-spoken-run).
@@ -1040,9 +1041,13 @@ A narrated pair admits a speaking Hold too, but only after the previous run's ex
 cleared its narration delivery and any promised step has been handed off, so Esc before the first
 promise doesn't free the pair early. If Stop or terminal control arrives and that RunEnd doesn't
 follow within the handshake timeout (5 s), the Shell tears the pair down rather than reopening capture.
-A stopped run that a typed successor replaced keeps that bound until its own RunEnd. The 5 s bound
-is unmeasured: a data pipe still draining scene frames after Stop could exceed it, so the RunEnd
-tail must be measured before conducted narration is switched on.
+A stopped run that a typed successor replaced keeps that bound until its own RunEnd. A data
+pipe still draining scene frames after Stop could exceed it. Two separate dev-profile p95 probes
+on a Windows development build of main d7997fd6 observed these values in these probes. From the
+Brain's Stop receipt to the
+Shell's decoded RunEnd took 29.8 ms over 30 samples on real named pipes, about 23 ms of it a
+fixture's credit hold. From the Brain's Stop to a decoded RunEnd with its metadata queue at the
+512 KiB cap took 8.2 ms; that probe doesn't use named pipes.
 A released Hold's early speech promise waits within the data reader's bounded wait and is accepted
 only once control binds that gesture's run. Revocation closes the Shell's capture and enqueue for the gesture. A frame already
 captured may still cross the local pipe: the writer checks authority before writing,

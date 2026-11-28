@@ -9,8 +9,7 @@ use kumochi_protocol::message::{
 
 use super::super::{Output, Retirement};
 use super::{
-    Active, Delivery, LOCAL_QUIET, NarratedReservation, OutputOwner, Queued, RECEIPT_QUEUED,
-    Speech, StopOrigin,
+    Active, Delivery, LOCAL_QUIET, NarratedReservation, OutputOwner, Queued, RECEIPT_QUEUED, Speech,
 };
 use crate::link::{
     Attendance, HANDSHAKE_TIMEOUT, Shared, narrated::Narrated, queued::MetadataFrame,
@@ -155,7 +154,7 @@ fn a_speaking_hold_needs_the_previous_runs_queued_receipt_not_its_local_quiet() 
         input: None,
         proof: Arc::clone(&proof),
         delivery: None,
-        locally_stopped: false,
+        stop_accepted: false,
         run_end_by: None,
         speech: Speech::new(async_channel::bounded(1).0),
     });
@@ -213,11 +212,112 @@ fn bound(proof: u8) -> Active {
         id: RunId(1),
         input: None,
         proof: Arc::new(AtomicU8::new(proof)),
-        delivery: Some(Delivery::Unpromised),
-        locally_stopped: false,
+        delivery: Some(Delivery::default()),
+        stop_accepted: false,
         run_end_by: None,
         speech: Speech::new(async_channel::bounded(1).0),
     }
+}
+
+#[test]
+fn the_narration_gate_waits_for_input_and_room_and_only_an_enqueued_allow_admits_sound() {
+    use super::super::Denied;
+    use crate::speaker::conductor::Binding;
+    use crate::speaker::queued::{Command, Packet, unattended};
+    use kumochi_protocol::message::SpeechPcm;
+
+    let owner = narrated();
+    let Output::Queued(output) = owner.lock().output else {
+        panic!("a queued pair");
+    };
+    let a = Assignment {
+        session: 1,
+        output,
+        run: RunId(1),
+        segment: SegmentId(0),
+        step: StepRef {
+            scene: SceneId(1),
+            index: 0,
+        },
+    };
+    let binding = Binding {
+        assignment: a,
+        nonce: 1,
+    };
+    owner.lock().queued.as_mut().expect("the pair").active = Some(bound(0));
+    for frame in [MetadataFrame::Commit, MetadataFrame::Announcement] {
+        assert!(matches!(
+            owner.narrated_metadata(a, frame),
+            Ok(NarratedReservation::Reserved)
+        ));
+    }
+    assert_eq!(
+        owner.narrated_gate(Command::Narrate(a), || true),
+        Err(Denied::Opening),
+        "a missing input is pending, not lost"
+    );
+    let (input, commands, _packets) = unattended();
+    owner
+        .lock()
+        .queued
+        .as_mut()
+        .and_then(|q| q.active.as_mut())
+        .expect("run 1")
+        .input = Some(input);
+    let mut queued = 0;
+    let full = loop {
+        match owner.narrated_gate(Command::Narrate(a), || true) {
+            Ok(true) => queued += 1,
+            refused => break refused,
+        }
+    };
+    assert_eq!((queued, full), (16, Err(Denied::Busy)));
+    let sound = || {
+        Some(Packet::wire(
+            SpeechPcm {
+                run: RunId(1),
+                segment: a.segment,
+                output_generation: output,
+                seq: 0,
+                samples: vec![9; 480],
+                last: None,
+            },
+            1,
+            1_024,
+        ))
+    };
+    let mut published = false;
+    assert_eq!(
+        owner.narrated_gate(Command::Allow(binding), || {
+            published = true;
+            true
+        }),
+        Err(Denied::Busy)
+    );
+    assert!(!published, "a full mailbox publishes no decision");
+    assert_eq!(
+        owner.queued_feed(1, RunId(1), output, a.segment, &mut sound()),
+        Err(()),
+        "sound for an announced step nothing allowed ends the pair"
+    );
+    commands.recv().expect("one queued command");
+    assert_eq!(
+        owner.narrated_gate(Command::Allow(binding), || {
+            published = true;
+            true
+        }),
+        Ok(true)
+    );
+    assert!(published);
+    assert_eq!(
+        owner.queued_feed(1, RunId(1), output, a.segment, &mut sound()),
+        Ok(true)
+    );
+    drop(commands);
+    assert_eq!(
+        owner.narrated_gate(Command::Revoke(binding), || true),
+        Err(Denied::Lost)
+    );
 }
 
 #[test]
@@ -257,10 +357,7 @@ fn a_hold_after_esc_before_the_first_promise_waits_for_that_runs_run_end() {
     let mut state = owner.lock();
     let queued = state.queued.as_mut().expect("the pair");
     queued.active = Some(bound(LOCAL_QUIET | RECEIPT_QUEUED));
-    assert!(
-        queued.stop(RunId(1), StopOrigin::Local),
-        "Esc stops the run"
-    );
+    assert!(queued.stop(RunId(1)), "Esc stops the run");
     drop(state);
     let hold = || owner.lock().queued_hold().is_some();
     let late = Instant::now() + HANDSHAKE_TIMEOUT;
@@ -286,7 +383,7 @@ fn narrated_shared() -> (
     let (device, opened) = mpsc::sync_channel(1);
     let shared = Arc::new(Shared {
         narrated: true,
-        fake_playback: Some(device),
+        fake_playback: device.into(),
         ..Shared::default()
     });
     let pair = shared.output.begin_queued(
@@ -342,10 +439,7 @@ fn a_typed_successor_keeps_the_stopped_runs_run_end_bound() {
     let mut state = owner.lock();
     let queued = state.queued.as_mut().expect("the pair");
     queued.active = Some(bound(LOCAL_QUIET | RECEIPT_QUEUED));
-    assert!(
-        queued.stop(RunId(1), StopOrigin::Local),
-        "Esc stops the run"
-    );
+    assert!(queued.stop(RunId(1)), "Esc stops the run");
     drop(state);
     let late = Instant::now() + HANDSHAKE_TIMEOUT;
     assert!(

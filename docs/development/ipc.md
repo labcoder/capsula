@@ -26,9 +26,10 @@ admission selects session authorization yet.
 
 ## Queued-required session mode
 
-Ordinary launch selects queued-required with Plain output and sends QueuedHello on both
-pipes. The brain still accepts Legacy: control Hello, Welcome, then data Hello, with their
-existing bytes. Both modes follow their data Hello with one drawing-font startup frame.
+The Windows connected launcher selects queued-required with Conducted output and sends
+QueuedHello on both pipes. The brain still accepts Legacy: control Hello, Welcome, then data
+Hello, with their existing bytes. Both modes follow their data Hello with one drawing-font
+startup frame.
 The queued data Hello echoes this Welcome's incarnation and issue epoch. The brain
 checks the executable, matching build and capability on both legs and the existing same-process
 pairing. It refuses a mixed mode or a data Hello from another session. In either mode, one
@@ -131,18 +132,39 @@ fences the victim assignment at the data reader; a busy output owner defers the
 Discard without lifting that fence. Stop alone revokes run output, not the scene
 boundary. A durable `SceneCutApplied` to zero is terminal and stays after the
 commits it names; a cut that keeps paint is not terminal.
-An explicitly stopped run's commit can still reach the reader after the next run
-has been named or stopped. The commit goes to the stopped scene mirror; a matching
+A run can promise several speech steps, and several commit and announcement pairs can precede
+the first PCM. The Shell records each commit and announcement as it arrives, in segment order,
+so later metadata never waits on an earlier step's audio. Only the lowest announced step that
+hasn't settled goes to the worker and answers the presenter's lookup; a later promised step
+stays unresolved. Decisions leave in segment order, each once, with at most one unacknowledged
+per pair across runs, so a removed step's Discard waits for the earlier receipt. Nonempty PCM
+for an announced speech step ends the pair unless the Shell has already enqueued that step's
+local Allow; empty finals, Plain PCM and a stopped run's drain pass. An exact `RunEnd` or the
+worker's exit settles every step whose decision hasn't gone out, without sending one. Such a
+step that nobody bound and nothing stopped or removed keeps its authored timing. A step reserves
+that fallback's slot when it's promised and frees it once it sends a decision, settles or
+retires, so a promise waits for the presenter to consume a scene retirement rather than lose the
+fallback, and the fallback outlasts the next run's first promise until its scene retires. The
+data reader keeps the scenes it has seen begin, through `SceneBegin` or a recovered snapshot's
+chunk zero, and not yet seen removed, replaced or cut to zero, at most `MAX_VISIBLE_SCENES` of
+them. A promise
+for a scene outside that set, including one whose begin the brain dropped unwritten, is retired:
+it never falls back and never paints, and a commit without a promise there reserves nothing.
+A run stopped
+by Esc or by the brain's revoke releases its narration at its exact `RunEnd` without waiting
+for a UI pass.
+An explicitly stopped run's commit, after Esc or the brain's revoke alike, can still reach the
+reader after the next run has been named or stopped. The commit goes to the stopped scene mirror; a matching
 announcement returns credit once without binding or sending a speech decision. The
 pair keeps at most one stopped predecessor until the data reader sees that run's
 `RunEnd` or the pair closes. A commit can arrive on its own if Stop revoked the
 announcement before the writer started it. The next typed intent keeps its draft
 while both slots are occupied; neither quiet nor a different run's marker releases
 the predecessor. For a natural end, the exact data `RunEnd` and settled drawing binding
-release the single narration slot for the next reply. That releases the audio binding, not an
+release the run's narration for the next reply. That releases the audio binding, not an
 already installed frame or its outstanding paint receipt. Decision receipts remain on the
-control pipe. Link preparation takes the narration mode explicitly; the ordinary launcher
-prepares `Plain` on its queued-required session, so it never selects the narrated adapter.
+control pipe. Link preparation takes the narration mode explicitly; the Windows connected launcher
+prepares `Conducted` on its queued-required session, so it selects the narrated adapter.
 
 ## Voice-only hold messages
 
@@ -1071,8 +1093,8 @@ records only their operation and length.
 | Shell to brain | control | `SpeechRetired` (queued output) | `run`, logical `output`, `segment`, cumulative `retired`, `heard`, `final_segment` |
 | Shell to brain | control | `AudioOutput` | `rate`, `generation` |
 | Shell to brain | control | `QueuedAudioOutput` | `rate`, `generation`, narration (`Plain` or `Conducted`); selects retirement receipts before a run is admitted |
-| Shell to brain | control | `SpeechDecision` (dormant) | `run`, logical `output`, `segment`, Allow or Discard |
-| Brain to shell | control | `SpeechDecisionTaken` (dormant) | the same run, output and segment, after consumption or terminal |
+| Shell to brain | control | `SpeechDecision` | `run`, logical `output`, `segment`, Allow or Discard |
+| Brain to shell | control | `SpeechDecisionTaken` | the same run, output and segment, after consumption or terminal |
 | Shell to brain | control | `AudioOutputUnavailable` | `generation` |
 | Brain to shell | control | `SpeechRevoked` | `run` |
 

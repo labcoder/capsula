@@ -51,10 +51,11 @@ handoff boundary, or Stop can discard the queue without the handoff boundary. St
 observations don't request recovery. Virtual pacing never crosses the first unheard gap
 in heard history. Finality after Stop still requires every applicable generation-specific
 tail proof and the latest known deadline. Two unresolved device tails refuse another
-physical open, but virtual pacing continues. On a Plain pair, a reply's first open request
-holds virtual pacing until it resolves or reaches its 1 s retry time, whichever comes first, so a
-slow first device open doesn't retire the reply's start unheard. An open still pending after that
-can lose the start. A retry, and a Conducted pair, keep pacing during an open.
+physical open, but virtual pacing continues. On every queued pair, Plain or Conducted, a reply's
+first open request holds virtual pacing until it resolves or reaches its 1 s retry time, whichever
+comes first, so a slow first device open doesn't retire the reply's start unheard. An open still
+pending after that can lose the start. A retry keeps pacing during an open, and an unavailable
+route takes silent timing at once.
 
 Stop is sticky and bypasses the bounded command mailbox. The owner handles commands
 before admitting ingress, and a terminated owner reports disconnection, not backpressure.
@@ -96,11 +97,11 @@ admitting another turn; a refused live report ends the pair. After an earlier re
 is refused, the original worker can observe its fenced callback for at most 500 ms without
 feeding audio or sending another report. That local proof doesn't release the device permit;
 the backend still owns disposal. Unknown tails still block replacement. An
-absolute startup deadline ends the same pair even while control traffic continues. Ordinary launch
-selects queued Plain, with no Legacy fallback. A Legacy session starts quiet and never opens a
-playback device; unexpected speech PCM is wiped, credited and dropped.
+absolute startup deadline ends the same pair even while control traffic continues. The Windows
+connected launcher selects queued Conducted, with no Legacy fallback. A Legacy session starts
+quiet and never opens a playback device; unexpected speech PCM is wiped, credited and dropped.
 
-## Dormant segment gate
+## Segment gate
 
 A hold blocks native staging and virtual pacing at one segment, not its predecessor.
 Releasing it does not catch up elapsed hold time. Discard keeps PCM ingress in sequence
@@ -112,9 +113,9 @@ unstaged line without touching the device; accepting the first source packet for
 staging commits the line, even if the callback hasn't taken it. The eight transport
 blocks hold about 160 ms of source, but staging is not a time bound: a committed
 line can wait seconds during a pause and play on resume unless its run is stopped
-or replaced. No production caller enables this gate yet.
+or replaced. Only a conducted pair's drawing conductor sets this gate.
 
-## Dormant drawing conductor
+## Drawing conductor
 
 A queued pair prepared as `Conducted` uses an exact source reservation at queued ingress.
 A matching presenter level can be replaced or disappear, but cannot erase ownership
@@ -129,7 +130,7 @@ opening an idle route. It does not shorten an already committed physical tail, a
 neither it nor virtual source proves Played. Quiet remains a separate result from
 the original route's tail. Plain and Legacy do not select this mode.
 
-The dormant drawing conductor decides only an assignment's audio gate and picture timing.
+The drawing conductor decides only an assignment's audio gate and picture timing.
 The presenter supplies readiness and fences, the worker supplies actual handoff and the
 current physical route's source span, the link reports worker absence, and the brain supplies
 synthesis finals. It doesn't infer submission from staged or virtually consumed samples.
@@ -138,7 +139,7 @@ whole line is allowed and the picture takes silent timing. On rebuild, an unshow
 step has 250 ms to receive a handoff from the new route before taking silent timing.
 A route rebuild mid-line ends speech-following for that shown step; it takes authored
 timing immediately. A shown or fenced step can't show again. Step-level Drop uses the
-staging commitment above. These defaults aren't measured. The dormant worker now uses
+staging commitment above. These defaults aren't measured. The worker uses
 one reducer and the session clock supplied by its caller. It reads the keyed view and
 applies the matching hold before feeding source, services hold and rebuild deadlines on
 its own wake, and publishes one keyed picture. An accepted first handoff on the current
@@ -150,23 +151,30 @@ unheard source never produces a played terminal; an earlier gap doesn't prevent 
 later fully heard segment from ending. A fully retired unheard line takes silent
 fallback even when a device opens as virtual pacing exhausts it. Retirement still
 keeps the existing rebuild grace. Ready PCM arms the hold during a pending device
-open, so expiry can release it to virtual pacing without another packet.
+open, so expiry can release it to virtual pacing without another packet; on a reply's first
+open, that pacing still waits for the open or its retry time.
 Missing owner, backend startup failure and worker exit
 are reported to the pair's bridge, which supplies keyed Unavailable when there's no
 onset to preserve. An ordered Applied for the exact binding lets the bridge send
 Allow; only then can that assignment's PCM reach the worker. An unresolved assignment is
-not unassigned. A queued pair prepared as `Conducted` selects the adapter; the ordinary
-launcher prepares `Plain`.
+not unassigned. The worker narrates one step at a time: the bridge hands it the next step only
+after the previous one ended, was fenced or was revoked, and a revoked predecessor is fenced
+before its successor starts. The local command goes first and its wire decision follows, so a
+full worker mailbox defers the bridge to its next wake without publishing anything, and a run
+whose speaker input isn't installed yet waits for the install's wake. An Allow whose run the
+brain revokes, or whose exact `RunEnd` arrives, before it reaches the worker is dropped without
+a decision, and the pair stays up; a failed command or wire decision still ends it. A queued pair prepared as
+`Conducted` selects the adapter, and the Windows connected launcher prepares that pair.
 
 ## The output owner
 
 Each link has one output owner. A Legacy connection gets a fresh no-output epoch before
 Connected, so an old capture claim cannot match a replacement session. A queued pair can
 lend the capture inhibit only after its exact logical output is registered, with its Show
-Screen value known (on or off) and no pending setting change. With Talk-back on, the pair must be
-Plain, with no typed turn reserved, no draining predecessor, and the previous run's
-`SpeechStopped` accepted by the control queue. While the inhibit is held, no typed turn
-can reserve the pair. Registration cannot prove that an earlier route or microphone retired.
+Screen value known (on or off) and no pending setting change. With Talk-back on, the pair needs
+no typed turn reserved, no draining predecessor, the previous run's `SpeechStopped` accepted by
+the control queue and, on a Conducted pair, that run's narration released at its exact `RunEnd`.
+While the inhibit is held, no typed turn can reserve the pair. Registration cannot prove that an earlier route or microphone retired.
 
 The inhibit token binds one gesture and microphone generation. The output owner rechecks
 the session, output key and token before the microphone starts or collects. Ending a

@@ -879,15 +879,18 @@ An already-cut scene is left alone on a later Esc; a user clear goes through
 separate host clear event removes the scene from the visible recovery set.
 Prepared display residency is not an admission input.
 
-The dormant presenter conductor binds only a step whose picture waits for speech.
+The presenter conductor binds only a step whose picture waits for speech.
 It chooses one Speech-start head at a time in stable scene order, after the authored
-time and replacement guard allow it. Now and After never create a presenter binding;
-they use their authored visual timing whether they have narration or not. The conductor
-doesn't scan past an uninstalled authored head to reach a later Speech step.
+time and replacement guard allow it. Of a run's promised steps, only the lowest announced one
+that hasn't settled resolves, so a later step that becomes eligible first can't take the
+binding. An ended step stays readable until the presenter releases its binding. Now and After
+never create a presenter binding; they use their authored visual timing whether they have
+narration or not. The conductor doesn't scan past an uninstalled authored head to reach a later
+Speech step.
 Presence attaches the authenticated pair's bridge after resetting its presenter on Connect.
 The bridge supplies the pair clock and assignment lookup; unresolved isn't the same as
-unassigned. Only a queued pair prepared as `Conducted` owns the bridge; the ordinary launcher
-prepares its queued pair as `Plain`, so ordinary launches never attach the bridge.
+unassigned. Only a queued pair prepared as `Conducted` owns the bridge, and the Windows connected
+launcher prepares its queued pair that way.
 
 The presenter schedules the keyed onset once, acknowledges only an accepted paint of the
 installed epoch and fences locally on Stop, cut, replacement or session loss. An older stamped

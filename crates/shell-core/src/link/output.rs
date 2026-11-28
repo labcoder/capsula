@@ -20,6 +20,13 @@ use crate::speaker::{Command, FAULT, RELEASED, Tail};
 use super::{HANDSHAKE_TIMEOUT, RETRY_DELAY};
 
 mod queued;
+#[cfg(all(windows, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
+#[cfg_attr(
+    not(test),
+    expect(unused_imports, reason = "only the crate's own tests use it")
+)]
+pub(super) use queued::hold_input_installs;
 pub(super) use queued::{NarratedReservation, PlaybackStop, Queued, RefusedTail};
 
 #[cfg(test)]
@@ -766,7 +773,7 @@ impl OutputOwner {
         if matches!(state.output, Output::Queued(_))
             && let Some(queued) = &mut state.queued
         {
-            if queued.stop(run, self::queued::StopOrigin::Local) {
+            if queued.stop(run) {
                 return Ok(());
             }
             queued.refuse();

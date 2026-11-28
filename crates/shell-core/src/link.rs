@@ -657,7 +657,7 @@ struct Shared {
     #[cfg(any(test, feature = "test-support"))]
     hold_text_writer: std::sync::atomic::AtomicU8,
     #[cfg(any(test, feature = "test-support"))]
-    fake_playback: Option<std::sync::mpsc::SyncSender<speaker::queued::FixturePlayback>>,
+    fake_playback: OnceLock<std::sync::mpsc::SyncSender<speaker::queued::FixturePlayback>>,
     #[cfg(any(test, feature = "test-support"))]
     prime_fake_playback: AtomicBool,
     #[cfg(any(test, feature = "test-support"))]
@@ -3105,3 +3105,22 @@ mod delete_tests;
 #[cfg(all(test, windows))]
 #[path = "link_measure_tests.rs"]
 mod measure_tests;
+
+#[cfg(windows)]
+#[cfg(debug_assertions)]
+#[cfg(any(test, feature = "test-support"))]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the shell's tests use only the two-step scenario")
+)]
+#[expect(
+    clippy::missing_assert_message,
+    reason = "the fixture's asserts are test assertions, built outside cfg(test) for the shell's tests"
+)]
+#[path = "link_conduct_fixture.rs"]
+pub mod conduct_fixture;
+
+#[cfg(test)]
+#[cfg(all(windows, debug_assertions))]
+#[path = "link_conduct_tests.rs"]
+mod conduct_tests;

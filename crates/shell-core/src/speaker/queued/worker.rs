@@ -97,7 +97,7 @@ impl Input {
         self.worker.unpark();
     }
 
-    pub(super) fn command(&self, command: Command) -> Result<(), TrySendError<Command>> {
+    pub(crate) fn command(&self, command: Command) -> Result<(), TrySendError<Command>> {
         if self.closed.load(Ordering::Acquire) {
             return Err(TrySendError::Disconnected(command));
         }
@@ -114,20 +114,31 @@ impl Input {
         self.command(Command::Stop).is_ok()
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "only the crate's own tests call it")
+    )]
     pub(crate) fn narrate(&self, assignment: Assignment) -> Result<(), TrySendError<Command>> {
         self.command(Command::Narrate(assignment))
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "only the crate's own tests call it")
+    )]
     pub(crate) fn allow(&self, binding: Binding) -> bool {
         self.command(Command::Allow(binding)).is_ok()
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "only the crate's own tests call it")
+    )]
     pub(crate) fn revoke(&self, binding: Binding) -> bool {
         self.command(Command::Revoke(binding)).is_ok()
-    }
-
-    pub(crate) fn revoke_source(&self, assignment: Assignment) -> bool {
-        self.command(Command::RevokeSource(assignment)).is_ok()
     }
 
     pub(crate) fn submit(&self, packet: Packet) -> Result<(), TrySendError<Packet>> {
@@ -186,9 +197,26 @@ impl<F: FnMut(bool) + Send + 'static> DrawingIo for Plain<F> {
     fn owner_exited(&mut self, exit: OwnerExit) {
         (self.0)(exit == OwnerExit::ReportRefused);
     }
-    fn plain(&self) -> bool {
-        true
-    }
+}
+
+/// An input whose worker never drains it, so a test sees its mailbox fill.
+#[cfg(any(test, feature = "test-support"))]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "only the crate's own tests call it")
+)]
+pub(crate) fn unattended() -> (Input, Receiver<Command>, Receiver<Packet>) {
+    let (commands, pending) = mpsc::sync_channel(COMMANDS);
+    let (packets, data) = mpsc::sync_channel(1);
+    let input = Input {
+        worker: thread::current(),
+        commands,
+        packets,
+        busy: Arc::default(),
+        stop: Arc::default(),
+        closed: Arc::default(),
+    };
+    (input, pending, data)
 }
 
 impl Drop for Input {
@@ -264,7 +292,6 @@ pub(crate) fn spawn(
         stop: Arc::clone(&stop),
         closed: Arc::clone(&closed),
     };
-    let plain = drawing.plain();
     let drawing = Drawing::new(session, Arc::clone(&closed), drawing);
     #[cfg(not(any(test, feature = "test-support")))]
     let start = backend::spawn;
@@ -285,7 +312,7 @@ pub(crate) fn spawn(
         .name("speaker-owner".into())
         .spawn(move || {
             let mut engine = Engine::new(run, generation);
-            engine.hold_first_open = plain;
+            engine.hold_first_open = true;
             own(
                 &port,
                 (engine, origin),
@@ -504,6 +531,7 @@ impl Worker {
                     self.inhibit();
                 }
                 Ok(Command::Narrate(assignment)) => {
+                    self.fence_narration(now)?;
                     self.drawing
                         .as_mut()
                         .ok_or(Fault::Delivery)?

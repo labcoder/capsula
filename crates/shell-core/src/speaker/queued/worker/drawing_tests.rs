@@ -1066,3 +1066,38 @@ fn opening_after_the_eligible_line_is_consumed_uses_silent_fallback_without_endi
         PictureState::Owned(Picture::Silent),
     );
 }
+
+#[test]
+fn under_the_first_open_hold_an_unavailable_route_takes_silent_timing_at_once() {
+    let (mut worker, input, port, requests, replies) = fake();
+    worker.engine.hold_first_open = true;
+    let io = FakeIo::attach(&mut worker, &port);
+    let key = io.view(1, 0, View::Eligible);
+    input.command(Command::Expect).unwrap();
+    step(&mut worker, &port, ms(0));
+    let Request::Open(generation, _) = requests.try_recv().unwrap() else {
+        panic!("expected an open");
+    };
+    input.submit(packet(9, 0, 480, Some(480))).unwrap();
+    step(&mut worker, &port, ms(30));
+    step(&mut worker, &port, ms(400));
+    assert_eq!(
+        worker.engine.progress.consumed, 0,
+        "the first open holds the line"
+    );
+    io.picture(
+        key,
+        RouteStamp::Unstamped,
+        PictureState::Owned(Picture::Wait),
+    );
+    assert!(replies.send(Reply::Opened(generation, None)).is_ok());
+    step(&mut worker, &port, ms(401));
+    io.picture(
+        key,
+        RouteStamp::Unstamped,
+        PictureState::Owned(Picture::Silent),
+    );
+    step(&mut worker, &port, ms(411));
+    assert_eq!(worker.engine.progress.consumed, 240);
+    assert_eq!(worker.engine.progress.heard, 0);
+}

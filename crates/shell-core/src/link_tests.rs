@@ -487,27 +487,6 @@ fn a_raw_segment_announcement_keeps_its_class_and_output_generation() {
     assert!(link.link.join().expect("joined"));
 }
 
-fn settings_view() -> kumochi_protocol::message::SettingsView {
-    use kumochi_protocol::message::{AssistantName, SettingsView};
-    SettingsView {
-        assistant_name: AssistantName::new("Cloud").expect("valid"),
-        user_name: None,
-        onboarded: true,
-        onboarding_from: kumochi_protocol::message::OnboardingStep::Welcome,
-        main_thread: ThreadId(9),
-        max_frame_rate: kumochi_protocol::message::MaxFrameRate::AUTOMATIC,
-        default_model: None,
-        dock_position: kumochi_protocol::message::DockPosition::TopCenter,
-        show_in_taskbar: false,
-        talk_back: false,
-        stt_unload: kumochi_protocol::message::SttUnload::Kept,
-        hold_to_talk: kumochi_protocol::message::DEFAULT_HOLD_TO_TALK,
-        screen_holds: kumochi_protocol::message::DEFAULT_SCREEN_HOLDS,
-        show_screen: kumochi_protocol::message::DEFAULT_SHOW_SCREEN,
-        shortcut: kumochi_protocol::message::ShortcutView::Default,
-    }
-}
-
 #[test]
 fn settings_frames_keep_their_connection_generation_and_authoritative_view() {
     let link = attended("settings-view");
@@ -2302,21 +2281,6 @@ fn a_delete_answered_before_a_new_brain_never_fences_the_new_brain_s_runs() {
     assert!(link.join().expect("joined"));
 }
 
-fn run_state(
-    run: u64,
-    thread: ThreadId,
-    phase: Phase,
-    origin: Option<RunOrigin>,
-) -> ControlToShell {
-    ControlToShell::RunState {
-        origin,
-        run: RunId(run),
-        thread,
-        phase,
-        error: None,
-    }
-}
-
 /// Plays the brain's control side: answers each Stop with `Interrupted`.
 fn answer_stops(server: &PipeClient) {
     while let Ok(Some(message)) = frame::read::<ControlToBrain>(&mut &*server, Pipe::Control) {
@@ -2700,68 +2664,6 @@ fn queued_owner_start_deadline_is_not_extended_by_control_traffic() {
     assert!(pongs > 0, "the control reader was active before expiry");
     queued_pair_closed(link.link, &link.control, &link.data);
     assert!(!session.open());
-}
-
-fn queued_registration(
-    control: &PipeClient,
-    shared: &Shared,
-) -> kumochi_protocol::message::OutputGeneration {
-    let narration = if shared.narrated {
-        Narration::Conducted
-    } else {
-        Narration::Plain
-    };
-    frame::write(
-        &mut &*control,
-        &ControlToShell::Settings {
-            view: kumochi_protocol::message::SettingsView {
-                talk_back: true,
-                ..settings_view()
-            },
-            answer: false,
-        },
-        Pipe::Control,
-    )
-    .expect("talk-back settings written");
-    match frame::read(&mut &*control, Pipe::Control).expect("read registration") {
-        Some(ControlToBrain::QueuedAudioOutput(24_000, output, declared))
-            if declared == narration =>
-        {
-            output
-        }
-        other => panic!("a 24 kHz queued registration, got {other:?}"),
-    }
-}
-
-fn acknowledge_queued(control: &PipeClient, output: kumochi_protocol::message::OutputGeneration) {
-    frame::write(
-        &mut &*control,
-        &ControlToShell::QueuedAudioRegistered(output),
-        Pipe::Control,
-    )
-    .expect("registered");
-    frame::write(&mut &*control, &ControlToShell::Ping, Pipe::Control).expect("ping");
-    assert_eq!(
-        frame::read(&mut &*control, Pipe::Control).expect("peer reads Pong"),
-        Some(ControlToBrain::Pong),
-        "the control reader has handled the prior ACK"
-    );
-}
-
-fn text_ready(events: &std::sync::mpsc::Receiver<LinkEvent>) {
-    assert!(
-        matches!(next(events), LinkEvent::TextReady { .. }),
-        "the acknowledged pair admits turns"
-    );
-}
-
-fn queued_text(turn: u32, text: &str) -> DataToBrain {
-    DataToBrain::TextSubmit {
-        turn,
-        thread: Some(ThreadId(1)),
-        screen: kumochi_protocol::message::ScreenChoice::None,
-        text: text.into(),
-    }
 }
 
 #[test]
@@ -3683,7 +3585,7 @@ fn assert_silent_speech_refused(label: &str, at: SilentSpeechAt) {
     let link = attended_queued_shared(
         label,
         Arc::new(Shared {
-            fake_playback: Some(device),
+            fake_playback: device.into(),
             prime_fake_playback: std::sync::atomic::AtomicBool::new(true),
             ..Shared::default()
         }),
@@ -3889,7 +3791,7 @@ fn queued_replacement_with_unproved_quiet_needs_retry_without_clearing_debt() {
     let link = attended_queued_shared(
         "queued-debt-old",
         Arc::new(Shared {
-            fake_playback: Some(device),
+            fake_playback: device.into(),
             ..Shared::default()
         }),
     );
@@ -3935,7 +3837,7 @@ fn queued_stop_with_a_late_fade_allows_a_fresh_hold_and_typed_turn() {
     let link = attended_queued_shared(
         "queued-stop-deadline-old",
         Arc::new(Shared {
-            fake_playback: Some(device),
+            fake_playback: device.into(),
             ..Shared::default()
         }),
     );
@@ -4042,46 +3944,6 @@ fn queued_no_source_disconnect_allows_retry_before_or_after_wire_quiet() {
         assert!(link.link.join().unwrap());
         assert_queued_retry_after_local_quiet(&link.handle, &session, "queued-no-source-retry");
     }
-}
-
-fn queued_named_run(
-    link: &Attended,
-    events: &std::sync::mpsc::Receiver<LinkEvent>,
-) -> (Session, kumochi_protocol::message::OutputGeneration) {
-    let session = connected(next(events));
-    let output = queued_registration(&link.control, &link.handle.shared);
-    acknowledge_queued(&link.control, output);
-    let text = queued_text(1, "old owner");
-    assert!(
-        link.handle.send_data(&session, text.clone()),
-        "the old pair admits its first turn"
-    );
-    assert_eq!(
-        frame::read(&mut &*link.data, Pipe::Data).expect("the old data pipe"),
-        Some(text),
-        "the old peer sees the exact typed submit"
-    );
-    frame::write(
-        &mut &link.control,
-        &run_state(
-            7,
-            ThreadId(1),
-            Phase::Thinking,
-            Some(RunOrigin::Typed { turn: 1 }),
-        ),
-        Pipe::Control,
-    )
-    .expect("the old peer names the accepted turn");
-    assert!(
-        matches!(next(events), LinkEvent::Settings { .. }),
-        "settings preceded the run"
-    );
-    text_ready(events);
-    assert!(
-        matches!(next(events), LinkEvent::RunState { run: RunId(7), .. }),
-        "the Shell bound the old worker"
-    );
-    (session, output)
 }
 
 fn assert_queued_retry_after_local_quiet(old: &LinkHandle, lost: &Session, label: &str) {
@@ -4395,7 +4257,7 @@ fn refused_queued_progress(label: &str) -> (LinkHandle, Session, FixturePlayback
     let link = attended_queued_shared(
         label,
         Arc::new(Shared {
-            fake_playback: Some(device),
+            fake_playback: device.into(),
             ..Shared::default()
         }),
     );
@@ -6093,7 +5955,7 @@ fn an_in_flight_old_promise_drains_only_once_after_the_next_named_run() {
             &format!("late-queued-{at:?}-{stop_successor}"),
             Arc::new(Shared {
                 narrated: true,
-                fake_playback: Some(device),
+                fake_playback: device.into(),
                 ..Shared::default()
             }),
         );

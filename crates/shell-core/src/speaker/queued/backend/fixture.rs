@@ -22,6 +22,29 @@ pub fn serialize_playback() -> std::sync::MutexGuard<'static, ()> {
     permit
 }
 
+#[cfg(windows)]
+#[cfg(any(test, feature = "test-support"))]
+static OPENING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Raised only by a crate test's hold, so no other build takes the open barrier.
+#[cfg(windows)]
+#[cfg(any(test, feature = "test-support"))]
+static OPENS_HELD: AtomicBool = AtomicBool::new(false);
+
+/// Holds every fake device open until the guard drops; take it under `serialize_playback`.
+#[cfg(windows)]
+#[cfg(any(test, feature = "test-support"))]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "only the crate's own tests hold the barrier")
+)]
+pub(crate) fn hold_fake_opens() -> std::sync::MutexGuard<'static, ()> {
+    OPENS_HELD.store(true, Ordering::Release);
+    OPENING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Waits for a previous route under the fixture's existing serialization guard.
 pub fn await_fake_disposal() {
     wait_for_playback_disposal(&[&NATIVE, &OCCUPIED]);
@@ -100,6 +123,15 @@ pub(in crate::speaker::queued) fn spawn_fake(
         owner,
         origin,
         move |control, origin| {
+            #[cfg(windows)]
+            #[cfg(any(test, feature = "test-support"))]
+            if OPENS_HELD.load(Ordering::Acquire) {
+                drop(
+                    OPENING
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                );
+            }
             control.set_stall(FIXTURE_STALL_MS);
             let (transport, callback) = FakePlayback::try_open(Arc::clone(control), &OCCUPIED)
                 .ok_or(OutputError::Unavailable)?;

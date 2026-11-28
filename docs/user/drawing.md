@@ -9,7 +9,9 @@ show the picture or change any drawing still on screen.
 
 When Kumochi draws a 2D diagram, each step appears on screen once it is prepared, and its parts
 draw or fade in one after another unless the drawing times them itself. A newly saved step's
-narration goes to Chat if it isn't queued for speech. The drawing doesn't wait for narration.
+narration goes to Chat if it isn't queued for speech. On Windows, a step timed to its narration
+aims to appear when its sentence is predicted to start playing. If its sound can't play, it
+appears on the drawing's own timing instead.
 Drawings that were on screen come back after Kumochi reconnects. If you stop a drawing, the
 parts that had already finished appearing stay on screen.
 
