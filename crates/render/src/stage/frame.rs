@@ -115,13 +115,13 @@ impl FrameBuf {
         start: usize,
         write: impl FnOnce(&mut Records<'_>) -> Result<(), Failure>,
     ) -> Result<bool, Failure> {
-        if self.pictures.len() >= PICTURES {
-            return Err(Failure::Build);
-        }
         write(&mut Records(&mut self.records))?;
         let count = self.records.len() - start;
         if count == 0 {
             return Ok(false);
+        }
+        if self.pictures.len() >= PICTURES {
+            return Err(Failure::Build);
         }
         let picture = Picture {
             scene,

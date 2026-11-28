@@ -1,6 +1,7 @@
-//! The mesh build: one geometry's primitives into vertex and index buffers reserved once for
-//! the format's global caps, tessellated with main's lyon settings. A vertex carries its
-//! distance along its stroke, so reveal and dashes change per frame without a rebuild.
+//! The mesh build: one geometry's primitives, from one or more build input batches in order,
+//! into vertex and index buffers reserved once for the format's global caps, tessellated with
+//! main's lyon settings. A vertex carries its distance along its stroke's source points, so
+//! reveal and dashes change per frame without a rebuild.
 
 use std::{
     f64::consts::{FRAC_PI_2, PI},
@@ -9,16 +10,16 @@ use std::{
 };
 
 use lyon::{
-    math::point,
-    path::PathEvent,
+    math::{Point, point},
+    path::{ControlPointId, EndpointId, IdEvent, PathEvent, PositionStore},
     tessellation::{
         FillGeometryBuilder, FillOptions, FillRule, FillTessellator, FillVertex, GeometryBuilder,
         GeometryBuilderError, StrokeGeometryBuilder, StrokeOptions, StrokeTessellator,
-        StrokeVertex, TessellationResult, VertexId,
+        StrokeVertex, TessellationResult, VertexId, VertexSource,
     },
 };
 
-use super::{BuildInput, Color, Failure, GeometryId, Record, Shape, index, push};
+use super::{BuildInput, Color, Cursor, Failure, GeometryId, Part, Record, Shape, index, push};
 use crate::limits::{
     INPUT_OBJECTS, INPUT_PRIMS, MESH_INDICES, MESH_PIECES, MESH_VERTICES, MITER_LIMIT, STROKE_CAP,
     STROKE_JOIN, TOLERANCE,
@@ -31,8 +32,12 @@ pub struct Vertex {
     pub at: [f32; 2],
     /// Distance along its stroke in primitive units, for dashes; 0 off a stroke.
     pub along: f32,
-    /// Where it lies in its primitive's reveal, 0 to 1; 0 for what is never revealed.
+    /// Where it lies in its primitive's reveal, 0 to 1, times [`Vertex::weight`]; 0 for what
+    /// is never revealed.
     pub reveal: f32,
+    /// What the interpolated reveal is divided by per pixel: 1, except on a border band's inner
+    /// edge, where it is that edge's length over the outer edge's, so the cut stays straight.
+    pub weight: f32,
     /// Its piece, for paint.
     pub piece: u32,
 }
@@ -64,6 +69,8 @@ pub struct Mesh {
     starts: Vec<u32>,
     /// The first primitive of each object.
     objects: Vec<u32>,
+    /// The geometry being built and where its next batch starts; none once its last is in.
+    building: Option<(GeometryId, Option<Cursor>)>,
     fill: FillTessellator,
     stroke: StrokeTessellator,
 }
@@ -85,23 +92,73 @@ impl Mesh {
             pieces: Vec::with_capacity(MESH_PIECES),
             starts: Vec::with_capacity(INPUT_PRIMS + 1),
             objects: Vec::with_capacity(INPUT_OBJECTS),
+            building: None,
             fill: FillTessellator::new(),
             stroke: StrokeTessellator::new(),
         }
     }
 
-    /// Builds the geometry `id` from `input` in place of whatever this mesh held.
+    /// Starts building the geometry `id` in place of whatever this mesh held.
+    pub fn begin(&mut self, id: GeometryId) {
+        self.vertices.clear();
+        self.indices.clear();
+        self.pieces.clear();
+        self.starts.clear();
+        self.objects.clear();
+        self.building = Some((id, Some(Cursor::START)));
+    }
+
+    /// Builds the part of the geometry being built that `input` holds. The batch isn't wiped
+    /// here: that is its owner's, on every path.
     ///
     /// # Errors
-    /// [`Failure::Stale`] when `input` doesn't hold `id`; [`Failure::Build`] when lyon refuses
-    /// a primitive or the mesh would pass its reservation. The mesh is then empty.
-    pub fn build(&mut self, input: &BuildInput, id: GeometryId) -> Result<(), Failure> {
-        self.clear();
-        let built = self.build_all(input, id);
+    /// [`Failure::Order`] when `input` holds no part of that geometry or not the next one;
+    /// [`Failure::Build`] when lyon refuses a primitive or the mesh would pass its reservation.
+    /// The mesh is then as it was before this batch.
+    pub fn extend(&mut self, input: &BuildInput) -> Result<(), Failure> {
+        let Some((id, Some(next))) = self.building else {
+            return Err(Failure::Order);
+        };
+        let part = input
+            .part(id)
+            .filter(|part| part.from == next)
+            .ok_or(Failure::Order)?;
+        let mark = [
+            self.vertices.len(),
+            self.indices.len(),
+            self.pieces.len(),
+            self.starts.len(),
+            self.objects.len(),
+        ];
+        let built = self.part(input, part);
         if built.is_err() {
-            self.clear();
+            self.vertices.truncate(mark[0]);
+            self.indices.truncate(mark[1]);
+            self.pieces.truncate(mark[2]);
+            self.starts.truncate(mark[3]);
+            self.objects.truncate(mark[4]);
+            return built;
         }
-        built
+        self.building = Some((id, part.to));
+        Ok(())
+    }
+
+    /// Ends the build once its last batch is in.
+    ///
+    /// # Errors
+    /// [`Failure::Order`] when no build is open or a batch is still to come; the mesh is then
+    /// as it was.
+    pub fn finish(&mut self) -> Result<(), Failure> {
+        let Some((_, None)) = self.building else {
+            return Err(Failure::Order);
+        };
+        push(
+            &mut self.starts,
+            INPUT_PRIMS + 1,
+            index(self.indices.len())?,
+        )?;
+        self.building = None;
+        Ok(())
     }
 
     /// Every vertex, in primitive space.
@@ -119,40 +176,33 @@ impl Mesh {
         &self.pieces
     }
 
-    /// The indices a record draws, if it names primitives of this mesh.
+    /// The indices a record draws, if it names primitives of one object of this mesh.
     pub fn range(&self, record: &Record) -> Option<Range<u32>> {
-        let object = *self.objects.get(usize::try_from(record.object).ok()?)?;
-        let first = object.checked_add(record.first)?;
+        let object = usize::try_from(record.object).ok()?;
+        let first = self.objects.get(object)?.checked_add(record.first)?;
         let end = first.checked_add(record.count)?;
+        let next = match self.objects.get(object + 1) {
+            Some(next) => *next,
+            None => index(self.starts.len().checked_sub(1)?).ok()?,
+        };
+        if end > next {
+            return None;
+        }
         let start = *self.starts.get(usize::try_from(first).ok()?)?;
         Some(start..*self.starts.get(usize::try_from(end).ok()?)?)
     }
 
-    fn clear(&mut self) {
-        self.vertices.clear();
-        self.indices.clear();
-        self.pieces.clear();
-        self.starts.clear();
-        self.objects.clear();
-    }
-
-    fn build_all(&mut self, input: &BuildInput, id: GeometryId) -> Result<(), Failure> {
-        for object in input.objects(id).ok_or(Failure::Stale)? {
-            push(&mut self.objects, INPUT_OBJECTS, index(self.starts.len())?)?;
+    fn part(&mut self, input: &BuildInput, part: Part<'_>) -> Result<(), Failure> {
+        for (n, object) in part.objects.iter().enumerate() {
+            if n > 0 || part.from.prim == 0 {
+                push(&mut self.objects, INPUT_OBJECTS, index(self.starts.len())?)?;
+            }
             for shape in input.shapes(object).ok_or(Failure::Build)? {
-                push(
-                    &mut self.starts,
-                    INPUT_PRIMS + 1,
-                    index(self.indices.len())?,
-                )?;
+                push(&mut self.starts, INPUT_PRIMS, index(self.indices.len())?)?;
                 self.shape(input, *shape)?;
             }
         }
-        push(
-            &mut self.starts,
-            INPUT_PRIMS + 1,
-            index(self.indices.len())?,
-        )
+        Ok(())
     }
 
     fn shape(&mut self, input: &BuildInput, shape: Shape) -> Result<(), Failure> {
@@ -206,28 +256,34 @@ impl Mesh {
                     dashed,
                     revealed: true,
                 })?;
-                let ends = points.iter().chain(points.first().filter(|_| closed));
-                let length = ends
-                    .clone()
-                    .zip(ends.skip(1))
-                    .map(|(a, b)| length(*a, *b))
-                    .sum();
+                // shortcut: a reveal's moving end bends through a join's miter, not main's butt
+                // cut (render.md); emit our own joins when that difference has to go.
+                let close = closed && points.len() > 2;
+                let line = Polyline {
+                    points,
+                    ends: points.len() + usize::from(closed && !close),
+                    close,
+                };
                 let options = StrokeOptions::default()
                     .with_line_width(width)
                     .with_line_join(STROKE_JOIN)
                     .with_line_cap(STROKE_CAP)
                     .with_miter_limit(MITER_LIMIT)
                     .with_tolerance(TOLERANCE);
-                let mut sink = Sink::new(&mut self.vertices, &mut self.indices, piece, length);
-                let result = self.stroke.tessellate(
-                    events(
-                        points.iter().copied(),
-                        if closed {
-                            Contour::Closed
-                        } else {
-                            Contour::Open
-                        },
-                    ),
+                let mut walk = Walk {
+                    line,
+                    merge: (TOLERANCE * TOLERANCE * 0.5)
+                        .min(width * width * 0.05)
+                        .max(1e-8),
+                    total: 0.0,
+                    arc: (0, 0.0),
+                };
+                walk.total = walk.arc(line.ends - usize::from(!close));
+                let mut sink = Sink::new(&mut self.vertices, &mut self.indices, piece, Some(walk));
+                let result = self.stroke.tessellate_with_ids(
+                    line.events()?,
+                    &line,
+                    None,
                     &options,
                     &mut sink,
                 );
@@ -257,15 +313,17 @@ impl Mesh {
         let options = FillOptions::default()
             .with_fill_rule(FillRule::NonZero)
             .with_tolerance(TOLERANCE);
-        let mut sink = Sink::new(&mut self.vertices, &mut self.indices, piece, 0.0);
-        let result = self
-            .fill
-            .tessellate(events(points, Contour::Closed), &options, &mut sink);
+        let mut sink = Sink::new(&mut self.vertices, &mut self.indices, piece, None);
+        let result = self.fill.tessellate(events(points), &options, &mut sink);
         finished(&result, &sink)
     }
 
-    /// The band between a rect's outline and its inset, a quad per outline edge, revealed
-    /// along the outer outline from the right end of the top edge, as main's border sector is.
+    /// The band between a rect's outline and its inset, a quad of its own per outline edge,
+    /// revealed along the outer outline from the right end of the top edge as main's border
+    /// sector is: its cut joins the same fraction of the outer and the inner edge. The inner
+    /// edge is parallel to the outer one, so that fraction is a ratio of two quantities linear
+    /// across the quad, carried as `reveal` and `weight`; a corner the inset collapses has an
+    /// inner edge of length 0 and weight 0, and every cut there meets at the inner corner.
     fn ring(&mut self, outer: Rounded, inner: Rounded, color: Color) -> Result<(), Failure> {
         let piece = self.piece(Piece {
             color,
@@ -273,35 +331,44 @@ impl Mesh {
             revealed: true,
         })?;
         let points = outer.len();
-        let base = self.vertices.len();
-        if base + 2 * (points + 1) > MESH_VERTICES || self.indices.len() + 6 * points > MESH_INDICES
+        if self.vertices.len() + 4 * points > MESH_VERTICES
+            || self.indices.len() + 6 * points > MESH_INDICES
         {
             return Err(Failure::Build);
         }
-        let edge = |at: usize| length(outer.at(at % points), outer.at((at + 1) % points));
+        let edge = |at: usize| length(outer.at(at), outer.at((at + 1) % points));
         let total: f64 = (0..points).map(edge).sum();
         let mut along = 0.0;
-        for at in 0..=points {
-            let reveal = if total > 0.0 {
-                narrow(along / total)
-            } else {
-                0.0
-            };
-            for corner in [outer.at(at % points), inner.at(at % points)] {
+        for at in 0..points {
+            let next = (at + 1) % points;
+            let span = edge(at);
+            let [a, b, c, d] = [outer.at(at), outer.at(next), inner.at(at), inner.at(next)];
+            let outward = [b[0] - a[0], b[1] - a[1]];
+            let square = outward[0] * outward[0] + outward[1] * outward[1];
+            if span <= 0.0 || square <= 0.0 {
+                continue;
+            }
+            let weight =
+                ((outward[0] * (d[0] - c[0]) + outward[1] * (d[1] - c[1])) / square).max(0.0);
+            let [start, end] = [along, along + span].map(|at| narrow(at / total));
+            let base = index(self.vertices.len())?;
+            for (corner, reveal, weight) in [
+                (a, start, 1.0),
+                (b, end, 1.0),
+                (d, end * weight, weight),
+                (c, start * weight, weight),
+            ] {
                 self.vertices.push(Vertex {
                     at: corner,
                     along: 0.0,
                     reveal,
+                    weight,
                     piece,
                 });
             }
-            along += edge(at);
-        }
-        for at in 0..points {
-            let [o, i, next_o, next_i] = [0, 1, 2, 3].map(|offset| base + 2 * at + offset);
-            for corner in [o, next_o, next_i, o, next_i, i] {
-                self.indices.push(index(corner)?);
-            }
+            self.indices
+                .extend([0, 1, 2, 0, 2, 3].map(|corner| base + corner));
+            along += span;
         }
         Ok(())
     }
@@ -343,11 +410,101 @@ fn finished(result: &TessellationResult, sink: &Sink<'_>) -> Result<(), Failure>
     Ok(())
 }
 
-/// Whether a polyline's last point joins its first.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Contour {
-    Open,
-    Closed,
+/// A stroke's source points as lyon endpoints. A closed line of two points goes out and back as
+/// two open lines, so its return leg keeps its own distance and full width: endpoint 2 is the
+/// first point again.
+#[derive(Clone, Copy)]
+struct Polyline<'a> {
+    points: &'a [[f32; 2]],
+    /// Endpoints, the return one included.
+    ends: usize,
+    /// Whether lyon closes it, joining the last point to the first.
+    close: bool,
+}
+
+impl Polyline<'_> {
+    fn at(self, id: usize) -> [f32; 2] {
+        self.points[id % self.points.len()]
+    }
+
+    fn events(self) -> Result<impl Iterator<Item = IdEvent>, Failure> {
+        let ends = index(self.ends)?;
+        let back = self.ends > self.points.len();
+        let run = |first: u32, last: u32, close: bool| {
+            std::iter::once(IdEvent::Begin {
+                at: EndpointId(first),
+            })
+            .chain((first + 1..=last).map(|to| IdEvent::Line {
+                from: EndpointId(to - 1),
+                to: EndpointId(to),
+            }))
+            .chain(std::iter::once(IdEvent::End {
+                last: EndpointId(last),
+                first: EndpointId(first),
+                close,
+            }))
+        };
+        let out = run(0, if back { 1 } else { ends - 1 }, self.close);
+        Ok(out.chain(back.then(|| run(1, 2, false)).into_iter().flatten()))
+    }
+}
+
+impl PositionStore for Polyline<'_> {
+    fn get_endpoint(&self, id: EndpointId) -> Point {
+        let [x, y] = self.at(id.to_usize());
+        point(x, y)
+    }
+
+    fn get_control_point(&self, _: ControlPointId) -> Point {
+        self.get_endpoint(EndpointId(0))
+    }
+}
+
+/// A stroke's distances along its source points, for the vertices lyon emits at them.
+struct Walk<'a> {
+    line: Polyline<'a>,
+    /// lyon's squared merge distance: a point this close to the last one kept is dropped.
+    merge: f32,
+    /// The source length, closing edge included.
+    total: f64,
+    /// The last distance asked for, `(endpoint, distance)`, so a walk in order sums each edge once.
+    arc: (usize, f64),
+}
+
+impl Walk<'_> {
+    /// The distance of a vertex at endpoint `id`. A run of points lyon merged into `id` takes
+    /// the run's last distance, as main's walk reaches it, and lyon's closing join at the first
+    /// point is past the whole length, which its own advancement tells apart from the start.
+    fn along(&mut self, id: usize, advancement: f32) -> f64 {
+        if self.line.close && id == 0 && advancement > 0.0 {
+            return self.total;
+        }
+        let kept = self.line.at(id);
+        let mut last = id;
+        while last + 1 < self.line.ends {
+            let [x, y] = self.line.at(last + 1);
+            let [dx, dy] = [kept[0] - x, kept[1] - y];
+            if dx * dx + dy * dy >= self.merge {
+                break;
+            }
+            last += 1;
+        }
+        self.arc(last)
+    }
+
+    fn arc(&mut self, to: usize) -> f64 {
+        if to < self.arc.0 {
+            self.arc = (0, 0.0);
+        }
+        while self.arc.0 < to {
+            let from = self.arc.0;
+            self.arc = (
+                from + 1,
+                self.arc.1 + length(self.line.at(from), self.line.at(from + 1)),
+            );
+        }
+        self.arc.1
+    }
 }
 
 /// A rounded rectangle's outline, clockwise from the right end of the top edge: four corners
@@ -398,8 +555,8 @@ struct Sink<'a> {
     vertices: &'a mut Vec<Vertex>,
     indices: &'a mut Vec<u32>,
     piece: u32,
-    /// The stroke's whole length, which reveal divides; 0 for a fill.
-    length: f64,
+    /// A stroke's distances; none for a fill.
+    walk: Option<Walk<'a>>,
     mark: [usize; 2],
     full: bool,
 }
@@ -409,34 +566,34 @@ impl<'a> Sink<'a> {
         vertices: &'a mut Vec<Vertex>,
         indices: &'a mut Vec<u32>,
         piece: u32,
-        length: f64,
+        walk: Option<Walk<'a>>,
     ) -> Self {
         let mark = [vertices.len(), indices.len()];
         Self {
             vertices,
             indices,
             piece,
-            length,
+            walk,
             mark,
             full: false,
         }
     }
 
-    fn vertex(&mut self, at: [f32; 2], along: f32) -> Result<VertexId, GeometryBuilderError> {
+    fn vertex(&mut self, at: [f32; 2], along: f64) -> Result<VertexId, GeometryBuilderError> {
         if self.vertices.len() >= MESH_VERTICES {
             return Err(GeometryBuilderError::TooManyVertices);
         }
         let id = u32::try_from(self.vertices.len())
             .map_err(|_| GeometryBuilderError::TooManyVertices)?;
-        let reveal = if self.length > 0.0 {
-            narrow(f64::from(along) / self.length)
-        } else {
-            0.0
+        let reveal = match &self.walk {
+            Some(walk) if walk.total > 0.0 => narrow(along / walk.total),
+            _ => 0.0,
         };
         self.vertices.push(Vertex {
             at,
-            along,
+            along: narrow(along),
             reveal,
+            weight: 1.0,
             piece: self.piece,
         });
         Ok(VertexId(id))
@@ -476,16 +633,19 @@ impl StrokeGeometryBuilder for Sink<'_> {
         &mut self,
         vertex: StrokeVertex<'_, '_>,
     ) -> Result<VertexId, GeometryBuilderError> {
-        self.vertex(vertex.position().to_array(), vertex.advancement())
+        let id = match vertex.source() {
+            VertexSource::Endpoint { id } | VertexSource::Edge { from: id, .. } => id,
+        };
+        let along = match &mut self.walk {
+            Some(walk) => walk.along(id.to_usize(), vertex.advancement()),
+            None => 0.0,
+        };
+        self.vertex(vertex.position().to_array(), along)
     }
 }
 
-/// A polyline as lyon path events without allocating, closed or open.
-fn events(
-    points: impl Iterator<Item = [f32; 2]> + Clone,
-    contour: Contour,
-) -> impl Iterator<Item = PathEvent> {
-    let close = contour == Contour::Closed;
+/// A closed polygon as lyon path events without allocating.
+fn events(points: impl Iterator<Item = [f32; 2]> + Clone) -> impl Iterator<Item = PathEvent> {
     let points = points.map(|[x, y]| point(x, y));
     let first = points.clone().next();
     let last = points.clone().last();
@@ -499,11 +659,11 @@ fn events(
         .map(|at| PathEvent::Begin { at })
         .into_iter()
         .chain(lines)
-        .chain(
-            first
-                .zip(last)
-                .map(move |(first, last)| PathEvent::End { first, last, close }),
-        )
+        .chain(first.zip(last).map(|(first, last)| PathEvent::End {
+            first,
+            last,
+            close: true,
+        }))
 }
 
 fn length(a: [f32; 2], b: [f32; 2]) -> f64 {

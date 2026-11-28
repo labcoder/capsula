@@ -1,5 +1,5 @@
-//! Views built through the scene crate's own admission, preparation and activation from step
-//! records, shared by the tests and the benchmark.
+//! Views built through the scene crate's own admission, preparation under the presenter's
+//! paint cap and activation from step records, shared by the tests and the benchmark.
 
 use std::{
     fmt::Write as _,
@@ -8,7 +8,7 @@ use std::{
 
 use kumochi_scene::{
     Admission, Frame, GlobalBudget, Record, SceneState, SceneView,
-    display::{MeasureError, TextMeasure, TextStyle},
+    display::{MeasureError, PaintWork, TextMeasure, TextStyle},
     layout::{LayoutState, PrepareInput, SurfaceGeometry, prepare},
     motion::synthetic_duration_ms,
     parse_record,
@@ -56,7 +56,8 @@ pub(crate) fn view(name: &str, steps: &[String], budget: &mut GlobalBudget) -> S
             SurfaceGeometry::default(),
             Arc::new(Theme::default()),
         )
-        .expect("consecutive preparation");
+        .expect("consecutive preparation")
+        .with_paint_cap(Some(PaintWork::LIMITS));
         let prepared = prepare(input, &mut Measure, &AtomicBool::new(false)).expect("prepared");
         let segment = synthetic_duration_ms(prepared.step().say.as_ref());
         view.activate(prepared, 0, segment, &mut Frame::new())
@@ -92,6 +93,26 @@ pub(crate) fn squares(count: usize) -> Vec<String> {
             format!(r#"{{"id":"squares{start}","put":[{}]}}"#, put.join(","))
         })
         .collect()
+}
+
+/// Fills at the fill-vertex cap: a 512-point comb of 255 teeth, the most spans one fill can
+/// have, and a {512/3} star, whose 512 edges each cross four others, nonzero: 512 + 512 + 1,024.
+pub(crate) fn fills() -> String {
+    let mut comb = String::from("[0,0],[1020,0]");
+    for at in 0..510_u16 {
+        let y = if at % 2 == 0 { 100 } else { 10 };
+        write!(comb, ",[{},{y}]", 1020 - at * 2).expect("writing to a string");
+    }
+    let mut star = String::new();
+    for at in 0..512_u32 {
+        let angle = f64::from(at * 3 % 512) * std::f64::consts::TAU / 512.0;
+        let (x, y) = (1500.0 + 250.0 * angle.cos(), 300.0 + 250.0 * angle.sin());
+        let comma = if at == 0 { "" } else { "," };
+        write!(star, "{comma}[{x:.3},{y:.3}]").expect("writing to a string");
+    }
+    format!(
+        r#"{{"id":"fills","put":[{{"shape":{{"id":"comb","kind":"polygon","fill":"green","width":0,"points":[{comb}]}}}},{{"shape":{{"id":"star","kind":"polygon","fill":"green","width":0,"points":[{star}]}}}}]}}"#
+    )
 }
 
 /// Geometry at the global paint caps: 2,048 fill points in four 512-point polygons, 756

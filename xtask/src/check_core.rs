@@ -57,13 +57,17 @@ const RENDER_DEPENDENCIES: [&str; 5] = [
 const GPU: [&str; 6] = ["ash", "d3d12", "glow", "metal", "naga", "wgpu"];
 
 /// Paths the renderer's stage side may not name: the scene and the presenter, directly or
-/// through the owner side's modules.
+/// through the owner side's modules. This reads spellings, so it is a lint that catches a
+/// slip, not a proof of the boundary.
 const STAGE_FORBIDDEN: [&str; 4] = [
     "kumochi_scene",
     "kumochi_shell_core",
     "crate::",
     "super::super",
 ];
+/// The same for `stage.rs` itself, whose parent is the owner side: no `super::` path at all.
+const STAGE_TOP_FORBIDDEN: [&str; 4] =
+    ["kumochi_scene", "kumochi_shell_core", "crate::", "super::"];
 /// The crate paths the stage side may name: itself and the reserved sizes.
 const STAGE_ALLOWED: [&str; 2] = ["crate::stage", "crate::limits"];
 
@@ -181,7 +185,14 @@ fn render(root: &Path) -> Result<()> {
     for file in &files {
         let source =
             fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
-        for line in stage_faults(&source) {
+        for line in stage_faults(
+            &source,
+            if file == &files[0] {
+                &STAGE_TOP_FORBIDDEN
+            } else {
+                &STAGE_FORBIDDEN
+            },
+        ) {
             faults.push(format!("{}:{line}", file.display()));
         }
     }
@@ -201,8 +212,8 @@ fn names_gpu(line: &str) -> bool {
     crate_name(line).is_some_and(|name| GPU.contains(&name) || name.starts_with("wgpu-"))
 }
 
-/// The lines, counted from 1, where stage-side source names a forbidden path.
-fn stage_faults(source: &str) -> Vec<usize> {
+/// The lines, counted from 1, where stage-side source names one of the `forbidden` paths.
+fn stage_faults(source: &str, forbidden: &[&str]) -> Vec<usize> {
     source
         .lines()
         .enumerate()
@@ -211,7 +222,7 @@ fn stage_faults(source: &str) -> Vec<usize> {
             for allowed in STAGE_ALLOWED {
                 line = line.replace(allowed, "");
             }
-            STAGE_FORBIDDEN.iter().any(|path| line.contains(path))
+            forbidden.iter().any(|path| line.contains(path))
         })
         .map(|(index, _)| index + 1)
         .collect()
@@ -498,8 +509,8 @@ fn item(line: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        LINT, MIXED, STATEMENT, SWITCH, UNCLOSED, carries_test_support, crate_name, gate_faults,
-        names_framework, names_gpu, stage_faults,
+        LINT, MIXED, STAGE_FORBIDDEN, STAGE_TOP_FORBIDDEN, STATEMENT, SWITCH, UNCLOSED,
+        carries_test_support, crate_name, gate_faults, names_framework, names_gpu, stage_faults,
     };
 
     #[test]
@@ -520,7 +531,9 @@ mod tests {
                       use kumochi_protocol::message::SceneId;\nuse kumochi_scene::Frame;\n\
                       use crate::cache::RenderCache;\nuse super::super::input::color;\n\
                       fn f(x: kumochi_shell_core::presenter::Stage) {}\n";
-        assert_eq!(stage_faults(source), [4, 5, 6, 7]);
+        assert_eq!(stage_faults(source, &STAGE_FORBIDDEN), [4, 5, 6, 7]);
+        assert_eq!(stage_faults(source, &STAGE_TOP_FORBIDDEN), [1, 4, 5, 6, 7]);
+        assert!(stage_faults("use super::input;\n", &STAGE_FORBIDDEN).is_empty());
     }
 
     #[test]

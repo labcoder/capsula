@@ -1,6 +1,6 @@
-//! The stage side: what a stage thread holds and reads. Nothing here names a scene or
-//! presenter type (`cargo xtask check-core` holds that), so a [`BuildInput`] copy is the only
-//! way geometry reaches it.
+//! The stage side: what a stage thread holds and reads. A [`BuildInput`] batch is the only way
+//! geometry reaches it. `cargo xtask check-core` lints these files for paths to the scene,
+//! the presenter or the rest of the crate; it reads spellings, so it is a lint, not a proof.
 
 mod frame;
 mod input;
@@ -9,12 +9,26 @@ mod mesh;
 use std::fmt;
 
 pub use frame::{FrameBuf, Picture, Record};
-pub use input::{Align, BuildInput, Object, Shape, Span};
+pub use input::{Align, BuildInput, Object, Part, Shape, Span};
 pub use mesh::{Mesh, Piece, Vertex};
 
 /// One staged view's geometry, numbered by the stager that staged it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GeometryId(pub(crate) u64);
+
+/// Where a view's copy stopped: the first primitive a batch didn't take.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cursor {
+    /// The object's index in its geometry's sorted objects.
+    pub object: u32,
+    /// The primitive's index in that object.
+    pub prim: u32,
+}
+
+impl Cursor {
+    /// A view's first primitive.
+    pub const START: Self = Self { object: 0, prim: 0 };
+}
 
 /// A resolved colour: packed RGB and its own opacity.
 #[derive(Clone, Copy, PartialEq)]
@@ -41,6 +55,9 @@ pub enum Failure {
     /// The geometry doesn't fit its reserved buffers, or lyon refused it.
     #[error("a drawing's geometry doesn't fit its reserved buffers")]
     Build,
+    /// A batch isn't the next part of the geometry the mesh is building.
+    #[error("a drawing's batch arrived out of order")]
+    Order,
 }
 
 /// Appends `value` while `buffer` holds fewer than `cap`, so a reserved buffer never grows.

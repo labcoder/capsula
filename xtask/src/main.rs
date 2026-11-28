@@ -147,7 +147,8 @@ tasks:
                     any product process runs
   check-core        fail if kumochi-shell-core has a dependency that is not on its list, a UI
                     framework in its tree, its test support in a shipped binary, or a test
-                    gate the shell's tests could miss; CI runs it to hold the crate boundary
+                    gate the shell's tests could miss; CI runs it to hold the crate boundary.
+                    It also lints kumochi-render's stage side
   check-platform-cfg [--list | --base <commit>]
                     refuse new plain OS cfg gates outside product platform modules
   check-vendor      fail unless every crate in vendor/ is what Cargo.lock builds;

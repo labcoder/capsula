@@ -1,5 +1,5 @@
-//! Standalone timing workloads for the renderer. Measure one at a time on the quiet host:
-//! `cargo bench -p kumochi-render --bench render-workloads -- <workload>`.
+//! Standalone timing workloads for the renderer. Build them with `cargo bench --no-run` and run
+//! the printed executable with one workload name, one at a time on an otherwise idle machine.
 #![expect(
     clippy::print_stdout,
     clippy::print_stderr,
@@ -13,7 +13,7 @@ use std::{
 };
 
 use kumochi_protocol::message::SceneId;
-use kumochi_render::{BuildInput, FrameBuf, Mesh, RenderCache, Stager, record};
+use kumochi_render::{BuildInput, Cursor, FrameBuf, Mesh, RenderCache, Stager, record};
 use kumochi_scene::GlobalBudget;
 use kumochi_shell_core::presenter::{SceneCache, Stage};
 
@@ -35,6 +35,7 @@ mod fixture;
 fn main() -> ExitCode {
     dispatch::run(&[
         ("mesh_at_limits", mesh_at_limits),
+        ("copy_labels", copy_labels),
         ("record_frame", record_frame),
     ])
 }
@@ -72,11 +73,15 @@ fn mesh_at_limits() {
     for run in 0..72 {
         input.wipe();
         let timer = Instant::now();
-        input.add(black_box(cache)).expect("the view fits");
+        let rest = input
+            .add(black_box(cache), Cursor::START)
+            .expect("the view copies");
+        assert_eq!(rest, None, "the view fits one batch");
         let copy = timer.elapsed();
         let timer = Instant::now();
-        mesh.build(black_box(&input), cache.id())
-            .expect("the view builds");
+        mesh.begin(cache.id());
+        mesh.extend(black_box(&input)).expect("the view builds");
+        mesh.finish().expect("in one batch");
         let build = timer.elapsed();
         if run >= 8 {
             copies.push(copy);
@@ -93,11 +98,36 @@ fn mesh_at_limits() {
     report("mesh-at-limits", &mut builds, &counts);
 }
 
+/// The owner's copy of a view whose labels pass one batch: thirteen tables at the cell cap,
+/// about 1.6 MB of number text, copied batch by batch with a wipe after each.
+fn copy_labels() {
+    let view = fixture::view("tables", &fixture::tables(), &mut GlobalBudget::default());
+    let boxed = Stager::new().stage(&view);
+    let cache = render(&*boxed);
+    let mut input = BuildInput::new();
+    let mut samples = Vec::with_capacity(64);
+    let mut batches = 0;
+    for run in 0..72 {
+        batches = 0;
+        let timer = Instant::now();
+        let mut from = Some(Cursor::START);
+        while let Some(at) = from {
+            from = input.add(black_box(cache), at).expect("each batch copies");
+            input.wipe();
+            batches += 1;
+        }
+        if run >= 8 {
+            samples.push(timer.elapsed());
+        }
+    }
+    report("copy-labels", &mut samples, &format!("batches={batches}"));
+}
+
 /// Writing one frame's records for four views at the global object cap.
 fn record_frame() {
     let mut budget = GlobalBudget::default();
     let stager = Stager::new();
-    let views: Vec<_> = [600, 600, 150, 150]
+    let views: Vec<_> = [500, 500, 250, 250]
         .into_iter()
         .enumerate()
         .map(|(n, count)| fixture::view(&format!("v{n}"), &fixture::squares(count), &mut budget))

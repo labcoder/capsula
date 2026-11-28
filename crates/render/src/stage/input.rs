@@ -1,11 +1,12 @@
-//! The build input: one or more views' primitive headers, points and label text, copied by
-//! the owner into one buffer reserved for the format's global caps. It holds no reference to
-//! scene memory, and [`BuildInput::wipe`] overwrites the text once it has been used.
+//! The build input: one batch of primitive headers, points and label text from one or more
+//! views, copied by the owner into buffers reserved once. A view too large for one batch
+//! copies in several, each primitive whole. It holds no reference to scene memory, and
+//! [`BuildInput::wipe`] overwrites the text once it has been used.
 
 use std::fmt;
 
-use super::{Color, Failure, GeometryId, index, push};
-use crate::limits::{INPUT_OBJECTS, INPUT_POINTS, INPUT_PRIMS, INPUT_TEXT_BYTES, PICTURES};
+use super::{Color, Cursor, Failure, GeometryId, index, push};
+use crate::limits::{BATCH_TEXT_BYTES, INPUT_OBJECTS, INPUT_POINTS, INPUT_PRIMS, PICTURES};
 
 /// A run of points or text bytes in the input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,7 +17,7 @@ pub struct Span {
     pub len: u32,
 }
 
-/// One object: its run of shapes.
+/// One object's run of shapes in a batch: all of them, or those this batch took.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Object {
     /// Its first shape in the input.
@@ -106,8 +107,22 @@ impl fmt::Debug for Shape {
 #[derive(Clone, Copy)]
 struct View {
     id: GeometryId,
+    from: Cursor,
+    to: Option<Cursor>,
     first: u32,
     count: u32,
+}
+
+/// One view's part of a batch: where it starts and stops, and its objects' shapes. When `from`
+/// is partway through an object, the first object continues it.
+#[derive(Debug, Clone, Copy)]
+pub struct Part<'a> {
+    /// The view's first primitive in this batch.
+    pub from: Cursor,
+    /// The first primitive a later batch holds; none once the view is whole.
+    pub to: Option<Cursor>,
+    /// Its objects, in order.
+    pub objects: &'a [Object],
 }
 
 /// How full each part of the input is, to put it back after a copy that didn't fit.
@@ -120,7 +135,7 @@ pub(crate) struct Mark {
     text: usize,
 }
 
-/// One or more views' build input in buffers reserved once for the format's global caps.
+/// One batch of build input in buffers reserved once.
 pub struct BuildInput {
     views: Vec<View>,
     objects: Vec<Object>,
@@ -137,7 +152,7 @@ impl BuildInput {
         + INPUT_OBJECTS * size_of::<Object>()
         + INPUT_PRIMS * size_of::<Shape>()
         + INPUT_POINTS * size_of::<[f32; 2]>()
-        + INPUT_TEXT_BYTES;
+        + BATCH_TEXT_BYTES;
 
     /// Reserves every buffer at its cap.
     pub fn new() -> Self {
@@ -146,17 +161,21 @@ impl BuildInput {
             objects: Vec::with_capacity(INPUT_OBJECTS),
             shapes: Vec::with_capacity(INPUT_PRIMS),
             points: Vec::with_capacity(INPUT_POINTS),
-            text: vec![0; INPUT_TEXT_BYTES].into_boxed_slice(),
+            text: vec![0; BATCH_TEXT_BYTES].into_boxed_slice(),
             text_len: 0,
         }
     }
 
-    /// The objects of the view staged as `id`, if this input holds it.
-    pub fn objects(&self, id: GeometryId) -> Option<&[Object]> {
+    /// The part of the view staged as `id` this batch holds, if any.
+    pub fn part(&self, id: GeometryId) -> Option<Part<'_>> {
         let view = self.views.iter().find(|view| view.id == id)?;
         let first = usize::try_from(view.first).ok()?;
         let count = usize::try_from(view.count).ok()?;
-        self.objects.get(first..first + count)
+        Some(Part {
+            from: view.from,
+            to: view.to,
+            objects: self.objects.get(first..first + count)?,
+        })
     }
 
     /// An object's shapes, in primitive order.
@@ -212,25 +231,47 @@ impl BuildInput {
         self.views.truncate(mark.views);
     }
 
-    /// Starts a view; the objects pushed next are its own.
-    pub(crate) fn begin(&mut self, id: GeometryId) -> Result<(), Failure> {
+    /// Whether the batch holds nothing yet.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.views.is_empty()
+    }
+
+    /// Whether one more shape with `points` points and `text` label bytes fits, with `objects`
+    /// new object entries, 0 or 1.
+    pub(crate) fn fits(&self, points: usize, text: usize, objects: usize) -> bool {
+        self.shapes.len() < INPUT_PRIMS
+            && points <= INPUT_POINTS - self.points.len()
+            && text <= BATCH_TEXT_BYTES - self.text_len
+            && objects <= INPUT_OBJECTS - self.objects.len()
+    }
+
+    /// Starts a view's part at `from`; the objects pushed next are its own.
+    pub(crate) fn begin(&mut self, id: GeometryId, from: Cursor) -> Result<(), Failure> {
         let first = index(self.objects.len())?;
         push(
             &mut self.views,
             PICTURES,
             View {
                 id,
+                from,
+                to: None,
                 first,
                 count: 0,
             },
         )
     }
 
-    /// Starts an object of the current view with `count` shapes to follow.
-    pub(crate) fn object(&mut self, count: usize) -> Result<(), Failure> {
+    /// Ends the current part where the next batch must start, or as the view's last.
+    pub(crate) fn end(&mut self, to: Option<Cursor>) -> Result<(), Failure> {
+        self.views.last_mut().ok_or(Failure::Build)?.to = to;
+        Ok(())
+    }
+
+    /// Starts an object of the current part; the shapes pushed next are its own.
+    pub(crate) fn object(&mut self) -> Result<(), Failure> {
         let object = Object {
             first: index(self.shapes.len())?,
-            count: index(count)?,
+            count: 0,
         };
         push(&mut self.objects, INPUT_OBJECTS, object)?;
         let view = self.views.last_mut().ok_or(Failure::Build)?;
@@ -239,7 +280,9 @@ impl BuildInput {
     }
 
     pub(crate) fn shape(&mut self, shape: Shape) -> Result<(), Failure> {
-        push(&mut self.shapes, INPUT_PRIMS, shape)
+        push(&mut self.shapes, INPUT_PRIMS, shape)?;
+        self.objects.last_mut().ok_or(Failure::Build)?.count += 1;
+        Ok(())
     }
 
     pub(crate) fn push_points(
