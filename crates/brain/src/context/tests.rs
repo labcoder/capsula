@@ -2642,3 +2642,51 @@ fn a_route_without_screen_pictures_is_sent_no_screen_scene() {
         }
     }
 }
+
+/// Grouping checks the read's control at each run, so a cancelled or expired read stops it
+/// with that read's error, while the same history groups under a live one; a run that comes
+/// back after another is a bad cut.
+#[test]
+fn grouping_runs_stops_once_its_read_is_cancelled_or_out_of_time() {
+    use std::time::{Duration, Instant};
+
+    use crate::recall::control::Control;
+
+    let mut conn = Connection::open_in_memory().expect("memory");
+    let mut group = |control: &Control, order: &[u64]| {
+        control
+            .with_handler(&mut conn, |conn, scope| {
+                let snapshot = Snapshot::begin(conn)
+                    .expect("snapshot")
+                    .controlled(scope.clone());
+                let items = (1..)
+                    .zip(order)
+                    .map(|(id, &run)| Item {
+                        id: EventId(id),
+                        run: RunId(run),
+                        body: Body::User("hi".to_owned()),
+                    })
+                    .collect();
+                super::build::runs(&snapshot, items, RunId(3)).map(|runs| runs.len())
+            })
+            .expect("handler")
+    };
+    let live = Control::new(Instant::now() + Duration::from_secs(60));
+    assert!(matches!(group(&live, &[1, 2, 3]), Ok(3)));
+    assert!(matches!(
+        group(&live, &[1, 2, 1, 3]),
+        Err(BuildError::InvalidCut)
+    ));
+    let cancelled = live.child();
+    cancelled.cancel();
+    assert!(matches!(
+        group(&cancelled, &[1, 2, 3]),
+        Err(BuildError::Store(StoreError::Closed))
+    ));
+    let late = Control::new(Instant::now() + Duration::from_secs(60));
+    *late.test.time.lock().expect("clock") = Some(late.end);
+    assert!(matches!(
+        group(&late, &[1, 2, 3]),
+        Err(BuildError::Store(StoreError::RecallBudget))
+    ));
+}

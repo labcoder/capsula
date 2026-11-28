@@ -153,6 +153,16 @@ impl<'a> Snapshot<'a> {
     pub(crate) fn tuning(&self) -> ContextTuning {
         self.2
     }
+
+    /// Fails once the read this snapshot belongs to is cancelled or past its deadline.
+    ///
+    /// # Errors
+    /// [`StoreError::Closed`] after a cancel, [`StoreError::RecallBudget`] past the deadline.
+    pub(crate) fn check(&self) -> Result<(), StoreError> {
+        self.1
+            .as_ref()
+            .map_or(Ok(()), |scope| scope.check().map_err(StoreError::from))
+    }
 }
 
 impl Snapshot<'_> {

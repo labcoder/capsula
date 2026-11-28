@@ -30,6 +30,7 @@ fn lifecycle_replacement_preserves_the_end_and_stop_cancels_before_store_ack() {
         .0
         .clone();
     let mut effects = Vec::new();
+    eprintln!("DIGEST {:?}", core.drawing.digest(T).as_str());
     core.build(R, 2, &mut effects);
     let second = core
         .current
@@ -344,4 +345,97 @@ fn a_stopped_run_takes_no_build_result() {
     })
     .expect("current");
     assert_eq!(core.handle(built(R, 1, &[T])), Err(Stale));
+}
+
+/// A build already bound to a local route gathers no drawings, picture models or key results,
+/// which that route never sends, while the same build bound to `ChatGPT` gathers all three.
+#[test]
+fn a_known_local_build_gathers_nothing_a_local_route_never_sends() {
+    use std::sync::Arc;
+
+    use kumochi_protocol::message::{ConnectionKind, ModelSlug, RunId};
+
+    use crate::coordinator::{Availability, PictureRoutes, Ready};
+    use crate::dispatch::ToolOutput;
+    use crate::drawing::{Reply, Target, Write};
+    use crate::engines::CallId;
+    use crate::store::{RunEnd, Store};
+    use crate::test_support::Scratch;
+
+    for (kind, gathers) in [
+        (ConnectionKind::ChatGpt, true),
+        (ConnectionKind::LocalChat, false),
+    ] {
+        let scratch = Scratch::new("admission-local-gathers");
+        let mut store = Store::open(&scratch.db()).expect("store");
+        store.recover().expect("recover");
+        store.main_thread().expect("main");
+        store.begin_turn(T, Some("test"), R, "turn").expect("run");
+        let header = serde_json::from_value(serde_json::json!({"begin":{"v":1,"scene":"car","surface":"overlay","alt":"a car"},"layout_version":2})).expect("header");
+        let step =
+            serde_json::from_value(serde_json::json!({"id":"s1","put":[{"view3d":{"id":"v"}},
+            {"solid":{"in":"v","id":"a","shape":"box","size":[2,2,2]}}]}))
+            .expect("typed step");
+        let written = store
+            .drawing_write(&Write::Step {
+                thread: T,
+                run: R,
+                clear: Vec::new(),
+                target: Target::New(header),
+                revision: 1,
+                layout_version: 2,
+                step: Arc::new(step),
+                protected: false,
+            })
+            .expect("first step");
+        assert!(matches!(written, Reply::Step(_)));
+        store.end_run(T, R, &[], RunEnd::Done).expect("outcome");
+        let mut core = Coordinator::ready_for_tests(MAIN, T, R, Vec::new());
+        assert_eq!(core.restore_drawings(store.drawing_scenes()), Vec::new());
+        core.set_pictures(PictureRoutes::new(true, true));
+        core.handle(Input::Engines(
+            ConnectionKind::ChatGpt,
+            Availability::Ready(Ready {
+                images: vec![ModelSlug::new("m").expect("slug")],
+                ..Ready::fixture()
+            }),
+        ))
+        .expect("never stale");
+        let run = RunId(R.0 + 1);
+        core.handle(Input::Turn {
+            turn: 1,
+            thread: Some(T),
+            text: "more".into(),
+        })
+        .expect("a turn is never stale");
+        super::admit(&mut core, run);
+        let current = core.current.as_mut().expect("running");
+        current.snapshot = Some(RunSnapshot {
+            origin: Origin::Task(T),
+            assistant: AssistantName::new("Kumo").expect("name"),
+            user: None,
+            choice: Some(super::routes::choice(kind, "m")),
+            connection: ConnectionTag(0),
+        });
+        current.route = Some(crate::context::Route {
+            kind,
+            tag: ConnectionTag(0),
+        });
+        current.tools.key_results = vec![(
+            CallId::new("call-1").expect("id"),
+            ToolOutput::Text("seen".to_owned()),
+        )];
+        let mut effects = Vec::new();
+        core.build(run, 2, &mut effects);
+        let [Effect::Store(StoreOp::BuildContext(context))] = effects.as_slice() else {
+            panic!("one build: {effects:?}");
+        };
+        assert_eq!(
+            context.drawings != crate::drawing::Digest::default(),
+            gathers,
+            "{kind:?}"
+        );
+        assert_eq!(!context.picture_models.is_empty(), gathers, "{kind:?}");
+        assert_eq!(!context.key_results.is_empty(), gathers, "{kind:?}");
+    }
 }

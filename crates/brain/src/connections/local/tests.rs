@@ -430,3 +430,37 @@ async fn stopping_a_round_closes_its_connection_after_its_request_was_written() 
     assert!(join(server).await, "the server sees the close");
     assert!(wrote.load(Ordering::SeqCst));
 }
+
+/// A read already in hand whose text is parsed only after the round's deadline ends the round
+/// by that deadline, though the text completed its answer and was handed out.
+#[tokio::test]
+async fn text_parsed_past_the_deadline_ends_the_round_by_it() {
+    let (listener, endpoint) = listener().await;
+    let head = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n",
+        TEXT.len()
+    );
+    let server = serve(listener, [head.as_bytes(), TEXT].concat());
+    let deadline = BOUND / 4;
+    let past = std::time::Instant::now() + deadline + Duration::from_millis(100);
+    let mut text = String::new();
+    let ended = stream_by(
+        endpoint,
+        &body(),
+        async { Some(()) },
+        &Budget::default(),
+        |delta: &str| {
+            if text.is_empty() {
+                std::thread::sleep(past.saturating_duration_since(std::time::Instant::now()));
+            }
+            text.push_str(delta);
+        },
+        deadline,
+    )
+    .await;
+    assert_eq!(
+        (text.as_str(), ended),
+        ("Hello from loopback.", Err(Failure::Deadline))
+    );
+    join(server).await;
+}

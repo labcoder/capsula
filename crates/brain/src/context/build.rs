@@ -79,7 +79,7 @@ fn assemble(
             .filter(|item| after.is_none_or(|after| item.id > after)),
     );
     items.sort_by_key(|item| item.id);
-    let runs = runs(items, turn.run)?;
+    let runs = runs(snapshot, items, turn.run)?;
     let (current, older) = runs.split_last().ok_or(BuildError::NoTurn)?;
 
     let instructions = instructions(run);
@@ -184,17 +184,24 @@ fn append_drawings(
 }
 
 /// Groups ordered items into whole runs, the current one last. Each call is followed by its
-/// result within its run, and no item repeats.
-pub(super) fn runs(items: Vec<Item>, current: RunId) -> Result<Vec<Vec<Item>>, BuildError> {
+/// result within its run, and no item repeats. Each new run checks `snapshot`'s read control, so
+/// a long history can't hold the reader past its deadline or a cancel.
+pub(super) fn runs(
+    snapshot: &Snapshot<'_>,
+    items: Vec<Item>,
+    current: RunId,
+) -> Result<Vec<Vec<Item>>, BuildError> {
     if items.windows(2).any(|pair| pair[0].id == pair[1].id) {
         return Err(BuildError::InvalidCut);
     }
     let mut runs: Vec<Vec<Item>> = Vec::new();
+    let mut seen = BTreeSet::new();
     for item in items {
         match runs.last_mut() {
             Some(open) if open[0].run == item.run => open.push(item),
             _ => {
-                if runs.iter().any(|done| done[0].run == item.run) {
+                snapshot.check()?;
+                if !seen.insert(item.run) {
                     return Err(BuildError::InvalidCut);
                 }
                 runs.push(vec![item]);
