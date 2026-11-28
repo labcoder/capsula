@@ -1,12 +1,16 @@
 //! `stage-nsh`: a new folder holding a Gate `NativeShell` shell beside a Gate brain, under the
 //! names the brain and the shell admit each other by. See `docs/development/shell-nsh.md`.
 
-use std::fs;
-use std::io::ErrorKind;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, ErrorKind};
+use std::os::windows::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail, ensure};
 use kumochi_protocol::constants::{BRAIN_EXE, NSH_SHELL_EXE, ProductIdentity, SHELL_EXE};
+use windows::Win32::Storage::FileSystem::{
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_READ, FILE_SHARE_WRITE,
+};
 
 use crate::hermetic::{self, BRAIN_ROLE, Profile, SHELL_ROLE};
 
@@ -53,39 +57,60 @@ fn new_folder(mut args: impl Iterator<Item = String>) -> Result<PathBuf> {
     Ok(folder)
 }
 
-/// Creates `folder` and copies the built shell and brain in `images` into it as [`SHELL_EXE`]
-/// and [`BRAIN_EXE`], each copy checked for its role. A failure after the folder exists removes
-/// what this made of it.
+/// Creates `folder`, which must not be there yet, and fills it.
 fn stage(images: &Path, folder: &Path) -> Result<()> {
     fs::create_dir(folder).with_context(|| format!("creating {}", folder.display()))?;
-    let staged = [
+    fill(images, folder)
+}
+
+/// Copies the built shell and brain in `images` into `folder` as [`SHELL_EXE`] and
+/// [`BRAIN_EXE`], each copy checked for its role. A failure removes the copies this made, then
+/// the folder if that left it empty. Anything else in it isn't this task's to delete, so it
+/// stays and the error says the folder is left behind.
+fn fill(images: &Path, folder: &Path) -> Result<()> {
+    copy_pair(images, folder).or_else(|error| {
+        fs::remove_dir(folder)
+            .with_context(|| format!("{error:#}, and {} is left behind", folder.display()))?;
+        Err(error)
+    })
+}
+
+/// The copies, with `folder` held so its path can't be given to another folder meanwhile, and
+/// never over a file that is already there. A failure removes the copies this made.
+fn copy_pair(images: &Path, folder: &Path) -> Result<()> {
+    let _held = hold(folder).with_context(|| format!("holding {}", folder.display()))?;
+    let mut made = Vec::new();
+    let copied = [
         (NSH_SHELL_EXE, SHELL_EXE, SHELL_ROLE),
         (BRAIN_EXE, BRAIN_EXE, BRAIN_ROLE),
     ]
     .into_iter()
     .try_for_each(|(built, name, role)| {
         let copy = folder.join(name);
-        fs::copy(images.join(built), &copy).with_context(|| format!("staging {built}"))?;
+        let staging = || format!("staging {built}");
+        let mut from = File::open(images.join(built)).with_context(staging)?;
+        let mut to = File::create_new(&copy).with_context(staging)?;
+        made.push(copy.clone());
+        io::copy(&mut from, &mut to).with_context(staging)?;
+        drop(to);
         hermetic::require_compatible(&copy, role)
     });
-    staged.or_else(|error| {
-        unstage(folder)
-            .with_context(|| format!("{error:#}, and {} is left behind", folder.display()))?;
+    copied.or_else(|error| {
+        for copy in &made {
+            fs::remove_file(copy)
+                .with_context(|| format!("{error:#}, and {} is left behind", copy.display()))?;
+        }
         Err(error)
     })
 }
 
-/// Removes what [`stage`] made and nothing else: its two copies, then the folder if that left it
-/// empty. Anything else in the folder by then isn't this task's to delete, so it stays and the
-/// removal fails.
-fn unstage(folder: &Path) -> std::io::Result<()> {
-    for name in [SHELL_EXE, BRAIN_EXE] {
-        match fs::remove_file(folder.join(name)) {
-            Err(error) if error.kind() != ErrorKind::NotFound => return Err(error),
-            _ => {}
-        }
-    }
-    fs::remove_dir(folder)
+/// Opens `folder` without sharing delete, so nothing renames or removes it while this is held.
+fn hold(folder: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0)
+        .open(folder)
 }
 
 #[cfg(test)]
@@ -187,24 +212,73 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_failed_stage_removes_its_copies_and_leaves_what_it_didnt_make() {
-        let root = scratch::dir("stage-nsh-unstage");
-        let folder = root.join("staged");
-        fs::create_dir(&folder).expect("the staged folder");
-        fs::write(folder.join(SHELL_EXE), "a copy").expect("copy");
-        fs::write(folder.join("theirs"), "someone else's file").expect("stranger");
-        let error = unstage(&folder).expect_err("the folder isn't empty");
-        assert_eq!(error.kind(), ErrorKind::DirectoryNotEmpty);
-        let names: Vec<_> = fs::read_dir(&folder)
+    /// The names in `folder`, sorted.
+    fn names(folder: &Path) -> Vec<std::ffi::OsString> {
+        let mut names: Vec<_> = fs::read_dir(folder)
             .expect("the folder stays")
             .map(|entry| entry.expect("entry").file_name())
             .collect();
-        assert_eq!(names, ["theirs"]);
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_failed_fill_removes_its_copy_and_leaves_what_it_didnt_make() {
+        let shell = image(SHELL_ROLE, ProductIdentity::GATE);
+        let built = images("stage-nsh-stranger", Some(&shell), None);
+        let folder = scratch::dir("stage-nsh-stranger-out");
+        fs::write(folder.join("theirs"), "someone else's file").expect("stranger");
+        let error = fill(&built, &folder).expect_err("no brain to copy");
+        let said = error.to_string();
+        assert!(
+            said.starts_with(&format!("staging {BRAIN_EXE}: ")),
+            "{said}"
+        );
+        assert!(
+            said.ends_with(&format!(", and {} is left behind", folder.display())),
+            "{said}"
+        );
+        assert_eq!(names(&folder), ["theirs"]);
         assert_eq!(
             fs::read(folder.join("theirs")).expect("stranger"),
             b"someone else's file"
         );
+    }
+
+    #[test]
+    fn a_file_already_in_the_folder_is_neither_written_over_nor_removed() {
+        let shell = image(SHELL_ROLE, ProductIdentity::GATE);
+        let brain = image(BRAIN_ROLE, ProductIdentity::GATE);
+        let built = images("stage-nsh-taken", Some(&shell), Some(&brain));
+        let folder = scratch::dir("stage-nsh-taken-out");
+        fs::write(folder.join(BRAIN_EXE), "someone else's brain").expect("theirs");
+        let error = fill(&built, &folder).expect_err("the brain's name is taken");
+        let said = error.to_string();
+        assert!(
+            said.starts_with(&format!("staging {BRAIN_EXE}: ")),
+            "{said}"
+        );
+        assert_eq!(names(&folder), [BRAIN_EXE]);
+        assert_eq!(
+            fs::read(folder.join(BRAIN_EXE)).expect("theirs"),
+            b"someone else's brain"
+        );
+    }
+
+    #[test]
+    fn a_held_folder_cant_be_renamed_until_the_hold_drops() {
+        let root = scratch::dir("stage-nsh-hold");
+        let folder = root.join("staged");
+        let moved = root.join("moved");
+        fs::create_dir(&folder).expect("the staged folder");
+        let held = hold(&folder).expect("hold");
+        let error = fs::rename(&folder, &moved).expect_err("the folder is held");
+        // ERROR_SHARING_VIOLATION.
+        assert_eq!(error.raw_os_error(), Some(32));
+        assert!(folder.is_dir() && !moved.exists());
+        drop(held);
+        fs::rename(&folder, &moved).expect("the hold is gone");
+        assert!(moved.is_dir() && !folder.exists());
     }
 
     #[test]

@@ -36,10 +36,12 @@ As the gate identity only, it builds `kumochi-shell-nsh` and `kumochi-brain` as 
 build, creates the new folder, copies the shell in as `kumochi.exe` and the brain as
 `kumochid.exe`, and checks each copy as the gate tools check their images
 ([gate identity](gate-identity.md#starting-a-gate-tool)). Before building, it refuses a folder
-that already exists or whose parent doesn't. It launches neither image. After a failed stage it
-removes its two copies and then the folder, and says the folder is left behind when it can't, as
-when something else was put in it. On success it prints the folder. One build selects both
-packages, so the brain's dependencies resolve with NativeShell's feature requests.
+that already exists or whose parent doesn't. It launches neither image. It never writes over a
+file, and it holds the new folder open while it copies, so the path can't be pointed at another
+folder meanwhile. After a failed stage it removes the copies it made and then the folder, and
+says what is left behind when it can't, as when something else was put in the folder. On success
+it prints the folder. One build selects both packages, so the brain's dependencies resolve with
+NativeShell's feature requests.
 
 ```bash
 cargo run --release --package xtask --features kumochi-protocol/gate-identity -- stage-nsh <new-folder>
