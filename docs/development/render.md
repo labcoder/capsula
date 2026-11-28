@@ -152,10 +152,10 @@ stage side's one Direct3D 12 device. Only the stage side names wgpu.
   does when nothing has drawn; then it polls the device once without blocking, which runs finished
   work's callbacks, and tries again. So it can answer `Budget` and a later reservation succeed.
   That poll runs the loss callback in the same pass as stale work-done callbacks, so the flag is
-  checked before anything is taken back, and a reservation that finds a loss answers `Lost`. After
-  a loss the balance is no longer kept: nothing can be reserved again, and wgpu runs the pending
-  work-done callbacks when it reports the loss. Eight waits are tracked one by one; past them a
-  release merges into the newest, which only holds that charge longer.
+  checked before anything is taken back, and a reservation that finds a loss answers `Lost`. Once
+  a loss is latched no reservation is allowed again, whatever the balance says. Eight waits are
+  tracked one by one; past them a release merges into the newest, which only holds that charge
+  longer.
 - **The one poll.** That poll is the one call here wired to wgpu's fatal handler, for a poll
   error wgpu can't convert. It can't reach it: a non-blocking poll on Direct3D 12 sets no wait,
   so its only error is reading the fence, which never fails there. It must be rechecked if
