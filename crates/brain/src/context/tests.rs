@@ -21,6 +21,7 @@ const TIME: &str = "Tuesday 4 November 2026, 09:30";
 
 mod image;
 mod key_rounds;
+mod local;
 mod recall_results;
 
 struct World {

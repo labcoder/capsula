@@ -382,7 +382,7 @@ fn a_turn_is_stored_before_the_engine_starts() {
                 run: R,
                 text: "  \n  Draw a cat\nplease".into(),
                 screen: None,
-                local_default: false,
+                local_default: crate::config::DefaultIntent::Other,
             }),
             state(R, T, Phase::Thinking),
             Effect::ArmDeadline {
@@ -627,7 +627,7 @@ fn a_new_turn_replaces_the_current_run_with_a_higher_id() {
                 run: RunId(11),
                 text: "again".into(),
                 screen: None,
-                local_default: false,
+                local_default: crate::config::DefaultIntent::Other,
             }),
         ]
     );
@@ -838,7 +838,7 @@ fn a_failed_ending_is_reported_after_done_after_stop_and_after_a_replacement() {
                 run: RunId(11),
                 text: "again".into(),
                 screen: None,
-                local_default: false,
+                local_default: crate::config::DefaultIntent::Other,
             }),
         ],
         "the old run's step failed while its replacement waits"
@@ -1119,7 +1119,7 @@ fn a_deadline_after_done_leaves_the_finished_run_alone() {
 #[test]
 fn a_turn_carries_the_saved_local_intent_to_the_store() {
     let mut core = fresh();
-    core.local_default = true;
+    core.local_default = crate::config::DefaultIntent::Local;
     let effects = core
         .handle(Input::Turn {
             turn: 1,
@@ -1127,14 +1127,111 @@ fn a_turn_carries_the_saved_local_intent_to_the_store() {
             text: "b".into(),
         })
         .expect("turn");
-    let carried: Vec<bool> = effects
+    let carried: Vec<_> = effects
         .iter()
         .filter_map(|effect| match effect {
             Effect::Store(StoreOp::BeginTurn { local_default, .. }) => Some(*local_default),
             _ => None,
         })
         .collect();
-    assert_eq!(carried, vec![true]);
+    assert_eq!(carried, vec![crate::config::DefaultIntent::Local]);
+}
+
+/// A turn the store refused before keeping it fails with the store's reason.
+#[test]
+fn a_refused_turn_fails_with_its_reason() {
+    let mut core = fresh();
+    let effects = core
+        .handle(Input::Turn {
+            turn: 1,
+            thread: None,
+            text: "b".into(),
+        })
+        .expect("turn");
+    let run = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Store(StoreOp::BeginTurn { run, .. }) => Some(*run),
+            _ => None,
+        })
+        .expect("a begun turn");
+    let reason: kumochi_protocol::message::UserError =
+        kumochi_protocol::message::ErrorKey::LocalOff.into();
+    let effects = core
+        .handle(Input::TurnRefused {
+            run,
+            reason: reason.clone(),
+        })
+        .expect("refused");
+    let told: Vec<_> = effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Control(ControlToShell::RunState { phase, error, .. }) => {
+                Some((*phase, error.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(told, vec![(Phase::Failed, Some(reason))]);
+}
+
+/// A run stopped before the store refused its turn still tells the shell why, so a New target
+/// that named the unkept thread can return, a run quieting its spoken reply included.
+#[test]
+fn a_stopped_runs_refusal_still_carries_its_reason() {
+    for spoken in [false, true] {
+        let mut core = fresh();
+        if spoken {
+            core.handle(Input::AudioOutput {
+                rate: 24_000,
+                generation: kumochi_protocol::message::OutputGeneration(1),
+            })
+            .expect("never stale");
+            core.handle(Input::SpokenReplies { loaded: true })
+                .expect("never stale");
+        }
+        let effects = core
+            .handle(Input::Turn {
+                turn: 1,
+                thread: None,
+                text: "b".into(),
+            })
+            .expect("turn");
+        let run = effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::Store(StoreOp::BeginTurn { run, .. }) => Some(*run),
+                _ => None,
+            })
+            .expect("a begun turn");
+        core.handle(Input::Stop {
+            run,
+            revealed: Vec::new(),
+        })
+        .expect("stopped");
+        let reason: kumochi_protocol::message::UserError =
+            kumochi_protocol::message::ErrorKey::ConfigUnreadable.into();
+        let effects = core
+            .handle(Input::TurnRefused {
+                run,
+                reason: reason.clone(),
+            })
+            .expect("refused");
+        let told: Vec<_> = effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::Control(ControlToShell::RunState { phase, error, .. }) => {
+                    Some((*phase, error.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            told,
+            vec![(Phase::Failed, Some(reason))],
+            "spoken: {spoken}"
+        );
+    }
 }
 
 #[test]
@@ -1147,7 +1244,7 @@ fn a_replacement_is_stored_and_started_only_after_the_runs_before_it() {
             run,
             text: text.into(),
             screen: None,
-            local_default: false,
+            local_default: crate::config::DefaultIntent::Other,
         })
     };
     let mut core = started();

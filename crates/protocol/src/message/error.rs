@@ -124,6 +124,16 @@ pub enum ErrorKey {
     UnsupportedPlatform,
     /// A debug build's live-check request budget is spent, so nothing was sent.
     LiveBudgetSpent,
+    /// Models on this computer can't answer in this build; nothing was kept or sent.
+    LocalOff,
+    /// The request to the model on this computer didn't finish.
+    LocalUnfinished,
+    /// The model on this computer refused the request.
+    LocalRefused,
+    /// The local answer stopped at the model's length limit.
+    LocalIncomplete,
+    /// The local answer couldn't be read.
+    LocalUnreadable,
 }
 
 macro_rules! catalog {
@@ -200,6 +210,13 @@ impl ErrorKey {
         ConnectionNeeded,
         UnsupportedPlatform,
         LiveBudgetSpent,
+
+        // This computer
+        LocalOff,
+        LocalUnfinished,
+        LocalRefused,
+        LocalIncomplete,
+        LocalUnreadable,
     }
 }
 

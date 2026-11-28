@@ -396,6 +396,20 @@ impl Coordinator {
         current.effective_effort = effective;
         current.route = Some(route);
         current.finding = None;
+        // A local task is never summarized and takes no screen.
+        if route.kind == ConnectionKind::LocalChat {
+            if made.is_err() {
+                return self.fail(key.run, Failure::Budget, effects);
+            }
+            if current.screen.is_some() {
+                return self.fail_with(
+                    key.run,
+                    Failure::Engine,
+                    kumochi_protocol::message::ErrorKey::ScreenUnavailable.into(),
+                    effects,
+                );
+            }
+        }
         let made = match made {
             Ok(made) => made,
             Err(room) => return self.compact_inline(key, room, effects),

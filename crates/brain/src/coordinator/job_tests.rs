@@ -1019,6 +1019,89 @@ fn run_done_on(
     core.handle(Input::RunStored { run }).expect("ending")
 }
 
+/// A local task's `Done` titles nothing, on the same path that titles a Claude Code task.
+#[test]
+fn a_local_runs_done_starts_no_job() {
+    for (kind, expected) in [
+        (CLAUDE, done_starting(R, 2)),
+        (
+            ConnectionKind::LocalChat,
+            vec![state(R, T, Phase::Done), run_end(R)],
+        ),
+    ] {
+        let mut core = Coordinator::new(MAIN, ThreadId(3), RunId(9), Vec::new());
+        core.handle(ready_on(kind, 7)).expect("never stale");
+        let choice = ModelChoice {
+            connection: kind,
+            ..haiku()
+        };
+        assert_eq!(
+            run_done_on(&mut core, None, R, choice),
+            expected,
+            "{kind:?}"
+        );
+    }
+}
+
+/// A local turn over the bound fails its budget: nothing summarizes a local task inline.
+#[test]
+fn an_oversized_local_turn_fails_its_budget_and_compacts_nothing() {
+    for (kind, compacts) in [
+        (ConnectionKind::AnthropicKey, true),
+        (ConnectionKind::LocalChat, false),
+    ] {
+        let mut core = Coordinator::new(MAIN, ThreadId(3), RunId(9), Vec::new());
+        core.handle(ready_on(kind, 7)).expect("never stale");
+        core.handle(Input::Turn {
+            turn: 1,
+            thread: None,
+            text: "Plan a trip".into(),
+        })
+        .expect("a turn is never stale");
+        let effects = core.handle(Input::TurnStored { run: R }).expect("current");
+        let attempt = effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::Store(StoreOp::BuildContext(build)) => Some(build.key.attempt),
+                _ => None,
+            })
+            .expect("a build starts");
+        let effects = core
+            .handle(Input::ContextBuilt(ContextBuilt {
+                key: BuildKey {
+                    run: R,
+                    round: 1,
+                    attempt,
+                },
+                snapshot: Some(RunSnapshot {
+                    origin: Origin::Task(T),
+                    assistant: AssistantName::new("Kumo").expect("name"),
+                    user: None,
+                    choice: Some(ModelChoice {
+                        connection: kind,
+                        ..haiku()
+                    }),
+                    connection: ConnectionTag(7),
+                }),
+                result: Err(crate::coordinator::Unbuilt::TooLarge { room: Some(64) }),
+            }))
+            .expect("built");
+        let compacted = effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Store(StoreOp::CompactContext(_))));
+        let failed = effects.iter().any(|effect| {
+            matches!(
+                effect,
+                Effect::Control(ControlToShell::RunState {
+                    phase: Phase::Failed,
+                    ..
+                })
+            )
+        });
+        assert_eq!((compacted, failed), (compacts, !compacts), "{kind:?}");
+    }
+}
+
 /// Only Claude Code is ready, as sign-in 7, and `ChatGPT` never signed in: run 10 in new task 4
 /// ended `Done` on haiku, and job 2's read is out.
 fn claude_reading() -> Coordinator {

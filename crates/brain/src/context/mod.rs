@@ -9,6 +9,7 @@
 pub(crate) mod bound;
 pub(crate) mod build;
 pub(crate) mod compact;
+pub(crate) mod local;
 #[cfg(test)]
 mod tests;
 
@@ -729,6 +730,12 @@ pub(crate) enum BuildError {
         /// Bytes left for a summary; `None` when the current run alone doesn't fit.
         room: Option<usize>,
     },
+    /// The thread isn't a task whose own saved route is local, so no local request is built.
+    #[error("the thread isn't a local task")]
+    Unbound,
+    /// The local task holds more than plain turns and answers.
+    #[error("the local task holds more than plain text")]
+    LocalContent,
     /// The read failed.
     #[error("can't read the context")]
     Store(#[from] StoreError),

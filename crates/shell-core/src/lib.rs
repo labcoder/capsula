@@ -41,6 +41,7 @@ pub mod runs;
 pub mod settings;
 pub mod sign_in_mark;
 pub mod speaker;
+pub mod startup;
 pub mod strings;
 pub mod threads;
 pub mod voice;

@@ -444,6 +444,11 @@ error-response-unreadable = The answer couldn't be read. Try again.
 error-sign-in-needed = Sign in to ChatGPT to get an answer.
 error-connection-needed = Connect an account in Settings to get an answer.
 error-model-unavailable = This thread's model isn't available on your account. Pick another in Settings.
+error-local-off = Models on this computer can't answer in this build yet.
+error-local-unfinished = The request to the model on this computer didn't finish.
+error-local-refused = The model on this computer didn't accept that request.
+error-local-incomplete = The answer stopped at the model's length limit.
+error-local-unreadable = The answer from the model on this computer couldn't be read.
 
 # Anthropic
 

@@ -144,7 +144,12 @@ impl Accounts {
             | ErrorKey::ScreenPictureStopped
             | ErrorKey::ScreenConnectionChanged
             | ErrorKey::ConnectionNeeded
-            | ErrorKey::LiveBudgetSpent => {}
+            | ErrorKey::LiveBudgetSpent
+            | ErrorKey::LocalOff
+            | ErrorKey::LocalUnfinished
+            | ErrorKey::LocalRefused
+            | ErrorKey::LocalIncomplete
+            | ErrorKey::LocalUnreadable => {}
             ErrorKey::SignInTimedOut
             | ErrorKey::SignInFailed
             | ErrorKey::SignInOtherAccount
