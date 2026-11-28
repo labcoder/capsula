@@ -219,6 +219,31 @@ fn a_later_turn_on_an_unkept_new_thread_returns_new_at_its_own_refusal() {
     assert_eq!(runs.target(), Target::New);
 }
 
+/// Esc before the refusal: the stopped turn's text stays gone and no notice shows, but New's
+/// target still returns, since its thread was never made.
+#[test]
+fn a_stopped_turns_refusal_returns_new_without_its_text() {
+    let mut runs = answering(1);
+    assert!(runs.select_thread(None));
+    submit(&mut runs, "stopped");
+    runs.apply_state(
+        RunId(11),
+        ThreadId(22),
+        Phase::Thinking,
+        Some(RunOrigin::Typed { turn: 1 }),
+    );
+    assert!(runs.stop().is_some());
+    let (applied, notice) = runs.apply_run_state(
+        RunId(11),
+        ThreadId(22),
+        Phase::Failed,
+        Some(ErrorKey::ConfigUnreadable.into()),
+        None,
+    );
+    assert_eq!((applied.restore, notice), (None, None));
+    assert_eq!(runs.target(), Target::New);
+}
+
 #[test]
 fn newer_keyed_answers_never_borrow_older_cancelled_or_deleted_prefixes() {
     use kumochi_protocol::message::Deleted;
