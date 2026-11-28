@@ -74,7 +74,7 @@ use kumochi_scene::{
 
 use activation::Activation;
 use admit::Lane;
-pub use paint::{Frames, Sample, SceneCache, Stage};
+pub use paint::{Drawn, Frames, PaintTicket, Sample, SceneCache, Stage};
 pub use prepare::{AdmitJob, Completion, PrepareJob, RecoveryJob};
 use recovery::Phase;
 pub use refuse::{Disposal, Naming, Refuser};
