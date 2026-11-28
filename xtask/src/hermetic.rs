@@ -14,7 +14,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use kumochi_protocol::constants::{
     ACCOUNT_MAX_CHUNKS, AUTHORITY_FILE, BRAIN_EXE, CONFIG_FILE, GATE_EDITION,
-    LOCAL_APPDATA_OVERRIDE, ProductIdentity, ROAMING_APPDATA_OVERRIDE, SHELL_EXE,
+    LOCAL_APPDATA_OVERRIDE, NSH_SHELL_EXE, ProductIdentity, ROAMING_APPDATA_OVERRIDE, SHELL_EXE,
     anthropic_key_target, anthropic_staging_target, generation_hex, generation_target,
     instance_target,
 };
@@ -241,6 +241,7 @@ fn require_built(profile: &Path, packages: &[&str]) -> Result<()> {
     for package in packages {
         let (exe, role) = match *package {
             "kumochi-shell" => (SHELL_EXE, SHELL_ROLE),
+            "kumochi-shell-nsh" => (NSH_SHELL_EXE, SHELL_ROLE),
             "kumochi-brain" => (BRAIN_EXE, BRAIN_ROLE),
             other => bail!("{other} is not a Gate image"),
         };
