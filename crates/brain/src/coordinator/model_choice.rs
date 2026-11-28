@@ -81,7 +81,7 @@ impl Coordinator {
     ) {
         // No build serves a local server yet, so none is saved as a thread's route, and while a
         // local default is saved no thread's route changes: one that inherits it stays local.
-        if self.local_default
+        if self.local_default != crate::config::DefaultIntent::Other
             || choice.as_ref().is_some_and(|choice| {
                 choice.connection == kumochi_protocol::message::ConnectionKind::LocalChat
             })

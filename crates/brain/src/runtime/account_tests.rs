@@ -1535,7 +1535,7 @@ async fn route_default_an_unreadable_config_still_refuses_with_open_settings() {
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
     let client = async {
-        shell.submit("hello").await;
+        shell.submit("unreadablemark").await;
         assert_eq!(failed_with(&mut shell).await, Some(model_unavailable()));
         drop(shell);
     };
@@ -1547,6 +1547,12 @@ async fn route_default_an_unreadable_config_still_refuses_with_open_settings() {
         "default_model = {"
     );
     brain.close().await;
+    // The default may name the local server, so the turn that inherits it keeps nothing.
+    let store = crate::store::Store::open(&scratch.db()).expect("reopen");
+    assert_eq!(
+        store.pages().search_ids("unreadablemark").expect("search"),
+        Vec::new()
+    );
 }
 
 #[derive(Debug)]
