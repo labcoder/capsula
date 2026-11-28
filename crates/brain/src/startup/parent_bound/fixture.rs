@@ -100,6 +100,7 @@ pub(super) struct Scripted<'a> {
     hold: Option<(async_mpsc::UnboundedSender<()>, mpsc::Receiver<()>)>,
     pub(super) calls: Vec<&'static str>,
     lose: Option<(LoseAt, ShellProcess)>,
+    settings: bool,
 }
 
 impl<'a> Scripted<'a> {
@@ -112,6 +113,7 @@ impl<'a> Scripted<'a> {
             hold: Some(parts),
             calls: Vec::new(),
             lose: None,
+            settings: true,
         };
         (pre, holding)
     }
@@ -156,7 +158,7 @@ impl Prerequisites for Scripted<'_> {
             Some(profile) => open_state_held(profile, replay, Budget::default(), acquired),
             None => OpenedState::load_marking(
                 &self.scratch.db(),
-                || Some(self.scratch.dir().to_owned()),
+                || self.settings.then(|| self.scratch.dir().to_owned()),
                 replay,
                 acquired,
             ),
@@ -223,6 +225,10 @@ pub(crate) struct Script {
     /// Takes the accounts' release hold, so the test decides when the credential thread lets go;
     /// without it the release never waits.
     pub(crate) hold: Option<mpsc::Sender<Holding>>,
+    /// Runs with no settings folder, so the config is the defaults on every platform. On macOS a
+    /// scratch folder isn't an admitted Support anchor, so its settings read as unreadable, and
+    /// that refuses each turn in a thread with no saved model.
+    pub(crate) no_settings: bool,
 }
 
 /// Runs a parent-bound start on `pair` with the fixture stages, `custody` and `item`, as
@@ -239,6 +245,7 @@ pub(crate) async fn run_on_fixtures<S: InstanceStore, P: AdmissionPair>(
 ) -> (Result<(), ParentBoundError>, Vec<&'static str>) {
     let (mut pre, holding) = Scripted::new(scratch, Start::Held);
     pre.script = script.fixture;
+    pre.settings = !script.no_settings;
     pre.lose = script.lose.map(|at| (at, shell.clone()));
     match script.hold {
         Some(hold) => hold.send(holding).expect("the test takes the hold"),
@@ -346,6 +353,7 @@ pub fn serve_pair_credit_fixture(
     };
     let script = Script {
         fixture: "0 text a\n0 text b\n0 text c\n0 text d\n0 text e\n0 text f\n10000 text z",
+        no_settings: true,
         ..Script::default()
     };
     runtime.block_on(async {
