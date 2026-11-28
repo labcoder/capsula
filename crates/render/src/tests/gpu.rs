@@ -77,8 +77,47 @@ fn an_upload_charges_its_buffers_to_the_byte_and_nothing_when_refused() {
         "a build is open"
     );
     gpu.release_built(one).expect("its own geometry");
-    assert_eq!(gpu.charged(), 0, "refunded at once");
-    assert_eq!(gpu.free_tables(), UPLOADED);
+    assert_eq!(gpu.free_tables(), UPLOADED, "the slot comes back at once");
+    assert_eq!(
+        gpu.charged(),
+        SQUARE_BYTES,
+        "the GPU side holds the buffers until a submission carries their writes"
+    );
+    built(&mut mesh, 2, 1, &[square([0.0, 0.0], 0xFF_00_00)]);
+    assert_eq!(
+        gpu.upload(&mesh).err(),
+        Some(GpuFailure::Budget),
+        "the released charge still waits"
+    );
+}
+
+#[test]
+fn an_empty_geometry_uploads_one_padding_item_of_each() {
+    let mut mesh = Mesh::new();
+    let mut gpu = software(BUDGET);
+    let empty = upload(&mut gpu, &mut mesh, 11, 0, &[]);
+    assert_eq!(
+        gpu.charged(),
+        28 + 4 + 32,
+        "one vertex, one index and one piece of padding"
+    );
+    gpu.release_built(empty).expect("its own geometry");
+}
+
+#[test]
+fn a_write_refused_after_a_queued_one_holds_the_whole_charge() {
+    let mut mesh = Mesh::new();
+    let mut gpu = software(BUDGET);
+    built(&mut mesh, 10, 1, &[square([0.0, 0.0], 0xFF_00_00)]);
+    gpu.refuse_second();
+    assert_eq!(gpu.upload(&mesh).err(), Some(GpuFailure::Refused));
+    assert_eq!(gpu.free_tables(), UPLOADED, "the slot comes back at once");
+    assert_eq!(
+        gpu.charged(),
+        SQUARE_BYTES,
+        "the vertices' write is queued, so the whole charge waits"
+    );
+    assert!(!gpu.flagged(), "a refusal a scope caught is no loss");
 }
 
 #[test]
@@ -98,8 +137,20 @@ fn uploads_fit_their_slots_and_one_more_waits_for_a_release() {
     assert_eq!(gpu.charged(), charged, "the refusal charges nothing");
     let mut other = software(BUDGET);
     let elsewhere = other.upload(&mesh).expect("another device's slot");
-    assert_eq!(gpu.release_built(elsewhere), Err(GpuFailure::Mismatch));
+    let elsewhere = gpu
+        .release_built(elsewhere)
+        .expect_err("another device's geometry is handed back");
     assert_eq!(gpu.free_tables(), 0, "a foreign release frees nothing here");
+    assert_eq!(gpu.charged(), charged);
+    other
+        .release_built(elsewhere)
+        .expect("its own device takes it back");
+    assert_eq!(other.free_tables(), UPLOADED, "its slot is back");
+    assert_eq!(
+        other.charged(),
+        SQUARE_BYTES,
+        "its charge waits there, not lost"
+    );
     let first = held.pop().expect("an upload");
     gpu.release_built(first).expect("its own geometry");
     held.push(gpu.upload(&mesh).expect("the released slot takes the next"));
@@ -138,7 +189,7 @@ fn an_upload_keeps_its_range_tables_through_the_mesh_s_next_build() {
 #[test]
 fn a_lost_device_refuses_every_later_call() {
     let mut mesh = Mesh::new();
-    let mut gpu = software(BUDGET);
+    let mut gpu = software(SQUARE_BYTES);
     let one = upload(&mut gpu, &mut mesh, 6, 1, &[square([0.0, 0.0], 0xFF_00_00)]);
     gpu.destroy();
     let lost = (0..300).any(|_| {
@@ -150,9 +201,27 @@ fn a_lost_device_refuses_every_later_call() {
     });
     assert!(lost, "the loss arrives within three seconds");
     for _ in 0..2 {
-        assert_eq!(gpu.upload(&mesh).err(), Some(GpuFailure::Lost));
+        assert_eq!(
+            gpu.upload(&mesh).err(),
+            Some(GpuFailure::Lost),
+            "a lost device says so before its full budget is asked"
+        );
     }
-    gpu.release_built(one).expect("its own geometry");
+    gpu.release_built(one).expect("a release still works");
+    assert_eq!(gpu.free_tables(), UPLOADED);
+}
+
+#[test]
+fn an_upload_after_a_loss_not_yet_reported_answers_lost() {
+    let mut mesh = Mesh::new();
+    let mut gpu = software(BUDGET);
+    built(&mut mesh, 9, 1, &[square([0.0, 0.0], 0xFF_00_00)]);
+    gpu.destroy();
+    assert!(!gpu.flagged(), "the loss is reported only when polled");
+    assert_eq!(gpu.upload(&mesh).err(), Some(GpuFailure::Lost));
+    assert!(gpu.flagged(), "the unexplained refusal latches it");
+    assert_eq!(gpu.charged(), 0, "nothing was queued: refunded at once");
+    assert_eq!(gpu.free_tables(), UPLOADED);
 }
 
 #[test]
@@ -169,7 +238,6 @@ fn no_debug_or_error_output_carries_drawing_content() {
             GpuFailure::Budget,
             GpuFailure::Refused,
             GpuFailure::Unfinished,
-            GpuFailure::Mismatch,
             GpuFailure::Lost,
         ]
         .map(|failure| failure.to_string())

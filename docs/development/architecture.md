@@ -290,11 +290,11 @@ ship yet, so the diagram leaves it out: [shell-nsh.md](shell-nsh.md).
 `render` (`kumochi-render`) is the drawing renderer that shell will host: it builds a view's
 mesh once, writes each frame as records and uploads meshes with wgpu on Direct3D 12.
 Nothing ships it yet either: [render.md](render.md). `cargo xtask check-core` lists its
-dependencies and keeps UI frameworks out of its tree, the way it holds `shell-core`; its only
-GPU crates are wgpu's own with the features it lists, and `shell-core`'s tree has none. It also
-lints the renderer's stage side for paths to
-the scene, the presenter or the owner side; it reads spellings, so it catches a slip and
-proves nothing.
+dependencies and keeps UI frameworks out of its tree, the way it holds `shell-core`; it bans a
+list of other GPU crate names, checks the wgpu features it lists on Windows and Linux, and keeps
+`wgpu` spelled only on the stage side; `shell-core`'s tree has none. It also lints the
+renderer's stage side for paths to the scene, the presenter or the owner side; it reads
+spellings, so it catches a slip and proves nothing.
 
 `shell-core` holds what the shell knows and decides, apart from how it is drawn. No UI
 framework is in its dependency tree, dev-dependencies included, so nothing in it can name

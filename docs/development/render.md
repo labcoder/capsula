@@ -127,30 +127,47 @@ names wgpu.
   when made, so each is polled once; one still pending fails closed as `NoDevice` and nothing
   spins.
 - **Loss.** The device-loss callback and the uncaptured-error handler are installed before any
-  resource exists, and both set one sticky flag that carries nothing of the error. Every call
-  checks it first, so once it is set every later call answers `Lost`.
+  resource exists, and both set one sticky flag that carries nothing of the error. An upload
+  sets it too when wgpu refuses a write with both error scopes clean: wgpu drops a lost
+  device's errors, so nothing else explains it, and an explicit destroy invalidates the device
+  before wgpu runs the callback. Every upload checks the flag first and again before it answers,
+  so once it is set every later upload answers `Lost`; releases still take back their slots.
 - **Budget.** `Gpu` keeps a budget of requested resource bytes: the sizes its buffers ask wgpu
   for, not measured video memory. An upload reserves its whole charge with checked arithmetic
-  before it creates anything, creates its buffers inside validation and out-of-memory error
-  scopes, and gives the charge back when any of them fails.
+  before it creates anything and creates its buffers inside validation and out-of-memory error
+  scopes. wgpu holds a buffer with a queued write until the submission that carries it, the
+  device's next, so a charge whose writes were queued waits for that submission to retire
+  before it comes back; one with nothing queued comes back at once. Eight waits are tracked one
+  by one; past them a release merges into the newest, which only holds that charge longer.
+  Nothing submits yet, so a released upload's charge stays held.
 - **Upload.** `Gpu::upload` takes the geometry the mesh last finished, `Mesh::geometry`, and
   stages its vertices, indices and pieces for buffers created unmapped, each encoded field by
   field, through `Queue::write_buffer_with`, inside the same error scopes. The staged bytes are
   wgpu's own, outside the budget, and go to the GPU with the device's next submission. A write
-  wgpu won't stage answers `Lost` once the flag is set and `Refused` otherwise. Nothing on
-  this path maps a buffer, so a loss at any moment can't reach wgpu's panicking calls.
+  wgpu refuses answers `Refused` when a scope caught why and `Lost` otherwise. A failure gives
+  the slot back at once and the charge as above. A `Built` means its buffers were created and
+  their writes queued, not confirmed on the GPU: a device lost under a queued write reports
+  nothing then, answers `Lost` at the next call, and nothing of that `Built` is drawn.
+  Nothing on this path maps a buffer, so this crate's calls reach none of wgpu's panicking
+  entries.
 - **Range tables.** An upload also copies the mesh's range tables into one of five reserved
   slots (`limits::UPLOADED`): one per picture of a frame and one more for a geometry uploading
   in place of a shown one. So the mesh can build the next geometry while this one stays, and
   `Built::range` resolves a record as the mesh did when it was uploaded. With every slot held,
-  an upload answers `Budget`. `Gpu::release_built` gives the slot and the charge back at once,
-  since nothing reads an upload yet; a `Built` dropped instead keeps both for the device's
-  life.
+  an upload answers `Budget`. `Gpu::release_built` gives the slot back at once and the charge
+  as above; one from another device is handed back unreleased, so its own device can still take
+  it. A `Built` dropped instead keeps both for the device's life.
 
 The device tests build on Windows only. They ask for Direct3D 12's software adapter
 (`force_fallback_adapter`, a CPU adapter) and fail with a fixed message when it is absent; they
 never skip. Without Direct3D 12 in the build, on Linux, one test checks that
 `Gpu::open` answers `NoAdapter`.
+
+**Known limit.** This crate's own calls avoid every wgpu entry that reaches wgpu's fatal
+handler, but wgpu 29.0.4 itself unwraps some Direct3D failures, as when it begins its
+pending-writes command list at device open and on the first queued write after a submission.
+A device removed at those moments can panic inside wgpu, and a release build aborts on panic.
+This must be closed before a shell hosts the renderer.
 
 ## What is charged and what is fixed
 

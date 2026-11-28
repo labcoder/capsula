@@ -1,6 +1,12 @@
 //! The GPU half of the stage side: one Direct3D 12 device, a budget of the resource bytes it
 //! requests, and meshes uploaded as [`Built`] geometries. Nothing here waits on the GPU: wgpu
 //! answers its native futures at once (docs/development/render.md).
+//!
+//! Known limit: this crate's calls avoid every wgpu entry that reaches wgpu's fatal handler, but
+//! wgpu 29.0.4 itself unwraps some Direct3D failures, as when it begins its pending-writes
+//! command list at open and on the first queued write after a submission. A device removed at
+//! those moments can panic inside wgpu, and a release build aborts on panic. This must be closed
+//! before a shell hosts the renderer.
 
 use std::{
     fmt,
@@ -18,6 +24,8 @@ use crate::limits::{INPUT_OBJECTS, INPUT_PRIMS, UPLOADED};
 
 /// The image format drawing needs, as GPUI's Windows renderer draws paths.
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8Unorm;
+/// Released charges a budget tracks one by one; past them it merges into its newest.
+const WAITING: usize = 8;
 
 /// Why the GPU side can't do what it was asked: a fixed kind with no content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -31,16 +39,14 @@ pub enum GpuFailure {
     /// The request passes the budget, or every geometry slot is held.
     #[error("the request passes the renderer's GPU budget")]
     Budget,
-    /// The GPU refused to create a resource.
+    /// The GPU refused to create or stage a resource.
     #[error("the GPU refused a resource")]
     Refused,
     /// The mesh holds no finished geometry.
     #[error("the mesh holds no finished geometry")]
     Unfinished,
-    /// A resource of another device.
-    #[error("a resource of another GPU device")]
-    Mismatch,
-    /// The device is lost; nothing it is asked afterwards runs.
+    /// The device is lost: every later upload answers this, and releases still take back their
+    /// slots.
     #[error("the GPU device was lost")]
     Lost,
 }
@@ -50,13 +56,20 @@ pub struct Gpu {
     id: u64,
     device: wgpu::Device,
     queue: wgpu::Queue,
-    /// Set once, by the loss callback or the uncaptured-error handler; never cleared.
+    /// Set once, by the loss callback, the uncaptured-error handler or an upload whose write wgpu
+    /// refused with no error to say why; never cleared.
     lost: Arc<AtomicBool>,
+    /// The newest submission the GPU has finished. Nothing submits yet, so it stays 0.
+    retired: Arc<AtomicU64>,
+    /// Submissions made so far; the next one carries every write queued since.
+    submitted: u64,
     budget: Budget,
     /// Range tables for the geometries not uploaded, reserved at open.
     tables: Vec<Tables>,
     #[cfg(all(test, windows))]
     on_cpu: bool,
+    #[cfg(all(test, windows))]
+    refuse_second: bool,
 }
 
 impl Gpu {
@@ -113,9 +126,13 @@ impl Gpu {
             id: DEVICES.fetch_add(1, Ordering::Relaxed),
             #[cfg(all(test, windows))]
             on_cpu: adapter.get_info().device_type == wgpu::DeviceType::Cpu,
+            #[cfg(all(test, windows))]
+            refuse_second: false,
             device,
             queue,
             lost,
+            retired: Arc::new(AtomicU64::new(0)),
+            submitted: 0,
             budget: Budget::new(budget),
             tables,
         })
@@ -127,7 +144,8 @@ impl Gpu {
     /// # Errors
     /// [`GpuFailure::Unfinished`] for a mesh with no finished geometry; [`GpuFailure::Budget`]
     /// past the budget or with every geometry slot held; [`GpuFailure::Refused`] when the GPU
-    /// refuses a buffer; [`GpuFailure::Lost`]. Nothing is charged or held then.
+    /// refuses a buffer or a write; [`GpuFailure::Lost`]. The slot comes back at once then, and
+    /// the charge too unless a write was already queued, when it waits like a released one.
     ///
     /// The bytes are staged in memory wgpu allocates for the copy, outside the budget, and
     /// reach the GPU with the device's next submission.
@@ -144,23 +162,34 @@ impl Gpu {
             .try_fold(0_u64, |sum, size| sum.checked_add(*size))
             .ok_or(GpuFailure::Budget)?;
         let mut tables = self.tables.pop().ok_or(GpuFailure::Budget)?;
-        if let Err(failure) = self.budget.reserve(total) {
+        if let Err(failure) = self.reserve(total) {
             self.tables.push(tables);
             return Err(failure);
         }
+        let carried = self.submitted + 1;
         let buffer = |size, usage| {
             self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: None,
                 size,
-                usage: usage | wgpu::BufferUsages::COPY_DST,
+                usage,
                 mapped_at_creation: false,
             })
         };
+        let copy = wgpu::BufferUsages::COPY_DST;
+        #[cfg(all(test, windows))]
+        let second = if self.refuse_second {
+            wgpu::BufferUsages::empty()
+        } else {
+            copy
+        };
+        #[cfg(not(all(test, windows)))]
+        let second = copy;
+        let mut queued = false;
         let made = scoped(&self.device, || {
             let made = [
-                buffer(sizes[0], wgpu::BufferUsages::VERTEX),
-                buffer(sizes[1], wgpu::BufferUsages::INDEX),
-                buffer(sizes[2], wgpu::BufferUsages::STORAGE),
+                buffer(sizes[0], wgpu::BufferUsages::VERTEX | copy),
+                buffer(sizes[1], wgpu::BufferUsages::INDEX | second),
+                buffer(sizes[2], wgpu::BufferUsages::STORAGE | copy),
             ];
             let [vertices, indices, pieces] = &made;
             let staged = stage::<VERTEX_WORDS>(
@@ -170,6 +199,7 @@ impl Gpu {
                 mesh.vertices().iter().flat_map(vertex_words),
             )
             .and_then(|()| {
+                queued = true;
                 stage::<1>(
                     &self.queue,
                     indices,
@@ -185,46 +215,76 @@ impl Gpu {
                     mesh.pieces().iter().flat_map(piece_words),
                 )
             });
-            (made, staged)
-        })
-        .and_then(|(made, staged)| staged.map(|()| made).ok_or(GpuFailure::Refused));
-        let [vertices, indices, pieces] = match made {
-            Ok(made) => made,
-            Err(failure) => {
-                self.budget.refund(total);
-                self.tables.push(tables);
-                return Err(self.live().err().unwrap_or(failure));
+            (made, staged.is_some())
+        });
+        let failure = match made {
+            Ok(([vertices, indices, pieces], true)) => match self.live() {
+                Ok(()) => {
+                    let [starts, objects] = mesh.tables();
+                    tables.starts.extend_from_slice(starts);
+                    tables.objects.extend_from_slice(objects);
+                    return Ok(Built {
+                        device: self.id,
+                        geometry,
+                        vertices,
+                        indices,
+                        pieces,
+                        tables,
+                        bytes: total,
+                        carried,
+                    });
+                }
+                Err(lost) => lost,
+            },
+            Ok((_, false)) => {
+                // wgpu drops a lost device's errors, so a write refused with both scopes clean
+                // has no other explanation.
+                self.lost.store(true, Ordering::Release);
+                GpuFailure::Lost
             }
+            Err(failure) => self.live().err().unwrap_or(failure),
         };
-        let [starts, objects] = mesh.tables();
-        tables.starts.extend_from_slice(starts);
-        tables.objects.extend_from_slice(objects);
-        Ok(Built {
-            device: self.id,
-            geometry,
-            vertices,
-            indices,
-            pieces,
-            tables,
-            bytes: total,
-        })
+        self.tables.push(tables);
+        if queued {
+            self.release(total, carried);
+        } else {
+            self.budget.refund(total);
+        }
+        Err(failure)
     }
 
-    /// Gives back `built`'s geometry slot and its charge. Nothing has read it yet, so both come
-    /// back at once.
+    /// Gives back `built`'s geometry slot at once, and its charge once the submission that
+    /// carries its writes has retired: wgpu holds its buffers until then. Nothing submits yet,
+    /// so the charge stays held.
     ///
     /// # Errors
-    /// [`GpuFailure::Mismatch`] for a geometry another device uploaded; its charge stays there.
-    pub fn release_built(&mut self, built: Built) -> Result<(), GpuFailure> {
+    /// Hands `built` back, unreleased, when another device uploaded it.
+    #[expect(
+        clippy::result_large_err,
+        reason = "a refused geometry goes back to its caller whole, on a path that never repeats"
+    )]
+    pub fn release_built(&mut self, built: Built) -> Result<(), Built> {
         if built.device != self.id {
-            return Err(GpuFailure::Mismatch);
+            return Err(built);
         }
         let mut tables = built.tables;
         tables.starts.clear();
         tables.objects.clear();
         self.tables.push(tables);
-        self.budget.refund(built.bytes);
+        self.release(built.bytes, built.carried);
         Ok(())
+    }
+
+    /// Refunds `bytes` once submission `last` has retired.
+    fn release(&mut self, bytes: u64, last: u64) {
+        self.budget
+            .release(bytes, last, self.retired.load(Ordering::Acquire));
+    }
+
+    /// Charges `bytes`, first taking back what retired submissions released.
+    fn reserve(&mut self, bytes: u64) -> Result<(), GpuFailure> {
+        self.budget.reclaim(self.retired.load(Ordering::Acquire));
+        self.budget.reserve(bytes)
     }
 
     fn live(&self) -> Result<(), GpuFailure> {
@@ -245,9 +305,11 @@ impl fmt::Debug for Gpu {
     }
 }
 
-/// One geometry on the GPU, with the range tables that resolve its records. Hand it back with
-/// [`Gpu::release_built`]: one dropped instead keeps its charge and its table slot for the
-/// device's life.
+/// One geometry on the GPU, with the range tables that resolve its records. Its buffers were
+/// created and their writes queued, not confirmed on the GPU: wgpu reports nothing when a
+/// device is lost under a queued write, so such a loss answers `Lost` at the next call and
+/// nothing of this geometry is drawn. Hand it back with [`Gpu::release_built`]: one dropped
+/// instead keeps its charge and its table slot for the device's life.
 pub struct Built {
     device: u64,
     geometry: GeometryId,
@@ -259,6 +321,8 @@ pub struct Built {
     pieces: wgpu::Buffer,
     tables: Tables,
     bytes: u64,
+    /// The submission that carries its writes.
+    carried: u64,
 }
 
 impl Built {
@@ -313,16 +377,24 @@ impl Tables {
 }
 
 /// A budget of requested resource bytes: what this device's resources asked wgpu for, not
-/// measured video memory.
+/// measured video memory. A released charge waits for the submission that last needed it.
 #[derive(Debug)]
 struct Budget {
     limit: u64,
     charged: u64,
+    /// `(submission, bytes)` released but maybe still held by wgpu.
+    waiting: [(u64, u64); WAITING],
+    len: usize,
 }
 
 impl Budget {
     fn new(limit: u64) -> Self {
-        Self { limit, charged: 0 }
+        Self {
+            limit,
+            charged: 0,
+            waiting: [(0, 0); WAITING],
+            len: 0,
+        }
     }
 
     fn reserve(&mut self, bytes: u64) -> Result<(), GpuFailure> {
@@ -336,6 +408,36 @@ impl Budget {
 
     fn refund(&mut self, bytes: u64) {
         self.charged = self.charged.saturating_sub(bytes);
+    }
+
+    /// Refunds `bytes` at once when submission `last` has retired; otherwise waits for it,
+    /// merged into the newest wait when every one is taken, which only holds the merged charge
+    /// longer.
+    fn release(&mut self, bytes: u64, last: u64, retired: u64) {
+        if last <= retired {
+            return self.refund(bytes);
+        }
+        if self.len == WAITING {
+            let newest = &mut self.waiting[WAITING - 1];
+            *newest = (newest.0.max(last), newest.1 + bytes);
+            return;
+        }
+        self.waiting[self.len] = (last, bytes);
+        self.len += 1;
+    }
+
+    fn reclaim(&mut self, retired: u64) {
+        let mut kept = 0;
+        for at in 0..self.len {
+            let (last, bytes) = self.waiting[at];
+            if last <= retired {
+                self.refund(bytes);
+            } else {
+                self.waiting[kept] = (last, bytes);
+                kept += 1;
+            }
+        }
+        self.len = kept;
     }
 }
 
@@ -409,6 +511,9 @@ fn stage<const N: usize>(
     items: usize,
     words: impl Iterator<Item = u32>,
 ) -> Option<()> {
+    // shortcut: wgpu 29.0.4 unwraps a failed Direct3D command list when the first write after a
+    // submission begins its pending writes, so a removed device can panic here; close it before
+    // a shell hosts the renderer.
     let mut view = queue.write_buffer_with(buffer, 0, wgpu::BufferSize::new(buffer.size())?)?;
     let (head, mut rest) = view.slice(..).split_at(items * N * 4);
     head.into_chunks::<4>()
@@ -466,6 +571,16 @@ impl Gpu {
         self.tables.len()
     }
 
+    /// Makes every later upload's second buffer refuse its write.
+    pub(crate) fn refuse_second(&mut self) {
+        self.refuse_second = true;
+    }
+
+    /// Whether the loss flag is set, without polling.
+    pub(crate) fn flagged(&self) -> bool {
+        self.lost.load(Ordering::Acquire)
+    }
+
     pub(crate) fn destroy(&self) {
         self.device.destroy();
     }
@@ -479,7 +594,7 @@ impl Gpu {
 
 #[cfg(test)]
 mod tests {
-    use super::{Budget, GpuFailure};
+    use super::{Budget, GpuFailure, WAITING};
 
     #[test]
     fn a_charge_fits_to_the_byte_and_refuses_one_past_or_an_overflow() {
@@ -500,6 +615,37 @@ mod tests {
             "the sum overflows"
         );
         assert_eq!(full.charged, u64::MAX - 1);
+    }
+
+    #[test]
+    fn a_released_charge_waits_for_its_last_submission_and_never_unbounded() {
+        let mut budget = Budget::new(10_000);
+        budget.reserve(3_000).expect("it fits");
+        budget.release(100, 0, 0);
+        assert_eq!(budget.charged, 2_900, "never submitted: refunded at once");
+        budget.release(200, 5, 4);
+        assert_eq!(budget.charged, 2_900, "submission 5 still runs");
+        budget.reclaim(4);
+        assert_eq!(budget.charged, 2_900);
+        budget.reclaim(5);
+        assert_eq!(budget.charged, 2_700, "refunded once 5 retires");
+        for last in 1..=10 {
+            budget.release(10, 20 + last, 0);
+        }
+        assert_eq!(
+            budget.len, WAITING,
+            "past its slots a wait merges into the newest"
+        );
+        budget.reclaim(28);
+        assert_eq!(
+            budget.charged, 2_630,
+            "the seven waits for 21 to 27 are refunded"
+        );
+        budget.reclaim(30);
+        assert_eq!(
+            budget.charged, 2_600,
+            "the merged wait holds until the newest retires"
+        );
     }
 
     #[cfg(not(windows))]
