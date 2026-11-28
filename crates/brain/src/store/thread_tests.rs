@@ -117,10 +117,11 @@ fn a_local_route_is_kept_against_every_later_model_write() {
         connection: ConnectionKind::LocalChat,
         ..choice("same-slug", Effort::High)
     };
-    assert!(matches!(
-        store.set_model(thread, Some(&local)).expect("save"),
-        ChoiceRead::Found { .. }
-    ));
+    let saved = ChoiceRead::Found {
+        choice: SavedChoice::Chosen(local.clone()),
+        revision: ChoiceRev(1),
+    };
+    assert_eq!(store.set_model(thread, Some(&local)).expect("save"), saved);
     let other = |connection| ModelChoice {
         connection,
         ..choice("other-slug", Effort::Low)
@@ -139,6 +140,7 @@ fn a_local_route_is_kept_against_every_later_model_write() {
         );
     }
     let read = Snapshot::begin(&store.conn).expect("snapshot");
+    assert_eq!(read.model_choice(thread).expect("by id"), saved);
     assert_eq!(read.choice(thread).expect("context choice"), Some(local));
     assert_eq!(
         store.saved_route(thread).expect("route"),
