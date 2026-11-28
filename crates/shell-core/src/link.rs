@@ -1001,6 +1001,14 @@ impl LinkHandle {
             })
     }
 
+    /// A queued pair the brain hasn't acknowledged the audio registration of: its turns wait for
+    /// [`LinkEvent::TextReady`], which comes by the pair's startup deadline or the pair ends.
+    pub fn awaits_text_ready(&self, session: &Session) -> bool {
+        self.worker.is_some()
+            && session.open()
+            && self.shared.output.awaiting_registration(session.generation)
+    }
+
     pub fn can_start_voice_gesture(&self, generation: u64) -> bool {
         if self.worker.is_none() || self.is_quitting() {
             return false;
