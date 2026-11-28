@@ -2,6 +2,8 @@
 
 #[cfg(test)]
 mod dock_tests;
+#[cfg(all(windows, debug_assertions, test))]
+mod draw_fixture_tests;
 #[cfg(test)]
 mod github_tests;
 
@@ -324,6 +326,10 @@ impl Presence {
                     }
                 }
                 LinkEvent::KeyStage { generation, reply } => self.key_reply(generation, &reply, cx),
+                LinkEvent::TextReady { .. } => {
+                    #[cfg(any(debug_assertions, all(windows, feature = "gate-draw-replay")))]
+                    self.submit_draw_fixture(cx);
+                }
                 LinkEvent::ModelChoice { reply, .. } => {
                     self.runs.apply_model(&reply, std::time::Instant::now());
                 }
@@ -622,14 +628,7 @@ impl Presence {
         }
         self.runs.settings(view.main_thread);
         #[cfg(any(debug_assertions, all(windows, feature = "gate-draw-replay")))]
-        if let Some(session) = &self.session
-            && let Some(draft) = super::Observer::take_draw_fixture(cx)
-            && let Err(refusal) = self
-                .runs
-                .submit(draft, |turn| self.link.send_data(session, turn))
-        {
-            tracing::warn!(?refusal, "drawing timing fixture submission refused");
-        }
+        self.submit_draw_fixture(cx);
         if !view.hold_to_talk {
             self.cancel_voice(cx);
         }
@@ -654,6 +653,32 @@ impl Presence {
         self.restore_dock_position(self.settings.read(cx).dock_position_choice(), cx);
         if let Err(error) = self.onboarding_changed(cx) {
             tracing::error!(%error, "can't show onboarding");
+        }
+    }
+
+    /// Sends the drawing replay's one prompt once the pair admits turns: a queued pair's brain
+    /// ends the pair at a turn that comes before it has acknowledged the audio registration.
+    #[cfg(any(debug_assertions, all(windows, feature = "gate-draw-replay")))]
+    fn submit_draw_fixture(&mut self, cx: &mut Context<'_, Self>) {
+        if self.draw_fixture.is_none() {
+            self.draw_fixture = super::Observer::take_draw_fixture(cx);
+        }
+        let Some(session) = &self.session else {
+            return;
+        };
+        if !self.link.admits_text(Some(session)) {
+            return;
+        }
+        let Some(draft) = self.draw_fixture.take() else {
+            return;
+        };
+        if let Err(refusal) =
+            self.runs
+                .submit_with_audio(draft, self.link.audio_session(), |turn| {
+                    self.link.send_data(session, turn)
+                })
+        {
+            tracing::warn!(?refusal, "drawing timing fixture submission refused");
         }
     }
 
