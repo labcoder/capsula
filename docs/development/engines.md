@@ -716,8 +716,10 @@ and lengths in `Debug`, and `Failure` holds at most a status. The request bytes 
 they drop; response bytes pass through the shared `ModelConn` and framer buffers, which aren't.
 
 **Fixtures.** `fixtures/local/synthetic-llama-server-text.sse` is written by hand in the shape
-`llama-server` documents; it's not a recording and claims no server compatibility. Transport tests
-use real sockets on `127.0.0.1:0` only.
+`llama-server` documents. Two recordings sit beside it, one from `llama-server` b12774 and one from
+an isolated Ollama 0.40.19 instance whose stream carries reasoning first. Neither sends `usage`.
+Their README says how they were recorded and what was redacted. The reader replays both, whole and
+split byte by byte. Transport tests use real sockets on `127.0.0.1:0` only.
 
 ## The local engine
 
