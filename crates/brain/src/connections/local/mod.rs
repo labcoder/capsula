@@ -261,20 +261,29 @@ async fn round<L: Lease>(
             out.text(text);
         });
         conn.buf.drain(..length);
+        // Text parsed past the round's deadline is cut with it, even beside a parse failure.
+        if Instant::now() >= by {
+            return Err(Failure::Deadline);
+        }
         // The sink already holds this read's text, so a failure in it needs no wait.
         fed?;
         if emitted {
-            taken_within(&mut out, tuning.backpressure).await?;
+            taken_within(&mut out, tuning.backpressure, by).await?;
         }
     }
     reader.finish()
 }
 
-/// Waits for `out` to take its text within `wait`; the sink hands nothing on past the cutoff,
-/// even when room opens on the same poll.
-pub(crate) async fn taken_within(out: &mut impl Sink, wait: Duration) -> Result<(), Failure> {
-    let by = Instant::now() + wait;
+/// Waits for `out` to take its text within `wait`, and never past the round's `deadline`; the
+/// sink hands nothing on past the earlier cutoff, even when room opens on the same poll.
+pub(crate) async fn taken_within(
+    out: &mut impl Sink,
+    wait: Duration,
+    deadline: Instant,
+) -> Result<(), Failure> {
+    let by = (Instant::now() + wait).min(deadline);
     match timeout_at(by, out.taken(by)).await {
+        Err(_) if by == deadline => Err(Failure::Deadline),
         Err(_) => Err(Failure::Backpressure),
         Ok(ControlFlow::Break(())) => Err(Failure::Protocol),
         Ok(ControlFlow::Continue(())) => Ok(()),

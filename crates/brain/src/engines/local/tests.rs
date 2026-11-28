@@ -315,35 +315,45 @@ async fn text_cut_by_its_own_wait_is_never_offered_again() {
     }
 }
 
-/// A read's text whose room opens on the same poll as its cutoff stays unsent, so the round
-/// ends as `Backpressure`.
+/// A read's text whose room opens on the same poll as the earlier of its own cutoff and the
+/// round's deadline stays unsent, and the round ends for the one that passed.
 #[tokio::test(start_paused = true)]
 async fn room_that_opens_as_a_reads_wait_ends_takes_nothing() {
-    let (events_tx, mut events) = mpsc::channel(1);
-    events_tx
-        .send(TurnEvent::TextDelta("earlier".to_owned()))
-        .await
-        .expect("queued");
-    let sender = events_tx.clone();
-    let wait = tokio::spawn(async move {
-        let mut text = "late".to_owned();
-        let mut out = super::Pending {
-            text: &mut text,
-            events: &sender,
-        };
-        let taken = crate::connections::local::taken_within(&mut out, QUIET).await;
-        (taken, text)
-    });
-    tokio::task::yield_now().await;
-    assert_eq!(
-        events.try_recv(),
-        Ok(TurnEvent::TextDelta("earlier".to_owned()))
-    );
-    tokio::time::advance(QUIET).await;
-    let (taken, text) = wait.await.expect("wait");
-    assert_eq!((taken, text.as_str()), (Err(Failure::Backpressure), "late"));
-    drop(events_tx);
-    assert_eq!(events.recv().await, None);
+    for (wait, deadline, failure) in [
+        (QUIET, BOUND, Failure::Backpressure),
+        (BOUND, QUIET, Failure::Deadline),
+    ] {
+        let (events_tx, mut events) = mpsc::channel(1);
+        events_tx
+            .send(TurnEvent::TextDelta("earlier".to_owned()))
+            .await
+            .expect("queued");
+        let sender = events_tx.clone();
+        let by = tokio::time::Instant::now() + deadline;
+        let read = tokio::spawn(async move {
+            let mut text = "late".to_owned();
+            let mut out = super::Pending {
+                text: &mut text,
+                events: &sender,
+            };
+            let taken = crate::connections::local::taken_within(&mut out, wait, by).await;
+            (taken, text)
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(
+            events.try_recv(),
+            Ok(TurnEvent::TextDelta("earlier".to_owned()))
+        );
+        tokio::time::advance(QUIET).await;
+        let (taken, text) = read.await.expect("read");
+        assert_eq!(
+            (taken, text.as_str()),
+            (Err(failure), "late"),
+            "{failure:?}"
+        );
+        drop(events_tx);
+        assert_eq!(events.recv().await, None, "{failure:?}");
+    }
 }
 
 /// Room that opens on the same poll as the cutoff carries nothing.
