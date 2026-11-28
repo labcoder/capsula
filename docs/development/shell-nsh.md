@@ -76,7 +76,8 @@ and a window or UI-thread failure waits on a message box for a person. Either wa
 process would keep the session's lock, and the GPUI shell of that edition couldn't start. So
 right after taking the lock, before even its first log line (a log write can block), `main`
 starts its own thread that sleeps `--quit-after-ms` plus a 15-second grace and then exits 1. It
-writes nothing, so an exit of 1 with `shell started` as the run's last line is the sign it fired.
+writes nothing, so an exit of 1 with `shell started` as the run's last line fits the
+backstop but doesn't prove it: a dismissed window error ends the same way.
 
 The grace is a budget, not a bound: it's how long past its deadline the shell is allowed, chosen
 above the pin's 10 s wait for a process it replaces (only when `NSH_RESTART_AFTER` is set) and
