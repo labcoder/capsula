@@ -8,8 +8,8 @@ It is not the app that ships. Kumochi's shell binary stays `kumochi`, built from
 shell. The Mac Dev bundle (`cargo xtask mac-bundle`) and the third-party notices both select
 `-p kumochi-shell -p kumochi-brain`, so neither includes this crate. This crate builds a
 separate binary, `kumochi-nsh`, so both shells can share one target folder. It is a workspace
-member but not a default member: a plain `cargo build` or `cargo test` leaves it out, and
-`-p kumochi-shell-nsh` or `--workspace` includes it.
+member but not a default member: at the workspace root, a plain `cargo build` or `cargo test`
+leaves it out, and `-p kumochi-shell-nsh` or `--workspace` includes it.
 
 Until it replaces the GPUI shell, it refuses the release identity: a build of `kumochi-nsh`
 with the release identity exits with code 69 (unsupported) before it does anything, so it can
