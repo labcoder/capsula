@@ -97,25 +97,37 @@ mod tests {
     }
 
     #[test]
-    fn launch_errors_carry_no_argument_value() {
+    fn launch_errors_show_only_fixed_text() {
         const MARKER: &str = "private-fixture-value";
-        for args in [
-            vec![format!("--quit-after-ms={MARKER}")],
-            vec![format!("--{MARKER}")],
-            vec![
-                "--quit-after-ms=1".to_owned(),
-                format!("--quit-after-ms={MARKER}"),
-            ],
+        for (args, debug, display) in [
+            (
+                vec![format!("--quit-after-ms={MARKER}")],
+                "QuitDelay",
+                "--quit-after-ms must be between 1 and 120000",
+            ),
+            (
+                vec![format!("--{MARKER}")],
+                "Unknown",
+                "unknown launch flag",
+            ),
+            (
+                vec![
+                    "--quit-after-ms=1".to_owned(),
+                    "--quit-after-ms=2".to_owned(),
+                ],
+                "Repeated",
+                "--quit-after-ms comes at most once",
+            ),
+            (
+                vec![],
+                "NoDeadline",
+                "this shell needs --quit-after-ms until it has a link",
+            ),
         ] {
-            let error = Launch::parse(args.into_iter().map(OsString::from))
-                .expect_err("the flags are refused");
-            for shown in [format!("{error:?}"), error.to_string()] {
-                assert!(!shown.contains(MARKER), "{shown}");
-                assert!(
-                    !shown.contains(&format!("{:?}", MARKER.as_bytes())),
-                    "{shown}"
-                );
-            }
+            let error =
+                Launch::parse(args.iter().map(OsString::from)).expect_err("the flags are refused");
+            assert_eq!(format!("{error:?}"), debug, "{args:?}");
+            assert_eq!(error.to_string(), display, "{args:?}");
         }
     }
 }

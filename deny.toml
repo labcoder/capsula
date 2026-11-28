@@ -57,7 +57,7 @@ allow-wildcard-paths = true
 # NativeShell's update and network paths stay off (docs/development/shell-nsh.md).
 [[bans.features]]
 crate = "nsh-platform-windows"
-deny = ["net", "updater", "websocket", "webview", "dev", "js"]
+deny = ["net", "updater", "websocket", "webview", "dev", "js", "media"]
 [[bans.features]]
 crate = "nsh-core"
 deny = ["updater", "loader", "websocket"]

@@ -73,8 +73,8 @@ back to uncontained workers.
 
 | Exit | When |
 |---|---|
-| 0 | Its `--quit-after-ms` deadline passed and NativeShell quit, or another shell holds this session's lock |
-| 1 | The lock's admission, the log, the flags or the lock failed, or NativeShell's UI thread failed |
+| 0 | NativeShell's message loop ended with 0, which its deadline's quit causes and so does its last window closing; or another shell holds this session's lock |
+| 1 | The lock's admission, the log, the flags or the lock failed; NativeShell's message loop ended with an error or its UI thread failed; or the deadline backstop fired, 15 s past `--quit-after-ms`, or couldn't start |
 | 69 | A release-identity build, before anything else, or any system other than Windows, before the lock or the log |
 
 ## Containment tiers

@@ -3,7 +3,7 @@
 `crates/shell-nsh` (package `kumochi-shell-nsh`) is the shell Kumochi is moving to: the same
 job as the GPUI shell in `crates/shell`, built on NativeShell instead of GPUI. For now it starts
 the way the GPUI shell does, holds the same lock and log, and runs an empty NativeShell app in a
-hidden window until a deadline. It has no link to the brain and shows nothing.
+hidden window until a deadline. It has no link to the brain, and its app's view is empty.
 
 It is not the app that ships. Kumochi's shell binary stays `kumochi`, built from the GPUI
 shell. The Mac Dev bundle (`cargo xtask mac-bundle`) and the third-party notices both select
@@ -20,8 +20,10 @@ selects, so the shared gates then resolve without NativeShell's feature requests
 Until it replaces the GPUI shell, it refuses the release identity: a build of `kumochi-nsh`
 with the release identity exits with code 69 (unsupported) before it does anything, so it can
 never touch an installed Kumochi's folders, pipe, lock or credentials. Builds with the Dev or
-Gate identity exit successfully, including a release-profile build with
-`kumochi-protocol/gate-identity`. The refusal, and its test, go away when this shell takes over.
+Gate identity pass this check, including a release-profile build with
+`kumochi-protocol/gate-identity`; passing it isn't running: on Windows a build with no flags
+still exits 1, and off Windows every build exits 69. The refusal, and its test, go away when this
+shell takes over.
 
 ## Start-up
 
@@ -29,20 +31,23 @@ On Windows, `main` goes in this order:
 
 1. The release identity exits 69, as above.
 2. It reads the flags and keeps the result.
-3. `platform::start` calls `kumochi_shell_core::startup::start`, the GPUI shell's own start-up. It admits the
-   lock's folder and name (a refusal exits 1 and writes nothing), starts the log (a failure exits
-   1), logs bad flags once as `invalid launch flags` with the parser's fixed text (exit 1), then
-   takes the lock. A lock another shell holds logs `another shell is running in this session`
-   and exits 0.
+3. `platform::start` calls `kumochi_shell_core::startup::start`, the GPUI shell's own
+   start-up. It admits the lock's folder and name, which can create the product folders; a
+   refusal exits 1 without opening the daily log or taking the session lock. Then it starts the
+   log (a failure exits 1), logs bad flags once as `invalid launch flags` with the parser's fixed
+   text (exit 1), and takes the lock. A lock another shell holds logs `another shell is running
+   in this session` and exits 0.
 4. It logs `shell started` with the build, the identity and the edition.
-5. `platform::run` runs the app, which ends the process.
+5. It arms the deadline backstop (below).
+6. `platform::run` runs the app.
 
 Off Windows, `platform::start` exits 69 (unsupported) at step 3, before anything is admitted,
 opened or logged: there's no NativeShell backend here for other systems yet.
 
 **One lock and one log.** It uses the GPUI shell's `SHELL_LOCK` and `SHELL_LOG` on purpose: the
-two shells own the same session, so they exclude each other (whichever starts second exits 0),
-and they write one daily log file.
+two shells will own the same session. For the same edition, data folder and session, once
+start-up succeeds, they exclude each other (whichever starts second exits 0), and they write one
+daily log file.
 
 **The flag.** `--quit-after-ms=<n>`, from 1 to 120000 milliseconds (shell-core's
 `quit_after_ms`), exactly once, is required for now. The window is hidden and there's no link
@@ -51,16 +56,30 @@ argument, is refused with fixed text and exit 1; no argument value reaches the l
 
 ## The app and quit
 
-The app is a Rust root with no view. Its main window is created hidden, with no taskbar entry,
+The app is a Rust root with an empty view. Its main window is created hidden, with no taskbar entry,
 under the app id `SHELL_APP_ID` (`ai.kumochi.dev.shell`, `ai.kumochi.gate.shell`; release's
 `ai.kumochi.shell` stays unused while it's refused) and the title `DISPLAY_NAME`. NativeShell's
 image cache is off.
 
 Its one task waits the delay on NativeShell's `timer` and calls NativeShell's `quit()`. The
-engine stops and `run_app` ends the process itself with `std::process::exit`: 0 after a quit, 1
-if its UI thread failed. So nothing in `main` is dropped. The lock's file handle closes with the
-process, and the log loses nothing because it writes synchronously. The shell's own code uses no
-Tokio API; NativeShell runs its own runtime inside.
+engine stops and `run_app` usually ends the process itself with `std::process::exit`: 0 when its
+message loop ended with 0, 1 otherwise. A quit ends it with 0, but so does the last window
+closing, so 0 doesn't prove the timer fired. Then nothing in `main` is dropped: the OS closes
+the lock's file handle at exit, and the log loses nothing because it writes synchronously. When
+the UI thread can't even start, `run_app` returns 1 instead, and `main` drops the lock normally.
+Release builds abort on a panic. The shell's own code uses no Tokio API; NativeShell runs its
+own runtime inside.
+
+**The deadline backstop.** NativeShell can keep running without the deadline: if the engine
+thread can't start, it only logs that and keeps a hidden window with no root and so no timer,
+and a window or UI-thread failure waits on a message box for a person. Either way a hidden
+process would keep the session's lock, and the GPUI shell of that edition couldn't start. So
+before the app runs, `main` starts its own thread that sleeps `--quit-after-ms` plus a
+15-second grace, then logs `the shell outlived its deadline; ending it` and exits 1. The grace
+is longer than what the pin can spend around the timer on a healthy run (up to 10 s waiting for
+a process it replaces, only when `NSH_RESTART_AFTER` is set, and 200 ms of quit hooks); it's
+unmeasured until the native run. If that thread can't start, the shell logs
+`can't start the deadline backstop` and exits 1 without running the app.
 
 NativeShell's `log` lines go nowhere: no logger is installed, and no NativeShell crate uses
 `tracing`, so none reach Kumochi's log. Their content isn't vetted for it.
@@ -71,24 +90,32 @@ Read at the pin, in `nsh-platform-windows/src/app.rs` and what it calls:
 
 | What | Effect for this shell |
 |---|---|
-| Sets the process's AppUserModelID and registers a toast class with COM | In-process only, for the process's life. The registry key `HKCU\Software\Classes\AppUserModelId\<id>` is written only when an app asks for notification permission or shows a toast, and this one does neither |
+| Sets the process's AppUserModelID and registers a toast class factory with COM | For the process's life, and reachable by COM activation while it runs, with no persistent key. The registry key `HKCU\Software\Classes\AppUserModelId\<id>` is written only when an app asks for notification permission or shows a toast, and this one does neither |
 | URL schemes, file types and one-instance handling | None are set, so it returns before any registry write or mutex |
 | Login item | Off by default: no `Run` key |
 | Data folder `%APPDATA%\<app id>` | Its storage file is made only on a first write, and this app writes nothing, so no file is created |
 | Image cache | Off |
 | Waiting for a replaced process | Only when `NSH_RESTART_AFTER` is set |
 | DPI awareness and OLE | Process-local |
-| A window or UI thread that can't start | A message box with the error text, then exit 1 |
+| A window or UI thread that can't start | A message box with the error text, which waits for a person, then exit 1; the backstop ends it first if nobody answers |
+| A message-only dispatcher window and a `WH_GETMESSAGE` hook on the UI thread | Thread-local, for keys a capture takes |
+| Watches of this process's window cloaking, the session and the display's power | Notifications to this process's own windows only |
+| F11 | Toggles full screen in the app's own window, which is hidden here |
+| An inherited `NSH_FPS` set to anything but empty, `0` or `false` | Turns on the performance monitor, which keeps a refresh ticker running |
 
 ## The updater and network
 
-NativeShell's update and network code stays off, and `deny.toml` enforces it: its
-`[[bans.features]]` entries fail `cargo deny check` if `nsh-platform-windows`'s `net`,
-`updater`, `websocket`, `webview`, `dev` or `js`, `nsh-core`'s `updater`, `loader` or
-`websocket`, or `nsh-engine`'s `net`, `updater` or `js-core` is turned on. With them off,
-nothing on the `run_app` path updates or connects: the engine gets no network, the updater serves
-only JS apps, `nsh_engine::updates::launch` is called only by NativeShell's packaged runners, and
-only the `updater` feature's code can leave work to run at exit.
+NativeShell's update, network, web view, media and JS features are off, and `deny.toml` bans
+them: its `[[bans.features]]` entries fail `cargo deny check` if `nsh-platform-windows`'s
+`net`, `updater`, `websocket`, `webview`, `dev`, `js` or `media`, `nsh-core`'s `updater`,
+`loader` or `websocket`, or `nsh-engine`'s `net`, `updater` or `js-core` is turned on. With
+them off, this root asks for no connection: the engine gets no network, the updater serves only
+JS apps, `nsh_engine::updates::launch` is called only by NativeShell's packaged runners, and only
+the `updater` feature's code can leave work to run at exit.
+
+That isn't the same as no network code in the binary. `nsh-core` still compiles its native
+networking module (`runtime/net.rs`, on Tokio's `net`), and `nsh-updater` is in the graph as a
+dependency `nsh-engine` always has. Neither is called on this path.
 
 ## The NativeShell pin
 

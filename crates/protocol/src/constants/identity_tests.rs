@@ -73,6 +73,7 @@ fn identities_preserve_stored_names_and_profile_aliases() {
     assert_eq!(INSTANCE_SERVICE, expected.instance_service);
     assert_eq!(OBJECT_PREFIX, expected.object_prefix);
     assert_eq!(SHELL_LOCK, expected.shell_lock);
+    assert_eq!(SHELL_APP_ID, expected.shell_app_id);
 }
 
 #[test]
@@ -111,20 +112,18 @@ fn the_gate_identity_shares_no_stored_name_with_the_real_ones() {
 
 #[test]
 fn each_edition_has_its_own_shell_app_id() {
-    let ids = [
-        ProductIdentity::RELEASE.shell_app_id,
-        ProductIdentity::DEV.shell_app_id,
-        ProductIdentity::GATE.shell_app_id,
-    ];
     assert_eq!(
-        ids,
+        [
+            ProductIdentity::RELEASE.shell_app_id,
+            ProductIdentity::DEV.shell_app_id,
+            ProductIdentity::GATE.shell_app_id,
+        ],
         [
             "ai.kumochi.shell",
             "ai.kumochi.dev.shell",
             "ai.kumochi.gate.shell"
         ]
     );
-    assert_eq!(BTreeSet::from(ids).len(), 3, "no two editions share one");
 }
 
 #[test]
