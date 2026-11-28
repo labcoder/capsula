@@ -1,10 +1,7 @@
 //! Drawing a frame's pictures into a target: the records written into the record buffer, then
 //! one indexed draw per record into a 4x multisampled image, resolved into the target.
 
-use std::{
-    fmt,
-    sync::{Arc, atomic::Ordering},
-};
+use std::{fmt, sync::atomic::Ordering};
 
 use super::{Built, FORMAT, Gpu, GpuFailure, SAMPLES, Target, bytes, channels, scoped};
 use crate::limits::DASH;
@@ -33,17 +30,19 @@ impl fmt::Debug for View {
     }
 }
 
-/// What a draw did with the pictures it was given. It is provisional, as a [`Built`] is: its
-/// commands were submitted with no error and no loss seen, not confirmed on the GPU, which may
-/// still be drawing when the answer arrives. wgpu reports nothing when a device is lost under a
-/// submission, so such a loss shows only once it is latched, when every later call answers
-/// `Lost`. Nothing is presented.
+/// What a draw issued for the pictures it was given: counts of commands, not of ink. It is
+/// provisional, as a [`Built`] is: its commands were submitted with no error and no loss seen,
+/// not confirmed on the GPU, which may still be drawing when the answer arrives. wgpu reports
+/// nothing when a device is lost under a submission, so such a loss shows only once it is
+/// latched, when every later call answers `Lost`. Nothing is presented.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Drawn {
-    /// Pictures that drew at least one triangle.
+    /// Pictures for which at least one indexed draw was issued: a record with a range, a
+    /// positive finite opacity and a finite reveal. That proves no visible ink: a reveal of 0
+    /// issues a draw and covers nothing.
     pub drawn: u32,
-    /// Pictures whose geometry is built but whose records draw nothing: text only, empty
-    /// ranges or nothing visible.
+    /// Pictures whose geometry was given built but that issued no draw: text only, empty
+    /// ranges, or opacity 0 or not finite.
     pub empty: u32,
     /// Pictures whose geometry wasn't given built.
     pub unbuilt: u32,
@@ -59,9 +58,9 @@ impl Gpu {
     /// [`GpuFailure::Mismatch`], before any GPU command, for a target or geometry of another
     /// device, a geometry none of the pictures shows, a picture the frame doesn't list or a
     /// record outside its geometry; [`GpuFailure::Refused`] when the GPU refuses the records'
-    /// write, before anything is drawn; [`GpuFailure::Lost`] when the device is lost, before
-    /// work, when the records' write is refused with no error to say why, or once it is
-    /// submitted.
+    /// write or the submission; [`GpuFailure::Lost`] when the device is lost, before work, when
+    /// the records' write is refused with no error to say why, or once it is submitted. Only a
+    /// submission that passes is counted to retire what it reads.
     pub fn draw(
         &mut self,
         target: &Target,
@@ -148,13 +147,8 @@ impl Gpu {
             }
         }
         target.held.last.set(done);
-        self.submitted = done;
-        self.queue.submit([encoder.finish()]);
-        let retired = Arc::clone(&self.retired);
-        self.queue.on_submitted_work_done(move || {
-            retired.fetch_max(done, Ordering::AcqRel);
-        });
-        self.live().map(|()| drawn)
+        self.submit(Some(encoder))?;
+        Ok(drawn)
     }
 
     /// Stages `records` for their slots from `first` on, as an upload stages its buffers.

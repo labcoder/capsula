@@ -126,7 +126,8 @@ stage side's one Direct3D 12 device. Only the stage side names wgpu.
   sample-rate shading (`DownlevelFlags::MULTISAMPLED_SHADING`) and storage buffers in the
   vertex stage. wgpu's native futures for the adapter, the device and its error scopes are ready
   when made, so each is polled once; one still pending fails closed as `NoDevice` and nothing
-  spins.
+  spins. A device lost or a pipeline refused while opening, which wgpu reports outside both
+  scopes, answers `NoDevice` too.
 - **Loss.** The device-loss callback and the uncaptured-error handler are installed before any
   resource exists, and both set one sticky flag that carries nothing of the error. An upload or
   a draw sets it too when wgpu refuses a write with both error scopes clean: wgpu drops a lost
@@ -142,10 +143,16 @@ stage side's one Direct3D 12 device. Only the stage side names wgpu.
   the last draw that read it, or for the device's next submission, which carries an upload's
   queued writes, when no draw read it; one that nothing read or queued comes back at once. Only
   each draw's `Queue::on_submitted_work_done` callback moves what has retired: a returned
-  submission index proves nothing. Nothing waits for it: a reservation that doesn't fit polls the
-  device once without blocking, which runs finished work's callbacks, and tries again. Eight
-  waits are tracked one by one; past them a release merges into the newest, which only holds
-  that charge longer.
+  submission index proves nothing. Every submission runs inside both error scopes, and only one
+  they and the flag pass is counted and gets that callback: a refused one retires nothing, so
+  what it would have read stays charged. Nothing waits for it. A reservation that doesn't fit
+  submits the queued writes once, with no commands, when a waiting charge needs a submission
+  not yet made, as a released upload's does when nothing has drawn; then it polls the device
+  once without blocking, which runs finished work's callbacks, and tries again. So it can answer
+  `Budget` and a later reservation succeed. That poll runs the loss callback in the same pass
+  as stale work-done callbacks, so the flag is checked before anything is taken back, and a
+  reservation that finds a loss answers `Lost`. Eight waits are tracked one by one; past them a
+  release merges into the newest, which only holds that charge longer.
 - **The one poll.** That poll is the one call here wired to wgpu's fatal handler, for a poll
   error wgpu can't convert. It can't reach it: a non-blocking poll on Direct3D 12 sets no wait,
   so its only error is reading the fence, which never fails there. It must be rechecked if
@@ -170,6 +177,8 @@ stage side's one Direct3D 12 device. Only the stage side names wgpu.
   it. A `Built` dropped instead keeps both for the device's life.
 - **Targets.** A `Target` is a 4x multisampled `Bgra8Unorm` texture resolved into a
   single-sampled one, as GPUI's Windows renderer draws paths. It charges both: 20 bytes a pixel.
+  It is provisional, as a `Built` is, and a draw of a frame with no records stages no write
+  that could notice a loss.
   `Gpu::release_target` gives the charge back as above, at once when no draw used it; one from
   another device is handed back unreleased. A `Target` dropped instead keeps its charge for the
   device's life.
@@ -181,11 +190,12 @@ stage side's one Direct3D 12 device. Only the stage side names wgpu.
   all of them read the same slots. A target or geometry of another device, a geometry no drawn
   picture shows, a picture the frame doesn't list or a record outside its geometry is refused as
   `Mismatch` before any GPU command. `View` places the frame: its origin is subtracted once,
-  then everything is scaled. The answer, `Drawn`, counts pictures drawn, pictures whose ranges
-  draw nothing (label text only, empty or fully transparent) and pictures whose geometry wasn't
-  given. It is provisional, as a `Built` is: submitted with no error and no loss seen, not
-  confirmed on the GPU, and never presented. Text primitives keep their range boundaries, so the
-  label unit can draw them, and draw nothing here.
+  then everything is scaled. The answer, `Drawn`, counts commands, not ink: pictures for which
+  an indexed draw was issued, built pictures that issued none (label text only, empty ranges,
+  or opacity 0 or not finite) and pictures whose geometry wasn't given. A reveal of 0 issues a
+  draw and covers nothing. It is provisional, as a `Built` is: submitted with no error and no
+  loss seen, not confirmed on the GPU, and never presented. Text primitives keep their range
+  boundaries, so the label unit can draw them, and draw nothing here.
 
 The fragment stage runs per sample. `along`, `reveal` and `weight` are interpolated at each of
 the four samples, so the end of a reveal or a dash inside a pixel covers part of it, as an edge
@@ -198,8 +208,10 @@ is skipped when its line is drawn whole and undashed.
 
 The device tests build on Windows only. They ask for Direct3D 12's software adapter
 (`force_fallback_adapter`, a CPU adapter) and fail with a fixed message when it is absent; they
-never skip. They read the resolved image back and check pixels worked by hand. Without
-Direct3D 12 in the build, on Linux, one test checks that `Gpu::open` answers `NoAdapter`.
+never skip. They read the resolved image back and check pixels worked by hand. The software
+adapter faults when two devices in one process work on different threads at once, so the device
+tests take turns through one lock. Without Direct3D 12 in the build, on Linux, one test checks
+that `Gpu::open` answers `NoAdapter`.
 
 **Known limits.** This crate's own calls avoid every wgpu entry that reaches wgpu's fatal
 handler, but wgpu 29.0.4 itself unwraps some Direct3D failures, as when it begins its

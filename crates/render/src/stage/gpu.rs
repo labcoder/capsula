@@ -99,8 +99,8 @@ impl Gpu {
     /// # Errors
     /// [`GpuFailure::NoAdapter`] without Direct3D 12 or an adapter; [`GpuFailure::NoDevice`]
     /// when the adapter lacks 4x multisampling and resolve of the image format, sample-rate
-    /// shading or vertex-stage storage buffers; [`GpuFailure::Budget`] when the record buffer
-    /// doesn't fit.
+    /// shading or vertex-stage storage buffers, or when the device is lost or refuses its
+    /// pipeline while opening; [`GpuFailure::Budget`] when the record buffer doesn't fit.
     pub fn open(budget: u64) -> Result<Self, GpuFailure> {
         Self::open_with(&wgpu::RequestAdapterOptions::default(), budget)
     }
@@ -148,6 +148,10 @@ impl Gpu {
         let (records, layout, pipeline) =
             scoped(&device, || draw::pipeline(&device, records_bytes))
                 .map_err(|_| GpuFailure::NoDevice)?;
+        // A pipeline that fails to link reports outside both scopes, to the handler.
+        if lost.load(Ordering::Acquire) {
+            return Err(GpuFailure::NoDevice);
+        }
         let mut tables = Vec::with_capacity(UPLOADED);
         tables.extend((0..UPLOADED).map(|_| Tables::new()));
         Ok(Self {
@@ -175,7 +179,8 @@ impl Gpu {
     /// # Errors
     /// [`GpuFailure::Size`] for a zero side or one past the device's limit,
     /// [`GpuFailure::Budget`] past the budget, [`GpuFailure::Refused`] when the GPU refuses
-    /// either texture, and [`GpuFailure::Lost`]; nothing is charged then.
+    /// either texture, and [`GpuFailure::Lost`]; nothing is charged then. A reservation that
+    /// waits for a release can answer `Budget` and a later one succeed, as [`Gpu::upload`]'s does.
     pub fn target(&mut self, width: u32, height: u32) -> Result<Target, GpuFailure> {
         self.live()?;
         let most = self.device.limits().max_texture_dimension_2d;
@@ -219,7 +224,9 @@ impl Gpu {
                 image(1, resolved),
             ]
         });
-        let [(_, samples), (image, view)] = made.inspect_err(|_| self.budget.refund(bytes))?;
+        let [(_, samples), (image, view)] = made
+            .and_then(|made| self.live().map(|()| made))
+            .inspect_err(|_| self.budget.refund(bytes))?;
         Ok(Target {
             device: self.id,
             samples,
@@ -239,7 +246,9 @@ impl Gpu {
     /// the charge too unless a write was already queued, when it waits like a released one.
     ///
     /// The bytes are staged in memory wgpu allocates for the copy, outside the budget, and
-    /// reach the GPU with the device's next submission.
+    /// reach the GPU with the device's next submission. A reservation short of bytes a release
+    /// still holds submits once and polls without waiting, so it can answer `Budget` and a
+    /// later one succeed.
     pub fn upload(&mut self, mesh: &Mesh) -> Result<Built, GpuFailure> {
         self.live()?;
         let geometry = mesh.geometry().ok_or(GpuFailure::Unfinished)?;
@@ -310,7 +319,7 @@ impl Gpu {
             (made, bind, staged.is_some())
         });
         let failure = match made {
-            Ok(([vertices, indices, pieces], bind, true)) => match self.live() {
+            Ok(([vertices, indices, _], bind, true)) => match self.live() {
                 Ok(()) => {
                     let [starts, objects] = mesh.tables();
                     tables.starts.extend_from_slice(starts);
@@ -320,7 +329,6 @@ impl Gpu {
                         geometry,
                         vertices,
                         indices,
-                        _pieces: pieces,
                         bind,
                         tables,
                         held: Held::new(total, carried),
@@ -390,20 +398,45 @@ impl Gpu {
             .release(bytes, last, self.retired.load(Ordering::Acquire));
     }
 
-    /// Charges `bytes`, first taking back what retired submissions released; checks once more
-    /// after one non-blocking poll, which runs the work-done callbacks of finished submissions.
+    /// Charges `bytes`, first taking back what retired submissions released. Short, it submits
+    /// the queued writes once when a waiting charge needs a submission not yet made, then checks
+    /// once more after one non-blocking poll, which runs the callbacks of finished work. Nothing
+    /// waits: this can answer `Budget` and a later call succeed.
     fn reserve(&mut self, bytes: u64) -> Result<(), GpuFailure> {
         self.budget.reclaim(self.retired.load(Ordering::Acquire));
         if self.budget.reserve(bytes).is_ok() {
             return Ok(());
         }
+        if self.budget.waits_past(self.submitted) {
+            self.submit(None)?;
+        }
         // The one call here wired to wgpu's fatal handler. A non-blocking poll can't reach it on
         // Direct3D 12, whose only poll error is a fence read that never fails there; recheck this
         // if another back end is ever enabled.
-        if self.device.poll(wgpu::PollType::Poll).is_ok() {
+        let polled = self.device.poll(wgpu::PollType::Poll).is_ok();
+        // The poll runs the loss callback in the same pass as stale work-done callbacks.
+        self.live()?;
+        if polled {
             self.budget.reclaim(self.retired.load(Ordering::Acquire));
         }
         self.budget.reserve(bytes)
+    }
+
+    /// Submits `commands`, or only the queued writes, in error scopes. Only a submission that
+    /// both scopes and the loss flag pass is counted and gets the callback that retires it.
+    fn submit(&mut self, commands: Option<wgpu::CommandEncoder>) -> Result<(), GpuFailure> {
+        let submitted = scoped(&self.device, || {
+            self.queue
+                .submit(commands.map(wgpu::CommandEncoder::finish));
+        });
+        submitted.map_err(|failure| self.live().err().unwrap_or(failure))?;
+        self.live()?;
+        self.submitted += 1;
+        let (retired, done) = (Arc::clone(&self.retired), self.submitted);
+        self.queue.on_submitted_work_done(move || {
+            retired.fetch_max(done, Ordering::AcqRel);
+        });
+        Ok(())
     }
 
     fn live(&self) -> Result<(), GpuFailure> {
@@ -425,8 +458,11 @@ impl fmt::Debug for Gpu {
     }
 }
 
-/// An image to draw into: a 4x multisampled texture resolved into a single-sampled one. Hand it
-/// back with [`Gpu::release_target`]: one dropped instead keeps its charge for the device's life.
+/// An image to draw into: a 4x multisampled texture resolved into a single-sampled one. It is
+/// provisional, as a [`Built`] is: its textures were created with no error and no loss seen,
+/// not confirmed on the GPU, and a draw of a frame with no records stages no write that could
+/// notice a loss. Hand it back with [`Gpu::release_target`]: one dropped instead keeps its
+/// charge for the device's life.
 pub struct Target {
     device: u64,
     samples: wgpu::TextureView,
@@ -463,8 +499,7 @@ pub struct Built {
     geometry: GeometryId,
     vertices: wgpu::Buffer,
     indices: wgpu::Buffer,
-    /// Kept for the bind group's sake.
-    _pieces: wgpu::Buffer,
+    /// Its records and its pieces, which it keeps alive.
     bind: wgpu::BindGroup,
     tables: Tables,
     held: Held,
@@ -585,6 +620,13 @@ impl Budget {
         }
         self.waiting[self.len] = (last, bytes);
         self.len += 1;
+    }
+
+    /// Whether a waiting charge needs a submission after `submitted`.
+    fn waits_past(&self, submitted: u64) -> bool {
+        self.waiting[..self.len]
+            .iter()
+            .any(|(last, _)| *last > submitted)
     }
 
     fn reclaim(&mut self, retired: u64) {
@@ -801,6 +843,14 @@ impl Gpu {
         drop(mapped);
         buffer.unmap();
         pixels
+    }
+}
+
+#[cfg(all(test, windows))]
+impl Target {
+    /// Destroys the resolved texture, so a draw into it is refused at submission.
+    pub(crate) fn destroy_image(&self) {
+        self.image.destroy();
     }
 }
 
