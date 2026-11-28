@@ -1,0 +1,25 @@
+[package]
+name = "kumochi-render"
+description = "Kumochi's drawing renderer: the mesh and instance model a stage thread draws from."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+kumochi-protocol.workspace = true
+kumochi-scene.workspace = true
+kumochi-shell-core.workspace = true
+# Main's painter tessellates with lyon at this pin; only the stage side's mesh build calls it.
+lyon = "=1.0.19"
+thiserror.workspace = true
+
+[[bench]]
+name = "render-workloads"
+path = "benches/render_workloads.rs"
+harness = false
+test = false
+
+[lints]
+workspace = true

@@ -306,6 +306,13 @@ pub enum Input {
         /// The run it belonged to.
         run: RunId,
     },
+    /// The store refused `run`'s turn before keeping any of it.
+    TurnRefused {
+        /// The run.
+        run: RunId,
+        /// What the shell says about it.
+        reason: UserError,
+    },
     /// The shell went away.
     ShellLost,
     /// The shell took no data for too long while `run` streamed.
@@ -837,7 +844,7 @@ pub struct Coordinator {
     screen_marks: crate::drawing::ScreenMarks,
     /// Whether the saved default names the local server, which no edit changes while no build
     /// serves it; each turn carries it to the store.
-    pub(crate) local_default: bool,
+    pub(crate) local_default: crate::config::DefaultIntent,
     /// `[tuning.runs]`, set once at start.
     pub(crate) tuning: crate::config::tuning::RunTuning,
     /// Never deleted or renamed.
@@ -937,7 +944,7 @@ impl Coordinator {
             drawing_held: Vec::new(),
             drawing_reply: None,
             screen_marks: crate::drawing::SCREEN_MARKS,
-            local_default: false,
+            local_default: crate::config::DefaultIntent::Other,
             tuning: crate::config::tuning::RunTuning::default(),
             main_thread,
             last_thread,
@@ -1150,7 +1157,13 @@ impl Coordinator {
             }
             Input::RoundStored { run, round } => self.round_stored(run, round, &mut effects)?,
             Input::RunStored { run } => self.run_stored(run, &mut effects)?,
-            Input::StoreFailed { run } => self.store_failed(run, &mut effects)?,
+            Input::StoreFailed { run } => self.store_failed(run, None, &mut effects)?,
+            Input::TurnRefused { run, reason } => {
+                if let Ok(current) = self.current(run) {
+                    current.error = Some(reason.clone());
+                }
+                self.store_failed(run, Some(reason), &mut effects)?;
+            }
             Input::ShellLost => {
                 self.begin_model_session();
                 for (_, _, end) in &mut self.drawing_held {
@@ -1561,7 +1574,14 @@ impl Coordinator {
     }
 
     /// The oldest unanswered operation of `run` failed: the turn, a step, or the outcome.
-    fn store_failed(&mut self, run: RunId, effects: &mut Vec<Effect>) -> Result<(), Stale> {
+    /// A run whose turn or write wasn't stored fails; `reason`, when the store refused the turn,
+    /// goes with the failure an already ending run is told, so a stopped run's shell learns it too.
+    fn store_failed(
+        &mut self,
+        run: RunId,
+        reason: Option<UserError>,
+        effects: &mut Vec<Effect>,
+    ) -> Result<(), Stale> {
         if self.find(run)?.begin.is_some() {
             return Err(Stale);
         }
@@ -1575,11 +1595,15 @@ impl Coordinator {
         }
         let at = self.ending_at(run)?;
         let ended = &mut self.ending[at];
-        let (id, thread) = (ended.id, ended.thread);
-        let ending = ended.ending.as_mut().expect("an ending run has an Ending");
-        if ending.stored {
+        if ended.ending.as_ref().is_some_and(|ending| ending.stored) {
             return Err(Stale);
         }
+        // Every telling of this ending, a quieting one's included, carries the refusal.
+        if reason.is_some() {
+            ended.error.clone_from(&reason);
+        }
+        let (id, thread) = (ended.id, ended.thread);
+        let ending = ended.ending.as_mut().expect("an ending run has an Ending");
         // A failed outcome was already told; any other ending now turns out failed. A quieting
         // one tells it once it's released.
         let tell_end = ending.notify == Notify::Shell
@@ -1591,7 +1615,7 @@ impl Coordinator {
                 run: id,
                 thread,
                 phase: Phase::Failed,
-                error: None,
+                error: reason,
                 origin: None,
             }));
         }

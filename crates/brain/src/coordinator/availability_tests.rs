@@ -1371,6 +1371,23 @@ fn a_local_choice_is_refused_and_never_answered_on_chatgpt() {
 /// A local route takes no picture with every switch on, even ready with an image model, while
 /// the same model on `ChatGPT` does.
 #[test]
+fn a_local_round_that_ends_untold_is_unfinished_never_retried() {
+    let core = Coordinator::new(ThreadId(1), ThreadId(3), RunId(9), Vec::new());
+    let unfinished = kumochi_protocol::message::UserError::from(
+        kumochi_protocol::message::ErrorKey::LocalUnfinished,
+    );
+    assert_eq!(
+        core.engine_reason(Some(on(ConnectionKind::LocalChat, 5)), Finish::Truncated),
+        Some(unfinished)
+    );
+    assert_ne!(
+        core.engine_reason(Some(on(ConnectionKind::ChatGpt, 5)), Finish::Truncated)
+            .map(|error| error.key()),
+        Some(kumochi_protocol::message::ErrorKey::LocalUnfinished)
+    );
+}
+
+#[test]
 fn a_local_route_takes_no_picture_even_when_ready_with_an_image_model() {
     let haiku = ModelSlug::new("haiku").expect("valid");
     let mut core = Coordinator::new(ThreadId(1), ThreadId(3), RunId(9), Vec::new());

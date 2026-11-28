@@ -680,6 +680,13 @@ impl SceneView {
             .iter()
             .map(|node| (node.handle, &node.primitives[..]))
     }
+    /// Every object's handle, the composed scale its rect fallbacks were charged at, and its
+    /// primitives as the shared list its frames carry, for paint state that outlives a borrow.
+    pub fn shared_sources(&self) -> impl Iterator<Item = (Handle, f32, &Arc<[Prim]>)> {
+        self.nodes
+            .iter()
+            .map(|node| (node.handle, node.paint_scale, &node.primitives))
+    }
     /// The activated layout, which a cut freezes.
     pub fn layout(&self) -> &LayoutState {
         &self.layout

@@ -2689,6 +2689,7 @@ fn queued_talk_back_waits_for_both_ends_of_a_deleted_reply() {
         };
         acknowledge_queued(&link.control, output);
         assert!(matches!(next(&events), LinkEvent::Settings { .. }));
+        text_ready(&events);
         let text = queued_text(1, "before deletion");
         assert!(link.handle.send_data(&session, text.clone()));
         assert_eq!(
@@ -2848,6 +2849,10 @@ fn queued_admission_waits_for_the_outbox_but_the_first_voice_edge_refuses() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one pair from consent through admission to a refused origin"
+)]
 fn queued_hold_waits_for_its_saved_preferences_and_rejects_another_run_origin() {
     use kumochi_protocol::message::{GestureId, HoldStatus, OutputGeneration, SettingsOp};
 
@@ -2893,6 +2898,7 @@ fn queued_hold_waits_for_its_saved_preferences_and_rejects_another_run_origin() 
     };
     assert_ne!(output, OutputGeneration(0));
     acknowledge_queued(&link.control, output);
+    text_ready(&events);
     assert!(link.handle.admits_voice(generation), "Show Screen is set");
 
     for op in [
@@ -2974,6 +2980,7 @@ fn explicit_cancel_keeps_queued_hold_cancelled_until_stop_is_acknowledged() {
         panic!("the pair offers its logical output");
     };
     acknowledge_queued(&link.control, output);
+    text_ready(&events);
 
     let gesture = GestureId(41);
     let mut runs = ready_runs(&session);
@@ -3055,6 +3062,7 @@ fn a_queued_screen_release_goes_only_while_its_hold_listens_unrevoked() {
             panic!("the pair offers its logical output");
         };
         acknowledge_queued(&link.control, output);
+        text_ready(&events);
         let recognized = ControlToBrain::ScreenHoldRecognized {
             gesture,
             thread: None,
@@ -3603,6 +3611,7 @@ fn assert_silent_speech_refused(label: &str, at: SilentSpeechAt) {
         matches!(next(&events), LinkEvent::Settings { .. }),
         "the authenticated pair forwards Settings"
     );
+    text_ready(&events);
     let text = queued_text(1, "write");
     assert!(
         link.handle.send_data(&session, text.clone()),
@@ -4030,6 +4039,7 @@ fn queued_report_refusal_closes_the_full_control_mailbox_and_parked_data_head() 
     )
     .unwrap();
     assert!(matches!(next(&events), LinkEvent::Settings { .. }));
+    text_ready(&events);
     assert!(matches!(
         next(&events),
         LinkEvent::RunState { run: RunId(7), .. }
@@ -5145,6 +5155,7 @@ fn queued_plain_head_waits_for_the_exact_named_run_without_blocking_control() {
     let output_generation = queued_registration(&link.control, &link.handle.shared);
     assert!(matches!(next(&events), LinkEvent::Settings { .. }));
     acknowledge_queued(&link.control, output_generation);
+    text_ready(&events);
     let head = DataToShell::SegmentQueued {
         run: RunId(8),
         segment: SegmentId(0),
@@ -5276,6 +5287,14 @@ fn queued_wrong_or_duplicate_registration_ack_ends_the_pair() {
         )
         .expect("invalid ack");
         queued_pair_closed(link.link, &link.control, &link.data);
+        assert!(matches!(next(&events), LinkEvent::Settings { .. }));
+        if duplicate {
+            text_ready(&events);
+        }
+        assert!(matches!(
+            events.recv_timeout(PATIENCE),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+        ));
     }
 }
 
@@ -5332,6 +5351,7 @@ fn queued_speech_start_or_scene_promise_closes_without_data_credit() {
         frame::write(&mut &*link.data, &unsupported, Pipe::Data).expect("unsupported frame");
         queued_pair_closed(link.link, &link.control, &link.data);
         assert!(matches!(next(&events), LinkEvent::Settings { .. }));
+        text_ready(&events);
         assert!(matches!(
             events.recv_timeout(PATIENCE),
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
@@ -5421,6 +5441,7 @@ fn a_queued_keyup_publishes_its_release_only_when_it_is_sent() {
         let output = queued_registration(&link.control, &link.handle.shared);
         acknowledge_queued(&link.control, output);
         assert!(matches!(next(&events), LinkEvent::Settings { .. }));
+        text_ready(&events);
         let view = kumochi_protocol::message::SettingsView {
             talk_back: true,
             show_screen: false,
@@ -6366,20 +6387,21 @@ fn a_show_screen_write_settling_after_reconnect_leaves_the_hold_s_cancel_to_the_
             frame::write(&mut &*control, &message, Pipe::Control).unwrap();
             assert!(matches!(next(events), LinkEvent::Settings { .. }));
         };
-    let register = |control: &PipeClient| {
+    let register = |control: &PipeClient, events: &std::sync::mpsc::Receiver<LinkEvent>| {
         let Some(ControlToBrain::QueuedAudioOutput(_, output, _)) =
             frame::read(&mut &*control, Pipe::Control).unwrap()
         else {
             panic!("the pair offers its logical output");
         };
         acknowledge_queued(control, output);
+        text_ready(events);
     };
     let shared = Arc::new(Shared::default());
     let first = attended_queued_shared("show-screen-reconnect-first", Arc::clone(&shared));
     let events = patient(first.events);
     let session = connected(next(&events));
     settings(&first.control, &events, false);
-    register(&first.control);
+    register(&first.control, &events);
     let write = ControlToBrain::Settings(SettingsOp::SetShowScreen(true));
     assert!(first.handle.send_control(&session, write.clone()));
     assert_eq!(
@@ -6393,7 +6415,7 @@ fn a_show_screen_write_settling_after_reconnect_leaves_the_hold_s_cancel_to_the_
     let events = patient(second.events);
     let session = connected(next(&events));
     settings(&second.control, &events, false);
-    register(&second.control);
+    register(&second.control, &events);
     let gesture = GestureId(51);
     second.handle.track_input(gesture);
     second.handle.watch_revoke(gesture, session.generation());

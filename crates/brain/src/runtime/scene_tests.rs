@@ -279,7 +279,7 @@ async fn held_fifth_scene(
 #[tokio::test]
 async fn scenes_after_a_held_fifth_scene_name_the_four_its_transaction_committed() {
     let scratch = Scratch::new("barrier-fifth");
-    let (mut brain, _, four, lock) = held_fifth_scene(&scratch).await;
+    let (mut brain, _, four, lock) = Box::pin(held_fifth_scene(&scratch)).await;
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
     let client = async {
@@ -301,7 +301,7 @@ async fn scenes_after_a_held_fifth_scene_name_the_four_its_transaction_committed
 #[tokio::test]
 async fn stop_and_clear_are_served_while_the_barrier_waits() {
     let scratch = Scratch::new("barrier-served");
-    let (mut brain, mut observed, four, lock) = held_fifth_scene(&scratch).await;
+    let (mut brain, mut observed, four, lock) = Box::pin(held_fifth_scene(&scratch)).await;
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
     let client = async {

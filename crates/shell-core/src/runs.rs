@@ -64,6 +64,9 @@ const RECONNECT: [ErrorKey; 7] = [
     ErrorKey::AnthropicKeyRejected,
     ErrorKey::RenewalUnconfirmed,
 ];
+/// Refusals the brain gives before it keeps a turn, so its text exists only here and a thread it
+/// named for New was never made.
+const UNKEPT: [ErrorKey; 2] = [ErrorKey::ConfigUnreadable, ErrorKey::LocalOff];
 
 /// Why a turn wasn't sent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -911,7 +914,7 @@ impl Runs {
     /// A `RunState` with the brain's reason: what applying it asks, and the notice to show, which
     /// is withheld once Esc or a delete has fenced the run off. A failure that means the turn
     /// needs sign-in restores its text once before answering, only while its thread and selection are
-    /// current.
+    /// current, and so does a refusal before the brain kept it, which also returns New's target.
     pub fn apply_run_state(
         &mut self,
         run: RunId,
@@ -1045,12 +1048,29 @@ impl Runs {
                 && self.thread() == Some(thread)
             {
                 if !submitted.answering
-                    && error.is_some_and(|error| RECONNECT.contains(&error.key()))
+                    && error.is_some_and(|error| {
+                        UNKEPT.contains(&error.key()) || RECONNECT.contains(&error.key())
+                    })
                 {
                     applied.restore = submitted.text;
                 } else if error.is_some_and(|error| error.actions().contains(&Action::Retry)) {
                     self.recovery = Some((run, submitted));
                 }
+            }
+            // A refusal before any turn was kept means a New target's thread was never made,
+            // whichever of its turns the refusal answers; one still owed an answer keeps it.
+            let owed = self
+                .submitted
+                .iter()
+                .chain(self.named.as_ref().map(|(_, submitted)| submitted))
+                .any(|submitted| submitted.thread == Some(thread));
+            if phase == Phase::Failed
+                && error.is_some_and(|error| UNKEPT.contains(&error.key()))
+                && !self.durable
+                && self.target == Target::Task(thread)
+                && !owed
+            {
+                self.target = Target::New;
             }
         }
         if let Some(pending) = self.pending_stops.get_mut(&run) {

@@ -79,7 +79,7 @@ fn assemble(
             .filter(|item| after.is_none_or(|after| item.id > after)),
     );
     items.sort_by_key(|item| item.id);
-    let runs = runs(items, turn.run)?;
+    let runs = runs(snapshot, items, turn.run)?;
     let (current, older) = runs.split_last().ok_or(BuildError::NoTurn)?;
 
     let instructions = instructions(run);
@@ -183,48 +183,56 @@ fn append_drawings(
     }
 }
 
+/// How many items grouping handles between checks of its read's control.
+const CHECK_EVERY: usize = 256;
+
 /// Groups ordered items into whole runs, the current one last. Each call is followed by its
-/// result within its run, and no item repeats.
-fn runs(items: Vec<Item>, current: RunId) -> Result<Vec<Vec<Item>>, BuildError> {
-    if items.windows(2).any(|pair| pair[0].id == pair[1].id) {
-        return Err(BuildError::InvalidCut);
-    }
+/// result within its run, and no item repeats. One pass does it all, checking `snapshot`'s read
+/// control every [`CHECK_EVERY`] items and once more before it succeeds, so a cancel or the
+/// deadline stops it however long the history is.
+pub(super) fn runs(
+    snapshot: &Snapshot<'_>,
+    items: Vec<Item>,
+    current: RunId,
+) -> Result<Vec<Vec<Item>>, BuildError> {
     let mut runs: Vec<Vec<Item>> = Vec::new();
-    for item in items {
-        match runs.last_mut() {
-            Some(open) if open[0].run == item.run => open.push(item),
-            _ => {
-                if runs.iter().any(|done| done[0].run == item.run) {
-                    return Err(BuildError::InvalidCut);
-                }
-                runs.push(vec![item]);
-            }
+    let mut seen = BTreeSet::new();
+    let mut open: Option<CallId> = None;
+    let mut previous = None;
+    for (at, item) in items.into_iter().enumerate() {
+        if at % CHECK_EVERY == 0 {
+            snapshot.check()?;
         }
-    }
-    for run in &runs {
-        let mut open = None;
-        for item in run {
-            match &item.body {
-                Body::Call { call, .. } if open.is_none() => open = Some(call),
-                Body::History { call, .. } if open == Some(call) => open = None,
-                Body::Call { .. } | Body::History { .. } => return Err(BuildError::InvalidCut),
-                Body::User(_)
-                | Body::Assistant(_)
-                | Body::Narration { .. }
-                | Body::Native { .. }
-                | Body::Result { .. }
-                | Body::Recall { .. } => {}
-            }
-        }
-        if open.is_some() {
+        if previous.replace(item.id) == Some(item.id) {
             return Err(BuildError::InvalidCut);
         }
+        if runs.last().is_none_or(|run| run[0].run != item.run) {
+            if open.is_some() || !seen.insert(item.run) {
+                return Err(BuildError::InvalidCut);
+            }
+            runs.push(Vec::new());
+        }
+        match &item.body {
+            Body::Call { call, .. } if open.is_none() => open = Some(call.clone()),
+            Body::History { call, .. } if open.as_ref() == Some(call) => open = None,
+            Body::Call { .. } | Body::History { .. } => return Err(BuildError::InvalidCut),
+            Body::User(_)
+            | Body::Assistant(_)
+            | Body::Narration { .. }
+            | Body::Native { .. }
+            | Body::Result { .. }
+            | Body::Recall { .. } => {}
+        }
+        runs.last_mut().expect("a run was opened above").push(item);
+    }
+    if open.is_some() {
+        return Err(BuildError::InvalidCut);
     }
     let Some(last) = runs.last() else {
         return Err(BuildError::NoTurn);
     };
     if last[0].run != current {
-        return Err(if runs.iter().any(|run| run[0].run == current) {
+        return Err(if seen.contains(&current) {
             BuildError::InvalidCut
         } else {
             BuildError::NoTurn
@@ -233,6 +241,7 @@ fn runs(items: Vec<Item>, current: RunId) -> Result<Vec<Vec<Item>>, BuildError> 
     if !last.iter().any(|item| matches!(item.body, Body::User(_))) {
         return Err(BuildError::NoTurn);
     }
+    snapshot.check()?;
     Ok(runs)
 }
 
@@ -568,7 +577,7 @@ fn quote(
 }
 
 /// The instructions for `run`: its names and role, read once when the run started.
-fn instructions(run: &RunSnapshot) -> String {
+pub(super) fn instructions(run: &RunSnapshot) -> String {
     let role = match run.origin {
         Origin::Kumo => KUMO_ROLE,
         Origin::Task(_) => TASK_ROLE,

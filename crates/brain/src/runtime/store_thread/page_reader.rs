@@ -416,4 +416,6 @@ mod lifecycle_replay_tests;
 #[cfg(test)]
 mod lifecycle_tests;
 #[cfg(test)]
+mod local_tests;
+#[cfg(test)]
 mod tests;

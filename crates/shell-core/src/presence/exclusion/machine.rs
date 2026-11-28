@@ -1,5 +1,9 @@
 //! The capture exclusion's lease, apart from the windows it covers: one lease at a time, a
 //! receipt for each surface, and a cleanup that restores every surface or keeps the debt.
+//!
+//! The lease's decisions are a core driven by asks and answers: it says what to ask a surface
+//! next and takes each answer whenever it comes, so its surfaces may live on other threads.
+//! `acquire`, `attach`, `cleanup` and `expire` drive it through `Surfaces`, answering at once.
 
 use std::time::{Duration, Instant};
 
@@ -15,6 +19,10 @@ use kumochi_protocol::message::{CaptureFor, LeaseGeneration};
 pub mod fixture;
 
 pub(super) const LIFETIME: Duration = Duration::from_secs(3);
+/// Times an acquire driven by asks and answers, for its own snapshots and excludes, from its start.
+/// The four calls answer at once and aren't timed; a surface opened after the grant has no bound but
+/// the lease's lifetime.
+pub(super) const BOUND: Duration = Duration::from_millis(250);
 const SLOTS: [Slot; 8] = [
     Slot::Dock,
     Slot::Proxy,
@@ -26,7 +34,7 @@ const SLOTS: [Slot; 8] = [
     Slot::Onboarding,
 ];
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Slot {
     Dock,
     Proxy,
@@ -45,7 +53,7 @@ pub struct Key {
     pub(super) generation: LeaseGeneration,
 }
 
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, thiserror::Error, PartialEq, Eq)]
 pub enum Error {
     #[error("exclusion is busy or has restoration debt")]
     Busy,
@@ -64,11 +72,117 @@ pub trait Surfaces {
     fn same(&self, slot: Slot, receipt: &Self::Receipt) -> bool;
 }
 
+/// One question for one surface. Its answer quotes `id`. A driver applies one surface's asks in
+/// the order it took them: a restore applied before an earlier exclude leaves the surface excluded
+/// with no receipt held.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Ask {
+    pub id: AskId,
+    pub slot: Slot,
+    pub op: Op,
+}
+
+/// The ask's lease and its serial within that lease, so an answer counts only while it waits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AskId {
+    generation: LeaseGeneration,
+    serial: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Op {
+    /// Read the surface's capture state and change nothing.
+    Snapshot,
+    /// Exclude the surface from capture, with its slot's receipt.
+    Exclude,
+    /// Put back the capture state its slot's receipt holds.
+    Restore,
+}
+
+/// Where the lease stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stand {
+    /// No lease.
+    Idle,
+    /// Snapshots or excludes are still out, and nothing is granted.
+    Acquiring,
+    /// Every bound surface is covered or proved gone, a surface opened since included.
+    Granted,
+    /// Revoked, with restores still to ask or to answer.
+    Restoring,
+    /// Revoked, and a restore failed: it waits to be asked again, or for its surface to be gone.
+    Debt,
+}
+
+/// Each carries the acquire's bound while the acquire is still out.
+enum Stage {
+    Snapshots(Instant),
+    Excludes(Instant),
+    Granted,
+    Revoked,
+}
+
+/// What a slot holds. A wait's `None` is an ask not yet taken, `Some` the serial it went out as.
+enum Bound<R> {
+    Free,
+    Snapshot { asked: Option<u64>, attached: bool },
+    Held(R, Step),
+}
+
+enum Step {
+    /// The snapshot is in; the excludes wait for every other snapshot.
+    Read,
+    Exclude(Option<u64>),
+    Covered,
+    Restore(Option<u64>),
+    Debt,
+}
+
+impl<R> Bound<R> {
+    fn wait(&mut self) -> Option<(Op, &mut Option<u64>)> {
+        match self {
+            Self::Snapshot { asked, .. } => Some((Op::Snapshot, asked)),
+            Self::Held(_, Step::Exclude(asked)) => Some((Op::Exclude, asked)),
+            Self::Held(_, Step::Restore(asked)) => Some((Op::Restore, asked)),
+            Self::Free | Self::Held(_, Step::Read | Step::Covered | Step::Debt) => None,
+        }
+    }
+}
+
 pub struct ExclusionLease<R> {
     pub(super) key: Key,
     deadline: Instant,
-    revoked: bool,
-    pub(super) receipts: [Option<R>; 8],
+    stage: Stage,
+    serial: u64,
+    slots: [Bound<R>; 8],
+}
+
+impl<R> ExclusionLease<R> {
+    fn covered(&self) -> bool {
+        self.slots
+            .iter()
+            .all(|bound| matches!(bound, Bound::Free | Bound::Held(_, Step::Covered)))
+    }
+
+    fn granted(&self) -> bool {
+        matches!(self.stage, Stage::Granted) && self.covered()
+    }
+
+    /// Once the excludes have begun, every receipt held is restored, asked or not, as cleanup
+    /// always has; a restore already out keeps waiting. Before then nothing has changed.
+    fn revoke(&mut self) {
+        let excluding = !matches!(self.stage, Stage::Snapshots(_));
+        self.stage = Stage::Revoked;
+        for bound in &mut self.slots {
+            *bound = match std::mem::replace(bound, Bound::Free) {
+                Bound::Held(receipt, Step::Restore(Some(serial))) => {
+                    Bound::Held(receipt, Step::Restore(Some(serial)))
+                }
+                Bound::Held(receipt, _) if excluding => Bound::Held(receipt, Step::Restore(None)),
+                Bound::Free | Bound::Snapshot { .. } | Bound::Held(..) => Bound::Free,
+            };
+        }
+    }
 }
 
 pub struct Exclusion<R> {
@@ -86,6 +200,266 @@ impl<R> Default for Exclusion<R> {
 }
 
 impl<R> Exclusion<R> {
+    /// Starts a lease and asks every slot for its snapshot. The lease's lifetime and the
+    /// acquire's bound both start at `now`.
+    pub fn begin(&mut self, session: u64, input: CaptureFor, now: Instant) -> Result<Key, Error> {
+        if self.lease.is_some() {
+            return Err(Error::Busy);
+        }
+        self.generation = self.generation.checked_add(1).ok_or(Error::Exhausted)?;
+        let deadline = now.checked_add(LIFETIME).ok_or(Error::Exhausted)?;
+        let bound = now.checked_add(BOUND).ok_or(Error::Exhausted)?;
+        let key = Key {
+            session,
+            input,
+            generation: LeaseGeneration(self.generation),
+        };
+        self.lease = Some(ExclusionLease {
+            key,
+            deadline,
+            stage: Stage::Snapshots(bound),
+            serial: 0,
+            slots: std::array::from_fn(|_| Bound::Snapshot {
+                asked: None,
+                attached: false,
+            }),
+        });
+        Ok(key)
+    }
+
+    /// A surface opened in `slot` under the lease, to be snapshotted and excluded before it
+    /// shows. The two phases cover the acquire's own snapshots; this one is snapshotted and
+    /// excluded on its own, and until that's confirmed the lease isn't live. A slot already bound
+    /// revokes the lease; a revoked lease refuses as `Busy`.
+    pub fn opened(&mut self, slot: Slot) -> Result<(), Error> {
+        let Some(lease) = &mut self.lease else {
+            return Ok(());
+        };
+        if matches!(lease.stage, Stage::Revoked) {
+            return Err(Error::Busy);
+        }
+        let bound = &mut lease.slots[slot as usize];
+        if matches!(bound, Bound::Free) {
+            *bound = Bound::Snapshot {
+                asked: None,
+                attached: true,
+            };
+            return Ok(());
+        }
+        self.revoke();
+        Err(Error::Surface)
+    }
+
+    /// The next ask to send, marked as sent; `None` while the lease only waits.
+    pub fn next_ask(&mut self) -> Option<Ask> {
+        let lease = self.lease.as_mut()?;
+        for (slot, bound) in SLOTS.into_iter().zip(&mut lease.slots) {
+            if let Some((op, asked)) = bound.wait()
+                && asked.is_none()
+            {
+                lease.serial += 1;
+                *asked = Some(lease.serial);
+                let id = AskId {
+                    generation: lease.key.generation,
+                    serial: lease.serial,
+                };
+                return Some(Ask { id, slot, op });
+            }
+        }
+        None
+    }
+
+    /// The receipt `slot` holds, which its exclude and restore asks carry. A driver reads it when
+    /// it takes the ask, not when the surface gets to it.
+    pub fn receipt(&self, slot: Slot) -> Option<&R> {
+        match &self.lease.as_ref()?.slots[slot as usize] {
+            Bound::Held(receipt, _) => Some(receipt),
+            Bound::Free | Bound::Snapshot { .. } => None,
+        }
+    }
+
+    /// A snapshot's answer at `now`. While the acquire is still out it counts only before the
+    /// acquire's bound; `now` applies the bound first, whether or not this answer counts. A
+    /// failure, or no surface in a slot opened under the lease, revokes it.
+    pub fn snapshot(&mut self, id: AskId, read: Result<Option<R>, Error>, now: Instant) {
+        self.overdue(now);
+        self.snapshot_in(id, read);
+    }
+
+    fn snapshot_in(&mut self, id: AskId, read: Result<Option<R>, Error>) {
+        let Some((lease, index)) = self.waiting(id, Op::Snapshot) else {
+            return;
+        };
+        let attached = matches!(lease.slots[index], Bound::Snapshot { attached: true, .. });
+        let step = if matches!(lease.stage, Stage::Snapshots(_)) {
+            Step::Read
+        } else {
+            Step::Exclude(None)
+        };
+        match read {
+            Ok(Some(receipt)) => lease.slots[index] = Bound::Held(receipt, step),
+            Ok(None) if !attached => lease.slots[index] = Bound::Free,
+            Ok(None) | Err(_) => lease.revoke(),
+        }
+        self.settle();
+    }
+
+    /// An exclude's answer at `now`. While the acquire is still out it counts only before the
+    /// acquire's bound; `now` applies the bound first, whether or not this answer counts. A
+    /// failure revokes the lease.
+    pub fn excluded(&mut self, id: AskId, done: Result<(), Error>, now: Instant) {
+        self.overdue(now);
+        self.excluded_in(id, done);
+    }
+
+    fn excluded_in(&mut self, id: AskId, done: Result<(), Error>) {
+        let Some((lease, index)) = self.waiting(id, Op::Exclude) else {
+            return;
+        };
+        if done.is_err() {
+            lease.revoke();
+        } else if let Bound::Held(_, step) = &mut lease.slots[index] {
+            *step = Step::Covered;
+        }
+        self.settle();
+    }
+
+    /// A restore's answer, which counts whenever it comes. A failure stays as debt.
+    pub fn restored(&mut self, id: AskId, done: Result<(), Error>) {
+        let Some((lease, index)) = self.waiting(id, Op::Restore) else {
+            return;
+        };
+        if done.is_ok() {
+            lease.slots[index] = Bound::Free;
+        } else if let Bound::Held(_, step) = &mut lease.slots[index] {
+            *step = Step::Debt;
+        }
+        self.settle();
+    }
+
+    /// Settles `slot` without a restore when `proved` shows the surface of the receipt it holds now
+    /// is gone, and says whether it did. A slot holding no receipt is left as it is. `now` applies
+    /// the acquire's bound first, whether or not the proof counts.
+    pub fn gone(&mut self, slot: Slot, proved: impl FnOnce(&R) -> bool, now: Instant) -> bool {
+        self.overdue(now);
+        self.gone_in(slot, proved)
+    }
+
+    fn gone_in(&mut self, slot: Slot, proved: impl FnOnce(&R) -> bool) -> bool {
+        let Some(lease) = &mut self.lease else {
+            return false;
+        };
+        let bound = &mut lease.slots[slot as usize];
+        let Bound::Held(receipt, _) = bound else {
+            return false;
+        };
+        if !proved(receipt) {
+            return false;
+        }
+        *bound = Bound::Free;
+        self.settle();
+        true
+    }
+
+    /// At or after the acquire's bound, every snapshot or exclude still out has failed.
+    pub fn overdue(&mut self, now: Instant) {
+        if let Some(lease) = &mut self.lease
+            && let Stage::Snapshots(until) | Stage::Excludes(until) = lease.stage
+            && now >= until
+        {
+            lease.revoke();
+            self.settle();
+        }
+    }
+
+    /// Starts the restores, or asks again for those that failed. Before any exclude, it ends the
+    /// acquire with nothing changed.
+    pub fn revoke(&mut self) {
+        if let Some(lease) = &mut self.lease {
+            lease.revoke();
+        }
+        self.settle();
+    }
+
+    /// Revokes `key`'s lease once `now` is at or after its deadline, and says whether it did. The
+    /// lifetime ends only when the owner's timer calls this, as `expire` always has.
+    pub fn lapse(&mut self, key: Key, now: Instant) -> bool {
+        let due = self
+            .lease
+            .as_ref()
+            .is_some_and(|lease| lease.key == key && now >= lease.deadline);
+        if due {
+            self.revoke();
+        }
+        due
+    }
+
+    pub fn stand(&self) -> Stand {
+        let Some(lease) = &self.lease else {
+            return Stand::Idle;
+        };
+        if lease.granted() {
+            return Stand::Granted;
+        }
+        match lease.stage {
+            Stage::Snapshots(_) | Stage::Excludes(_) | Stage::Granted => Stand::Acquiring,
+            Stage::Revoked
+                if lease
+                    .slots
+                    .iter()
+                    .any(|bound| matches!(bound, Bound::Held(_, Step::Restore(_)))) =>
+            {
+                Stand::Restoring
+            }
+            Stage::Revoked => Stand::Debt,
+        }
+    }
+
+    fn waiting(&mut self, id: AskId, op: Op) -> Option<(&mut ExclusionLease<R>, usize)> {
+        let lease = self
+            .lease
+            .as_mut()
+            .filter(|lease| lease.key.generation == id.generation)?;
+        let index = lease.slots.iter_mut().position(|bound| {
+            bound
+                .wait()
+                .is_some_and(|(waits, asked)| waits == op && *asked == Some(id.serial))
+        })?;
+        Some((lease, index))
+    }
+
+    /// The excludes start once every snapshot is in, the grant comes once every exclude is
+    /// confirmed, and a revoked lease ends once it holds nothing.
+    fn settle(&mut self) {
+        let Some(lease) = &mut self.lease else {
+            return;
+        };
+        if let Stage::Snapshots(until) = lease.stage
+            && !lease
+                .slots
+                .iter()
+                .any(|bound| matches!(bound, Bound::Snapshot { .. }))
+        {
+            lease.stage = Stage::Excludes(until);
+            for bound in &mut lease.slots {
+                if let Bound::Held(_, step @ Step::Read) = bound {
+                    *step = Step::Exclude(None);
+                }
+            }
+        }
+        if lease.covered() {
+            match lease.stage {
+                Stage::Excludes(_) => lease.stage = Stage::Granted,
+                Stage::Revoked => self.lease = None,
+                Stage::Snapshots(_) | Stage::Granted => {}
+            }
+        }
+    }
+}
+
+// The four calls drive the core through `Surfaces`. A lease is driven one way: by these calls,
+// or by asks and answers, never both.
+impl<R> Exclusion<R> {
     pub fn acquire(
         &mut self,
         session: u64,
@@ -93,36 +467,15 @@ impl<R> Exclusion<R> {
         now: Instant,
         surfaces: &mut impl Surfaces<Receipt = R>,
     ) -> Result<Key, Error> {
-        if self.lease.is_some() {
-            return Err(Error::Busy);
+        let key = self.begin(session, input, now)?;
+        let answered = self.answer_at_once(surfaces);
+        if self.live(key.generation) {
+            return Ok(key);
         }
-        self.generation = self.generation.checked_add(1).ok_or(Error::Exhausted)?;
-        let deadline = now.checked_add(LIFETIME).ok_or(Error::Exhausted)?;
-        let key = Key {
-            session,
-            input,
-            generation: LeaseGeneration(self.generation),
-        };
-        let mut receipts = std::array::from_fn(|_| None);
-        for slot in SLOTS {
-            receipts[slot as usize] = surfaces.snapshot(slot)?;
+        match answered {
+            Err((Op::Snapshot, error)) => Err(error),
+            _ => Err(Error::Surface),
         }
-        self.lease = Some(ExclusionLease {
-            key,
-            deadline,
-            revoked: false,
-            receipts,
-        });
-        for slot in SLOTS {
-            let receipt = &self.lease.as_ref().expect("installed above").receipts[slot as usize];
-            if let Some(receipt) = receipt
-                && surfaces.exclude(slot, receipt).is_err()
-            {
-                self.cleanup(surfaces)?;
-                return Err(Error::Surface);
-            }
-        }
-        Ok(key)
     }
 
     pub fn attach<S: Surfaces<Receipt = R>>(
@@ -130,49 +483,32 @@ impl<R> Exclusion<R> {
         slot: Slot,
         surfaces: &mut S,
     ) -> Result<(), Error> {
-        let Some(lease) = &mut self.lease else {
+        let Some(generation) = self.lease.as_ref().map(|lease| lease.key.generation) else {
             return Ok(());
         };
-        if lease.revoked {
-            return Err(Error::Busy);
+        if self.live(generation)
+            && !self.gone_in(slot, S::gone)
+            && let Some(prior) = self.receipt(slot)
+            && surfaces.same(slot, prior)
+        {
+            return Ok(());
         }
-        let receipt = &mut lease.receipts[slot as usize];
-        if let Some(prior) = receipt.as_ref().filter(|prior| !S::gone(prior)) {
-            if surfaces.same(slot, prior) {
-                return Ok(());
-            }
-            self.cleanup(surfaces)?;
-            return Err(Error::Surface);
+        let opened = self.opened(slot);
+        if opened == Err(Error::Busy) {
+            return opened;
         }
-        let result = surfaces.snapshot(slot).and_then(|prior| {
-            *receipt = prior;
-            let prior = receipt.as_ref().ok_or(Error::Surface)?;
-            surfaces.exclude(slot, prior)
-        });
-        if result.is_err() {
-            self.cleanup(surfaces)?;
+        let answered = self.answer_at_once(surfaces).map_err(|(_, error)| error);
+        opened.and(answered)?;
+        if self.live(generation) {
+            Ok(())
+        } else {
+            Err(Error::Surface)
         }
-        result
     }
 
     pub fn cleanup(&mut self, surfaces: &mut impl Surfaces<Receipt = R>) -> Result<(), Error> {
-        let Some(lease) = &mut self.lease else {
-            return Ok(());
-        };
-        lease.revoked = true;
-        for slot in SLOTS {
-            let receipt = &mut lease.receipts[slot as usize];
-            if let Some(prior) = receipt
-                && surfaces.restore(slot, prior).is_ok()
-            {
-                *receipt = None;
-            }
-        }
-        if lease.receipts.iter().any(Option::is_some) {
-            return Err(Error::Surface);
-        }
-        self.lease = None;
-        Ok(())
+        self.revoke();
+        self.answer_at_once(surfaces).map_err(|(_, error)| error)
     }
 
     pub fn expire(
@@ -181,15 +517,51 @@ impl<R> Exclusion<R> {
         now: Instant,
         surfaces: &mut impl Surfaces<Receipt = R>,
     ) -> Result<(), Error> {
-        if self
-            .lease
-            .as_ref()
-            .is_some_and(|lease| lease.key == key && now >= lease.deadline)
-        {
-            self.cleanup(surfaces)
+        if self.lapse(key, now) {
+            self.answer_at_once(surfaces).map_err(|(_, error)| error)
         } else {
             Ok(())
         }
+    }
+
+    /// Takes one ask at a time and answers it through `surfaces` before taking the next, so the
+    /// surfaces see the calls in the order the synchronous machine always made them. Fails with
+    /// the first snapshot or exclude that failed, or with `Surface` while restoration debt remains.
+    /// It answers at the instant it asks, so its answers skip the acquire's bound.
+    fn answer_at_once(
+        &mut self,
+        surfaces: &mut impl Surfaces<Receipt = R>,
+    ) -> Result<(), (Op, Error)> {
+        let mut failed = Ok(());
+        while let Some(Ask { id, slot, op }) = self.next_ask() {
+            match op {
+                Op::Snapshot => {
+                    let read = surfaces.snapshot(slot);
+                    if let Err(error) = &read {
+                        failed = failed.and(Err((op, *error)));
+                    }
+                    self.snapshot_in(id, read);
+                }
+                Op::Exclude => {
+                    let done = surfaces.exclude(slot, self.held(slot));
+                    failed = failed.and(done.map_err(|error| (op, error)));
+                    self.excluded_in(id, done);
+                }
+                Op::Restore => {
+                    let done = surfaces.restore(slot, self.held(slot));
+                    self.restored(id, done);
+                }
+            }
+        }
+        if self.stand() == Stand::Debt {
+            return Err((Op::Restore, Error::Surface));
+        }
+        failed
+    }
+
+    fn held(&self, slot: Slot) -> &R {
+        self.receipt(slot)
+            .expect("an exclude or restore is asked only of a slot holding its receipt")
     }
 
     pub fn matches(&self, session: u64, input: CaptureFor) -> bool {
@@ -209,11 +581,12 @@ impl<R> Exclusion<R> {
         self.lease.as_ref().map(|lease| lease.deadline)
     }
 
-    /// Whether `generation`'s lease still protects capture: in force and not revoked.
+    /// Whether `generation`'s lease still protects capture: granted, every bound surface covered
+    /// or proved gone, and not revoked.
     pub fn live(&self, generation: LeaseGeneration) -> bool {
         self.lease
             .as_ref()
-            .is_some_and(|lease| lease.key.generation == generation && !lease.revoked)
+            .is_some_and(|lease| lease.key.generation == generation && lease.granted())
     }
 }
 
@@ -237,11 +610,11 @@ impl<R> ExclusionLease<R> {
     }
 
     pub fn revoked(&self) -> bool {
-        self.revoked
+        matches!(self.stage, Stage::Revoked)
     }
 
     pub fn holds(&self, slot: Slot) -> bool {
-        self.receipts[slot as usize].is_some()
+        matches!(self.slots[slot as usize], Bound::Held(..))
     }
 }
 
@@ -256,5 +629,7 @@ impl<R> Exclusion<R> {
     }
 }
 
+#[cfg(test)]
+mod receipt_tests;
 #[cfg(test)]
 mod tests;

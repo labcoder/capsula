@@ -515,6 +515,13 @@ impl OutputOwner {
         Ok(())
     }
 
+    /// Whether the queued pair `session` still waits for its registration receipt.
+    pub(in crate::link) fn awaiting_registration(&self, session: u64) -> bool {
+        self.lock()
+            .queue(session)
+            .is_some_and(|(_, owner)| owner.ack.is_some())
+    }
+
     pub(in crate::link) fn acknowledge_queued(
         &self,
         session: u64,

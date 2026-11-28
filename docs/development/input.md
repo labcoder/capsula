@@ -731,7 +731,8 @@ with the default-off features listed in [Gate identity](gate-identity.md#prebuil
 The release driver checks both siblings and stages verified copies under the owned launch's
 `live/1/bin`. Omitting `--prebuilt` retains the earlier Debug Gate invocation.
 Both forms use the shared gate's isolated launch and cleanup. The
-fixture asks once through the product link after connecting; it sends no keys, clicks
+fixture asks once through the product link, as soon as the pair admits turns: a queued pair
+admits them only after the brain acknowledges its audio registration. It sends no keys, clicks
 or pointer motion. The recorded Responses plot is followed by three labeled synthetic
 steps in the same drawing. The run starts no build. Its trial deadline does not include
 all setup and the shared job's cleanup backstop.

@@ -32,8 +32,8 @@ use kumochi_protocol::message::{AudioSession, Narration};
 use kumochi_shell::presence_platform::{Frontend, select_frontend};
 use kumochi_shell::{assets, strings, theme};
 use kumochi_shell_core::{
-    accounts, chat_notice, claude_accounts, drawing, escape, input, instance, link, logging,
-    onboarding, runs, settings, sign_in_mark, threads,
+    accounts, chat_notice, claude_accounts, drawing, escape, input, link, onboarding, runs,
+    settings, sign_in_mark, startup, threads,
 };
 use strings::Strings;
 
@@ -54,31 +54,25 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     #[cfg(not(target_os = "macos"))]
-    let (flags, admitted) = {
-        // The lock's folder and name are admitted before the log opens, so a refusal writes nothing.
-        if instance::InstanceLock::admit_current_session().is_err() {
-            return ExitCode::FAILURE;
-        }
-        let Some(flags) = launch_with_logging(launch, || logging::init(constants::SHELL_LOG))
-        else {
-            return ExitCode::FAILURE;
-        };
-        match acquire_instance() {
-            Ok(lock) => (flags, lock),
-            Err(code) => return code,
-        }
+    let (flags, admitted) = match startup::start(
+        kumochi_shell_core::instance::InstanceLock::admit_current_session,
+        launch,
+        || kumochi_shell_core::logging::init(constants::SHELL_LOG),
+    ) {
+        Ok(started) => started,
+        Err(refused) => return refused.exit_code(),
     };
     // macOS logs into the lock's admitted storage, so the lock comes first and its refusals go unlogged.
     #[cfg(target_os = "macos")]
     let (flags, admitted) = {
-        let instance = match acquire_instance() {
+        let instance = match startup::acquire() {
             Ok(lock) => lock,
-            Err(code) => return code,
+            Err(refused) => return refused.exit_code(),
         };
         let Some(admitted) = platform::Admitted::start(instance) else {
             return ExitCode::FAILURE;
         };
-        let Some(flags) = launch_with_logging(launch, || Ok(())) else {
+        let Some(flags) = startup::logged_flags(launch, || Ok(())) else {
             return ExitCode::FAILURE;
         };
         (flags, admitted)
@@ -95,25 +89,6 @@ fn main() -> ExitCode {
             run_connected(flags)
         }
         Frontend::Local => kumochi_shell::run_local_dock(admitted, initialize_gpui),
-    }
-}
-
-/// The current session's lock, or the exit code when another shell holds it or it fails.
-fn acquire_instance() -> Result<instance::InstanceLock, ExitCode> {
-    match instance::InstanceLock::try_acquire_current_session() {
-        Ok(Some(lock)) => Ok(lock),
-        Ok(None) => {
-            tracing::info!("another shell is running in this session");
-            Err(ExitCode::SUCCESS)
-        }
-        Err(failure) => {
-            if let Some(error) = std::error::Error::source(&failure) {
-                tracing::error!(%error, "{failure}");
-            } else {
-                tracing::error!("{failure}");
-            }
-            Err(ExitCode::FAILURE)
-        }
     }
 }
 
@@ -195,96 +170,4 @@ fn run_connected(flags: presence::Launch) -> ExitCode {
             }
         });
     ExitCode::SUCCESS
-}
-
-fn launch_with_logging(
-    launch: Result<presence::Launch, presence::LaunchError>,
-    init_logging: impl FnOnce() -> Result<(), logging::LoggingError>,
-) -> Option<presence::Launch> {
-    init_logging().ok()?;
-    launch
-        .inspect_err(|error| tracing::error!(%error, "invalid launch flags"))
-        .ok()
-}
-
-#[cfg(test)]
-mod launch_tests {
-    use std::sync::{Arc, Mutex};
-
-    use super::*;
-
-    struct Captured(Arc<Mutex<Vec<u8>>>);
-
-    impl std::io::Write for Captured {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn invalid_launch_flags_get_one_actionable_redacted_diagnostic() {
-        for (args, reason) in [
-            (
-                &["--accounts-fixture=private-fixture-value", "--smoke"][..],
-                Some(
-                    "--accounts-fixture requires a debug build, one fixed state and a quit deadline",
-                ),
-            ),
-            (
-                &[
-                    "--accounts-fixture=enabled",
-                    "--accounts-appearance=private-fixture-value",
-                    "--smoke",
-                ][..],
-                Some(
-                    "--accounts-appearance is optional and accepts light, dark, large or constrained once",
-                ),
-            ),
-            (
-                &[
-                    "--gate-observer=C:/private-fixture-value/observer.log",
-                    "--quit-after-ms=private-fixture-value",
-                ][..],
-                Some("--quit-after-ms must be between 1 and 120000"),
-            ),
-            (&[][..], None),
-        ] {
-            let out = Arc::new(Mutex::new(Vec::new()));
-            let mut logger = None;
-            let parsed = presence::Launch::parse(args.iter().map(|arg| (*arg).to_owned()));
-            let flags = launch_with_logging(parsed, || {
-                logger = Some(tracing::subscriber::set_default(
-                    tracing_subscriber::fmt()
-                        .without_time()
-                        .with_ansi(false)
-                        .with_target(false)
-                        .with_writer({
-                            let out = Arc::clone(&out);
-                            move || Captured(Arc::clone(&out))
-                        })
-                        .finish(),
-                ));
-                Ok(())
-            });
-            drop(logger);
-            let bytes = out.lock().unwrap();
-            let log = std::str::from_utf8(&bytes).unwrap();
-            if let Some(reason) = reason {
-                assert_eq!(flags, None);
-                assert_eq!(log.lines().count(), 1, "expected one startup diagnostic");
-                assert!(log.contains("invalid launch flags"));
-                assert!(log.contains(reason));
-                assert!(!log.contains("private-fixture-value"));
-                assert!(!log.contains("observer.log"));
-            } else {
-                assert_eq!(flags, Some(presence::Launch::default()));
-                assert_eq!(log, "");
-            }
-        }
-    }
 }

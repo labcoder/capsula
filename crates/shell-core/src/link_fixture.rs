@@ -490,6 +490,14 @@ pub(super) fn acknowledge_queued(
 }
 
 #[cfg(debug_assertions)]
+pub(super) fn text_ready(events: &std::sync::mpsc::Receiver<LinkEvent>) {
+    assert!(
+        matches!(next(events), LinkEvent::TextReady { .. }),
+        "the acknowledged pair admits turns"
+    );
+}
+
+#[cfg(debug_assertions)]
 pub(super) fn queued_text(turn: u32, text: &str) -> DataToBrain {
     DataToBrain::TextSubmit {
         turn,
@@ -541,6 +549,7 @@ pub(super) fn queued_named_run_as(
         matches!(next(events), LinkEvent::Settings { .. }),
         "settings preceded the run"
     );
+    text_ready(events);
     assert!(
         matches!(next(events), LinkEvent::RunState { run: RunId(7), .. }),
         "the Shell bound the old worker"

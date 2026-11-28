@@ -11,6 +11,7 @@ A local-first desktop AI presence: a GPUI shell (`kumochi.exe`) and a headless b
 - Dev tasks: `cargo xtask help`
 - CI (`.github/workflows/ci.yml`, Windows) runs fmt, clippy and tests; all must pass.
   Deny runs for dependency/CI configuration changes and every scheduled or manual run.
+  `kumochi-shell-nsh` has its own clippy, test and deny steps; the shared ones exclude it.
   Cloud runs: `cloud-ci` PRs into main, `batch/**` pushes, manual dispatch, daily main checks.
 
 ## Layout
@@ -19,6 +20,7 @@ crates/protocol/   shared data: Secret, and constants.rs (every product name)
 crates/scene/      the drawing format, validator and layout
 crates/brain/      bin kumochid: the headless process
 crates/shell-core/ what the shell knows and decides; no UI framework in its tree
+crates/render/     the drawing renderer: mesh build and frame records; no UI or GPU crate yet
 crates/shell/      bin kumochi: the GPUI app
 crates/session/    the Mac shell-brain session: Noise handshake and records, no I/O
 xtask/             dev tasks in Rust; no scripts in other languages
@@ -33,7 +35,8 @@ THIRD-PARTY-NOTICES.md  notices for incorporated third-party source
   Debug builds use the "Dev" names, so they never touch an installed Kumochi.
 - `unsafe` only in a crate's `platform` module, one operation per block, each with `// SAFETY:`.
 - No `unwrap()` outside tests. `thiserror` between modules; `anyhow` only in `xtask`.
-- tokio runs in the brain only. The shell's UI thread never blocks.
+- tokio runs in the brain only. Kumochi's shell code never uses it; a UI framework's own internal
+  runtime is allowed. The shell's UI thread never blocks.
 - Workspace lints live in `Cargo.toml`; silence one with `#[expect(..., reason = "...")]`.
 - gpui-kit is pinned to a git revision in `[patch.crates-io]`; upgrading it is its own change.
 - A module's `docs/development/` page changes in the same pull request as the module.
