@@ -2439,28 +2439,31 @@ and installed once-state. A refused control ends the connection. Hidden, empty, 
 revoked or superseded observations cannot acknowledge; visibility-only epoch changes never
 reset an already acknowledged activation. Skipped semantic retirement fabricates no paint.
 
-A painter that finishes on another thread paints through `Frames::paint_with`, which hands it a
+`Frames::paint` and `Frames::paint_with` walk the same frames in the same order. `paint` is the
+overlay's: it records each painted bound inside the call and logs a frame that fails to paint.
+`paint_with` is for a painter that finishes on another thread. It hands that painter a
 `PaintTicket` per frame: the scene, its frame epoch and sampled bound, whether the paint can
 count (live, on a shown overlay, with something to paint) and, for a frozen picture, the
-retirement's expiry as `hold_until`. `Drawn::Now` records the bound inside the call, as
-`Frames::paint` always does; `Drawn::Later` records nothing until the owner hands the ticket
-back. `presented` records the bound only for a counting ticket whose scene still has a live,
-unfailed slot at that epoch, so a frozen picture's ticket never counts. `mark_failed` marks the
-live slot with that scene and epoch, or else the frozen picture with them, and `paint_failed`
-clears it as usual: a late failure for a picture frozen since it was painted retires only that
-picture. A view replacement, a slot reset and a hide each start a new epoch from one counter
-that a reconnect doesn't reset, so the epoch fences an answer about an older view, showing or
-connection. It doesn't change on a Stop or a re-placement, nor on a cut that keeps the drawing,
-adds no cut to its history, leaves the same steps activated and finds the view at rest at the
-time its Stop froze it; any other cut either rebuilds the view under a new epoch or removes the
-scene. A hide leaves frozen pictures alone. So a caller checks its own connection, host and
-submission fence before it hands an answer back, and the epoch is the last check, not the only
-one. A re-placement moves a live picture under the same epoch, and it can come from the
-overlay's placement call or from an activation or cut that moves a kept peer. So a caller also
-drops a failure that depended on where the picture was placed, such as a label that would be
-clamped or a pose over budget, when the picture was re-placed since the paint, by any path. A
-failure that doesn't depend on placement still applies, and a presentation earned before a move
-still counts.
+retirement's expiry as `hold_until`. `Drawn::Now` records the bound inside the call, as `paint`
+does; `Drawn::Later` records nothing until the owner hands the ticket back. `paint_with`,
+`presented` and `mark_failed` log nothing, because the log's writer takes a lock, so their
+caller logs a failure outside its paint. `presented` records the bound only for a counting
+ticket whose scene still has a live, unfailed slot at that epoch, so a frozen picture's ticket
+never counts. `mark_failed` marks the live slot with that scene and epoch, or else the frozen
+picture with them, and `paint_failed` clears it as usual: a late failure for a picture frozen
+since it was painted retires only that picture. A view replacement, a slot reset and a hide each
+start a new epoch from one counter that a reconnect doesn't reset, so the epoch fences an answer
+about an older view, showing or connection. It doesn't change on a Stop or a re-placement, nor
+on a cut that keeps the drawing, adds no cut to its history, leaves the same steps activated and
+finds the view at rest at the time its Stop froze it; any other cut either rebuilds the view
+under a new epoch or removes the scene. A hide leaves frozen pictures alone. So a caller checks
+its own connection, host and submission fence before it hands an answer back, and the epoch is
+the last check, not the only one. A re-placement moves a live picture under the same epoch, and
+it can come from the overlay's placement call or from an activation or cut that moves a kept
+peer. So a caller also drops a failure that depended on where the picture was placed, such as a
+label that would be clamped or a pose over budget, when the picture was re-placed since the
+paint, by any path. A failure that doesn't depend on placement still applies, and a presentation
+earned before a move still counts.
 
 With [drawing timing enabled](input.md#offline-drawing-timing), the shell saves a QPC
 stamp at the first successful paint for that scene, epoch and bound. It reports the

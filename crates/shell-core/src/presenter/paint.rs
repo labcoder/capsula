@@ -314,16 +314,65 @@ impl Frames {
         &self,
         mut paint: impl FnMut(&Frame, &mut dyn SceneCache) -> Result<(), E>,
     ) -> bool {
-        self.paint_with(|_, frame, cache| paint(frame, cache).map(|()| Drawn::Now))
+        let shown = self.shown;
+        let mut failed = false;
+        let mut draw = |slot: &Slot, live: bool| {
+            if slot.failed.get() {
+                return;
+            }
+            let result = paint(&slot.frame, &mut **slot.cache.borrow_mut());
+            match result {
+                Ok(()) if live && shown && !slot.frame.items().is_empty() => {
+                    slot.painted.set(slot.sampled);
+                }
+                Ok(()) => {}
+                Err(_) => {
+                    tracing::warn!("a drawing couldn't paint; clearing it");
+                    slot.failed.set(true);
+                    failed = true;
+                }
+            }
+        };
+        if let Some(retirement) = &self.retirement
+            && retirement.epoch.is_none()
+        {
+            let mut selected = [None; MAX_VISIBLE_SCENES];
+            let live = self
+                .slots
+                .iter()
+                .flatten()
+                .filter(|(id, _)| *id != retirement.successor)
+                .map(|(id, slot)| (*id, slot, true));
+            let frozen = retirement
+                .pictures
+                .iter()
+                .flatten()
+                .map(|p| (p.id, &p.slot, false));
+            for (place, slot) in selected.iter_mut().zip(live.chain(frozen)) {
+                *place = Some(slot);
+            }
+            selected.sort_unstable_by_key(|slot| slot.map(|(id, _, _)| id));
+            for (_, slot, live) in selected.into_iter().flatten() {
+                draw(slot, live);
+            }
+        } else {
+            for (_, slot) in self.slots.iter().flatten() {
+                draw(slot, true);
+            }
+        }
+        failed
     }
 
-    /// [`Frames::paint`] for a painter that may answer later: each frame comes with its ticket,
-    /// and a `Later` answer records nothing until [`Frames::presented`] or
-    /// [`Frames::mark_failed`] hands the ticket back.
+    /// [`Frames::paint`] for a painter that may answer later: the same traversal, with each frame's
+    /// ticket. `Drawn::Now` records as `paint` does; a `Later` answer records nothing until
+    /// [`Frames::presented`] or [`Frames::mark_failed`] hands the ticket back. It logs nothing:
+    /// its caller logs a failure outside its paint.
     pub fn paint_with<E>(
         &self,
         mut paint: impl FnMut(PaintTicket, &Frame, &mut dyn SceneCache) -> Result<Drawn, E>,
     ) -> bool {
+        // shortcut: copies paint's traversal without its warning; once the renderer's host is the
+        // only painter, paint becomes a call to this and paint_failed logs each failure it clears.
         let shown = self.shown;
         let mut failed = false;
         let mut draw = |scene: SceneId, slot: &Slot, hold_until: Option<Instant>| {
@@ -613,22 +662,9 @@ impl Presenter {
 
     /// Clears every scene whose frame failed to paint.
     pub fn paint_failed(&mut self) -> Vec<Effect> {
-        let (pictures, failed) = {
-            let frames = self.frames.borrow();
-            let pictures = frames
-                .retirement
-                .iter()
-                .flat_map(|retirement| retirement.pictures.iter().flatten())
-                .filter(|picture| picture.slot.failed.get())
-                .count();
-            (pictures, frames.failed())
-        };
-        // Logged here, not while painting: the log's writer takes a lock.
-        for _ in 0..pictures + failed.iter().flatten().count() {
-            tracing::warn!("a drawing couldn't paint; clearing it");
-        }
         self.frames.borrow_mut().retire_failed_pictures();
         let mut out = Out::default();
+        let failed = self.frames.borrow().failed();
         for id in failed.into_iter().flatten() {
             self.release(id);
             self.forget_failed(id, &mut out);

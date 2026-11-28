@@ -990,3 +990,58 @@ fn an_older_view_s_late_failure_leaves_the_newer_frozen_picture_in_place() {
     assert_eq!(presenter.frames.borrow().retirement_bytes(), 0);
     assert_eq!(picture(&presenter).len(), 1);
 }
+
+#[test]
+fn paint_and_paint_with_answering_now_draw_and_record_the_same() {
+    const SURVIVOR: SceneId = SceneId(10);
+    let setup = |handoff: bool| {
+        let (mut presenter, now, job) =
+            recovering(vec![(SURVIVOR, rect("survivor")), (LIVE, super::pair())]);
+        presenter
+            .completed(job.run(&mut Shaper), now)
+            .expect("recovery");
+        assert!(presenter.sample_at(now).expect("a sample").0.visible);
+        presenter.frames.borrow_mut().shown = true;
+        if handoff {
+            replace(&mut presenter, &[LIVE], NEXT, now);
+            begin(&mut presenter, NEXT, now);
+        }
+        presenter
+    };
+    let drawn = |presenter: &Presenter, with: bool| {
+        let mut items = Vec::new();
+        let frames = presenter.frames.borrow();
+        let failed = if with {
+            frames.paint_with(|_, frame, _| {
+                items.push(frame.items().to_vec());
+                Ok::<_, ()>(Drawn::Now)
+            })
+        } else {
+            frames.paint(|frame, _| {
+                items.push(frame.items().to_vec());
+                Ok::<_, ()>(())
+            })
+        };
+        assert!(!failed);
+        let painted: Vec<_> = frames
+            .observations()
+            .into_iter()
+            .flatten()
+            .map(|(scene, _, bound)| (scene, bound))
+            .collect();
+        (items, frames.observations(), painted)
+    };
+    for (handoff, painted) in [
+        (false, vec![(SURVIVOR, 1), (LIVE, 1)]),
+        (true, vec![(SURVIVOR, 1)]),
+    ] {
+        let by_paint = drawn(&setup(handoff), false);
+        assert_eq!(
+            by_paint.0.iter().map(Vec::len).collect::<Vec<_>>(),
+            [1, 2],
+            "the survivor, then the live or frozen pair"
+        );
+        assert_eq!(by_paint.2, painted, "handoff {handoff}");
+        assert_eq!(drawn(&setup(handoff), true), by_paint, "handoff {handoff}");
+    }
+}
