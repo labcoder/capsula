@@ -2209,10 +2209,9 @@ that still names a locally cleared scene causes its idempotent clear to be sent 
 
 A shell with no drawing surface still receives scene traffic, because an empty text profile
 doesn't stop the brain drawing. `presenter::Refuser` is the contract such a shell follows in
-place of a `Presenter`, so every shell disposes of scenes the same way; nothing calls it
-yet. The caller passes every delivered `Data` and `SceneData` frame once. The link's
-`scene_naming` names exactly the kinds the data reader tags as `SceneData`, and the caller
-uses `Naming::Other` when it returns `None`:
+place of a `Presenter`; nothing calls it yet. The caller passes every delivered `Data` and
+`SceneData` frame once. The link's `scene_naming` names exactly the kinds the data reader
+tags as `SceneData`, and the caller uses `Naming::Other` when it returns `None`:
 
 | Frame | `scene_naming` | Refuser returns |
 |---|---|---|
@@ -2224,8 +2223,8 @@ uses `Naming::Other` when it returns `None`:
 
 For the open connection each frame's wire bytes come back once, for the caller to grant; a
 stale generation or a closed connection gets nothing. `ScenesV1` and legacy `Scenes` are
-control lists: they owe nothing and never reach the refuser, so the user's stored drawings
-survive the connect. `SceneFailed` ends the brain's whole scene, so a call that draws onto a
+control lists: they owe nothing and never reach the refuser, so connecting alone makes it
+clear no stored drawing. `SceneFailed` ends the brain's whole scene, so a call that draws onto a
 retained scene clears it; only Dev and Gate data can see that, because `kumochi-nsh` refuses
 the release identity. Refusals are remembered until retirement, at most 64 (the presenter's
 tombstone count); a late repeat for a forgotten scene is inert, since the brain ignores
