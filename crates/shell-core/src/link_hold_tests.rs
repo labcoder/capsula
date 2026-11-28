@@ -3,7 +3,7 @@ use super::*;
 use crate::platform::microphone::{MicError, Mode};
 use kumochi_protocol::message::{
     AccountOp, ConnectionKind, ConnectionOp, Effort, GestureId, HoldStatus, MicPcm, ModelChoice,
-    ModelSlug, SettingsOp, ThreadOp,
+    ModelSlug, SceneId, SettingsOp, ThreadOp,
 };
 use kumochi_protocol::voice::VoicePart;
 use std::sync::atomic::Ordering;
@@ -26,6 +26,23 @@ fn closing_legacy_session_revokes_native_hold_while_the_outbox_is_held() {
         session.close();
         assert!(!link.handle.can_start_voice_gesture(generation));
     });
+    link.handle.end(&session);
+    drop(link.control);
+    assert!(link.link.join().unwrap());
+}
+
+#[test]
+fn a_legacy_scene_refusal_does_not_wait_for_the_outbox() {
+    let link = attended("legacy-scene-refusal");
+    let session = connected(next(&patient(link.events.clone())));
+    let refusal = ControlToBrain::SceneFailed { scene: SceneId(7) };
+    with_outbox_held(&link.handle, &session, || {
+        assert!(link.handle.send_control(&session, refusal.clone()));
+    });
+    assert_eq!(
+        frame::read::<ControlToBrain>(&mut &link.control, Pipe::Control).unwrap(),
+        Some(refusal)
+    );
     link.handle.end(&session);
     drop(link.control);
     assert!(link.link.join().unwrap());
